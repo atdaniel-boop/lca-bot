@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase
-// Versão 2.1 — IA unificada, timeout, desfazeres, check-in
+// Versão 2.2 — fallback inteligente, dia de vencimento nos planos
 
 const https = require('https');
 
@@ -189,7 +189,11 @@ function buildContexto(dados, mes) {
       // Vencimento = dia de vencimento no mês seguinte ao último mês pago
       const venc = new Date(parseInt(lp[0]), parseInt(lp[1]), diaVenc);
       const dias = Math.round((venc-hojeTs)/86400000);
-      return { nome: a.nome, plano: a.tipo_plano, dias, dataVenc: venc.toLocaleDateString('pt-BR'), ultimoMes: lastMes };
+      return { nome: a.nome, plano: a.tipo_plano, dias,
+        dataVenc: venc.toLocaleDateString('pt-BR'),
+        diaVenc: String(venc.getDate()).padStart(2,'0'),
+        mesVenc: String(venc.getMonth()+1).padStart(2,'0'),
+        ultimoMes: lastMes };
     }).filter(p => p && p.dias >= -5 && p.dias <= 30)
     .sort((a,b) => a.dias-b.dias);
 
@@ -260,7 +264,7 @@ DADOS (${mes}):
 Ativos: ${ctx.estudio.ativos} | Inativos: ${ctx.estudio.inativos}
 Receita: ${brl(ctx.financeiro.receita)} | Professoras: ${brl(ctx.financeiro.professoras)} | Custos: ${brl(ctx.financeiro.custos)} | Resultado: ${brl(ctx.financeiro.resultado)}
 Inadimplentes: ${ctx.inadimplentes.map(a=>a.nome).join(', ')||'Nenhum'}
-Planos vencendo (30 dias): ${ctx.planosVencendo.length?ctx.planosVencendo.map(p=>p.nome+' ('+p.plano+', vence '+p.dataVenc+')').join(' | '):'Nenhum'}
+Planos vencendo (30 dias): ${ctx.planosVencendo.length?ctx.planosVencendo.map(p=>p.nome+' ('+p.plano+', vence dia '+p.diaVenc+'/'+p.mesVenc+')').join(' | '):'Nenhum'}
 Custos: ${ctx.custosMes.map(c=>c.desc+' '+brl(c.valor)).join(', ')||'Nenhum'}
 Faltas frequentes: ${ctx.faltasFrequentes.join(', ')||'Nenhuma'}
 
@@ -523,12 +527,34 @@ async function processar(msg) {
     );
   }
 
-  // Consulta livre — IA respondeu direto
+  // Consulta livre — IA respondeu direto ou fallback estruturado
   if (aiResult.tipo === 'consulta') {
     clearTimeout(_timer);
     if (_timedOut) return;
-    if (!aiResult.resposta) return tgSend(chatId, '⚠️ O Gemini não respondeu (cota esgotada ou sobrecarga). Tente em 1 minuto.');
-    return tgSend(chatId, aiResult.resposta);
+    if (aiResult.resposta) return tgSend(chatId, aiResult.resposta);
+    // Fallback: resposta estruturada sem IA
+    const ctx2 = buildContexto(dados, mes);
+    const tL2  = texto.toLowerCase();
+    let fallback = '';
+    if (tL2.includes('venc') || tL2.includes('plano')) {
+      fallback = ctx2.planosVencendo.length
+        ? '*Planos vencendo (próx. 30 dias):*\n' +
+          ctx2.planosVencendo.map(p => '• '+p.nome+' — '+p.plano+', vence '+p.dataVenc+' ('+p.dias+' dias)').join('\n')
+        : 'Nenhum plano vencendo nos próximos 30 dias.';
+    } else if (tL2.includes('inadim') || tL2.includes('não pagou') || tL2.includes('nao pagou')) {
+      fallback = ctx2.inadimplentes.length
+        ? '*Inadimplentes em '+mes+':*\n' + ctx2.inadimplentes.map(a=>'• '+a.nome+' ('+a.plano+')').join('\n')
+        : '✅ Todos pagaram em '+mes+'.';
+    } else if (tL2.includes('result') || tL2.includes('resumo') || tL2.includes('financ')) {
+      fallback = '*Resumo '+mes+':*\n'+
+        '💰 Receita: '+brl(ctx2.financeiro.receita)+'\n'+
+        '👩 Professoras: '+brl(ctx2.financeiro.professoras)+'\n'+
+        '🔴 Custos: '+brl(ctx2.financeiro.custos)+'\n'+
+        '📈 Resultado: '+brl(ctx2.financeiro.resultado);
+    } else {
+      fallback = '⚠️ Gemini indisponível agora. Tente em 1 minuto ou reformule com um comando direto.';
+    }
+    return tgSend(chatId, fallback);
   }
 
   // Ação que altera dados
