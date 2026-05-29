@@ -160,37 +160,28 @@ function buildContexto(dados, mes) {
   // Calcular planos vencendo (próximos 30 dias)
   const hojeTs = new Date(); hojeTs.setHours(0,0,0,0);
   const DUR = { mensal:1, trimestral:3, semestral:6 };
-  const planosVencendo = ativos.map(a => {
-    // Última renovação
-    let ultRen = null;
-    const hist = typeof a.historico_alteracoes==='string'?JSON.parse(a.historico_alteracoes||'[]'):(a.historico_alteracoes||[]);
-    hist.forEach(h => {
-      if (h.tipo==='renovacao' && h.data) {
-        const dp = h.data.split('/');
-        const d = new Date(parseInt(dp[2]), parseInt(dp[1])-1, parseInt(dp[0]));
-        if (!ultRen || d > ultRen) ultRen = d;
-      }
-    });
-    if (!ultRen && a.data_matricula) {
-      const dm = a.data_matricula.split('-');
-      ultRen = new Date(parseInt(dm[0]), parseInt(dm[1])-1, parseInt(dm[2]));
-    }
-    // Fallback: use first payment as start date
-    if (!ultRen) {
+  const planosVencendo = ativos
+    .filter(a => a.tipo_plano === 'trimestral' || a.tipo_plano === 'semestral')
+    .map(a => {
+      // Usar último pagamento como base de cálculo (mais confiável que data_matricula)
       const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
       const keys = Object.keys(pags).filter(k=>pags[k]>0).sort();
-      if (keys.length) {
-        const kp = keys[0].split('-');
-        ultRen = new Date(parseInt(kp[0]), parseInt(kp[1])-1, 1);
-      }
-    }
-    if (!ultRen) return null;
-    const dur = DUR[a.tipo_plano]||1;
-    const venc = new Date(ultRen.getFullYear(), ultRen.getMonth()+dur, ultRen.getDate());
-    const dias = Math.round((venc-hojeTs)/86400000);
-    return { nome: a.nome, plano: a.tipo_plano, dias, dataVenc: venc.toLocaleDateString('pt-BR') };
-  }).filter(p => p && p.dias >= 0 && p.dias <= 30)
+      if (!keys.length) return null;
+      // Último mês pago
+      const lastKey = keys[keys.length-1];
+      const lp = lastKey.split('-');
+      const ultPag = new Date(parseInt(lp[0]), parseInt(lp[1])-1, 1);
+      const dur = DUR[a.tipo_plano]||3;
+      // Vencimento = último pagamento + duração do plano
+      const venc = new Date(ultPag.getFullYear(), ultPag.getMonth()+dur, parseInt(a.dia_vencimento||10));
+      const dias = Math.round((venc-hojeTs)/86400000);
+      return { nome: a.nome, plano: a.tipo_plano, dias, dataVenc: venc.toLocaleDateString('pt-BR'), ultPag: lastKey };
+    }).filter(p => p && p.dias >= -5 && p.dias <= 30)
     .sort((a,b) => a.dias-b.dias);
+  
+  if (planosVencendo.length > 0) {
+    console.log('Planos vencendo:', planosVencendo.map(p=>p.nome+' '+p.dias+'d').join(', '));
+  }
 
   return {
     hoje: new Date().toLocaleDateString('pt-BR'),
@@ -490,10 +481,6 @@ async function processar(msg) {
   }
 
   await tgSend(chatId, '⏳ Processando...');
-  // Timeout geral de 30s para evitar travar
-  const processTimer = setTimeout(() => {
-    tgSend(chatId, '⚠️ Tempo esgotado. O servidor pode estar sobrecarregado. Tente novamente.');
-  }, 30000);
   const mes = new Date().toISOString().slice(0,7);
 
   let dados;
@@ -530,8 +517,7 @@ async function processar(msg) {
   // Consulta livre — IA responde diretamente
   if (intencao === 'consulta_livre') {
     const resp = await consultaLivre(texto, dados, mes);
-    clearTimeout(processTimer);
-  return tgSend(chatId, resp || '❌ Não consegui gerar uma resposta.');
+    return tgSend(chatId, resp || '❌ Não consegui gerar uma resposta.');
   }
 
   // Ação que altera dados — extrair parâmetros e executar
@@ -545,7 +531,6 @@ async function processar(msg) {
   }
 
   const resultado = await executar(intencao, params, dados);
-  clearTimeout(processTimer);
   return tgSend(chatId, resultado || '❌ Não consegui executar a ação.');
 }
 
