@@ -38,7 +38,7 @@ function tgSend(chatId, text) {
     { chat_id: chatId, text, parse_mode: 'Markdown' });
 }
 function tgUpdates(offset) {
-  return req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${offset}&timeout=25`, 'GET', {}, null);
+  return req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${offset}&timeout=25`, 'GET', {}, null, 35000);
 }
 
 // ── Supabase ──────────────────────────────────────────────────────
