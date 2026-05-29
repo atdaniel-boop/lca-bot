@@ -387,10 +387,22 @@ async function processar(msg) {
     return tgSend(chatId, '❌ Erro ao conectar ao banco de dados: ' + e.message);
   }
 
-  try {
-    cmd = await interpretar(texto, dados);
-  } catch(e) {
-    return tgSend(chatId, '❌ Erro na IA: ' + e.message);
+  // Detectar remoção ANTES da IA
+  var textoL = texto.toLowerCase();
+  var ehRemocao = ['remover','apagar','deletar','excluir','desfazer'].some(function(p){ return textoL.indexOf(p)>=0; });
+  if (ehRemocao && textoL.indexOf('custo')>=0) {
+    var cats=['aluguel','energia','luz','agua','internet','telefone','limpeza','material'];
+    var catAchada = cats.find(function(cat){ return textoL.indexOf(cat)>=0; }) || null;
+    var mM = texto.match(/[0-9]{4}-[0-9]{2}/);
+    cmd = { acao:'remover_custo', params:{ categoria:catAchada, descricao:catAchada, mes: mM ? mM[0] : new Date().toISOString().slice(0,7) }, confirmacao:'' };
+    console.log('Remocao detectada diretamente:', catAchada);
+  } else {
+    try {
+      cmd = await interpretar(texto, dados);
+    } catch(e) {
+      return tgSend(chatId, '❌ Erro na IA: ' + e.message);
+    }
+    
   }
 
   if (!cmd) {
