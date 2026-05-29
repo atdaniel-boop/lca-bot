@@ -74,28 +74,25 @@ function sbPatch(table, query, body) {
 
 // ── Gemini ────────────────────────────────────────────────────────
 async function ai(prompt) {
-  var models = [
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-pro'
-  ];
-  for (var i = 0; i < models.length; i++) {
-    try {
-      var r = await req(
-        'https://generativelanguage.googleapis.com/v1beta/models/' + models[i] + ':generateContent?key=' + GEMINI_KEY,
-        'POST',
-        { 'Content-Type': 'application/json' },
-        { contents: [{ parts: [{ text: prompt }] }] }
-      );
-      if (r && r.candidates && r.candidates[0]) {
-        return r.candidates[0].content.parts[0].text.trim();
-      }
-      console.error('Gemini ' + models[i] + ' response:', JSON.stringify(r).slice(0, 200));
-    } catch(e) {
-      console.error('Gemini ' + models[i] + ' error:', e.message);
+  try {
+    var r = await req(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + GEMINI_KEY,
+      'POST',
+      { 'Content-Type': 'application/json' },
+      { contents: [{ parts: [{ text: prompt }] }] }
+    );
+    console.log('Gemini raw:', JSON.stringify(r).slice(0, 300));
+    if (r && r.candidates && r.candidates[0] && r.candidates[0].content) {
+      return r.candidates[0].content.parts[0].text.trim();
     }
+    if (r && r.error) {
+      console.error('Gemini API error:', r.error.message);
+    }
+    return null;
+  } catch(e) {
+    console.error('Gemini exception:', e.message);
+    return null;
   }
-  return null;
 }
 
 // ── Dados do sistema ──────────────────────────────────────────────
