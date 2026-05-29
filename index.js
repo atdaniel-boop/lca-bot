@@ -102,15 +102,11 @@ async function ai(prompt) {
 }
 
 // ── Dados do sistema ──────────────────────────────────────────────
-async function getDados(mes) {
-  var mesFiltro = mes || new Date().toISOString().slice(0, 7);
+async function getDados() {
   var results = await Promise.all([
-    // Todos os alunos (ativos e inativos) para capturar pagamentos do mês
     sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,pagamentos,pagamentos_pendentes,pagamentos_rescisao'),
-    // Custos filtrados por mês direto no Supabase
-    sbGet('custos', 'select=*&mes=eq.' + mesFiltro),
-    // Aulas do mês para calcular professoras
-    sbGet('aulas', 'select=*&mes=eq.' + mesFiltro)
+    sbGet('custos', 'select=*&order=id.desc'),
+    sbGet('aulas',  'select=*&order=id.desc')
   ]);
   return {
     alunos: Array.isArray(results[0]) ? results[0] : [],
@@ -199,8 +195,9 @@ async function executar(cmd, dados) {
       total += liq;
       if (v > 0) pagos++;
     });
-    // Custos: já vêm filtrados por mês do Supabase
-    var totalCustos = dados.custos.reduce(function(s,c){ return s + (c.valor||0); }, 0);
+    // Custos: filtrar por mês
+    var custosMes = dados.custos.filter(function(c){ return c.mes === mes; });
+    var totalCustos = custosMes.reduce(function(s,c){ return s + (c.valor||0); }, 0);
     // Professoras: calcular do mês
     var totalProf = 0;
     var ativos = dados.alunos.filter(function(a){ return a.ativo==='SIM'; });
@@ -213,7 +210,7 @@ async function executar(cmd, dados) {
     }, 0);
     totalProf += recMonica * 0.4;
     // Kelly: soma das horas × R$35
-    var aulasKelly = dados.aulas.filter(function(k){ return k.prof_id==='kelly'; });
+    var aulasKelly = dados.aulas.filter(function(k){ return k.prof_id==='kelly' && k.mes===mes; });
     totalProf += aulasKelly.reduce(function(s,k){ return s + (k.horas||0)*35; }, 0);
     var resultado = total - totalProf - totalCustos;
     return '📊 *Resumo ' + mes + '*\n\n' +
@@ -359,7 +356,7 @@ async function processar(msg) {
 
   var dados, cmd;
   try {
-    dados = await getDados(cmd.params && cmd.params.mes ? cmd.params.mes : new Date().toISOString().slice(0,7));
+    dados = await getDados();
   } catch(e) {
     return tgSend(chatId, '❌ Erro ao conectar ao banco de dados: ' + e.message);
   }
