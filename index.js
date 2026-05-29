@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase
-// Versão 2.6 — timer não envia se já respondeu
+// Versão 2.8 — IA unificada, sem keywords, pagamento infere valor, modelos corretos
 
 const https = require('https');
 
@@ -60,7 +60,7 @@ function aiWithTimeout(promise, ms) {
 }
 
 async function ai(prompt) {
-  const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash-lite'];
+  const models = ['gemini-2.5-flash-lite', 'gemini-2.5-flash'];
   for (const model of models) {
     try {
       const r = await aiWithTimeout(req(
@@ -70,8 +70,9 @@ async function ai(prompt) {
         8000
       ), 9000);
       if (r?.candidates?.[0]?.content) return r.candidates[0].content.parts[0].text.trim();
-      if (r?.error?.code === 503 || r?.error?.code === 429) { console.log(model+' indisponível ('+r.error.code+'), tentando próximo...'); continue; }
-      if (r?.error) { console.error('Gemini erro em '+model+':', r.error.code, r.error.message?.slice(0,80)); continue; }
+      if (r?.error?.code === 503 || r?.error?.code === 429) { console.log(model+' indisponível ('+r.error.code+')'); continue; }
+      if (r?.error) { console.error('Gemini erro em '+model+':', r.error.code, r.error.message?.slice(0,60)); continue; }
+      console.log(model+' sem candidatos — resposta:', JSON.stringify(r).slice(0,80));
     } catch(e) {
       console.error('Gemini '+model+':', e.message);
       if (e.message.includes('timeout')) continue;
@@ -231,48 +232,59 @@ async function processarComIA(texto, dados, mes) {
 
   // Detectar ações por palavras-chave (sem IA) — economiza cota
   const tL = texto.toLowerCase();
-  const KEYWORDS = [
-    ['lancar_custo',        ['custo ','despesa','aluguel','energia','luz ','internet']],
-    ['lancar_aula',         ['aula ','horas de aula','deu aula','deu 1','deu 2','deu 3']],
-    ['confirmar_pagamento', ['pagou','pagamento']],
-    ['calcular_rescisao',   ['rescindir','rescisão','rescisao','cancelar contrato']],
-    ['remover_custo',       ['remover custo','apagar custo','deletar custo','excluir custo','desfazer custo']],
-    ['remover_custo_id',    ['remover custo id','apagar custo id']],
-    ['desfazer_pagamento',  ['desfazer pagamento','cancelar pagamento']],
-    ['desfazer_aula',       ['remover aula','apagar aula','desfazer aula']],
-    ['checkin',             ['presente','faltou','falta hoje','reposição','repôs','check-in','checkin']],
-    ['desfazer_checkin',    ['desfazer check']],
-  ];
-  for (const [acao, kws] of KEYWORDS) {
-    if (kws.some(k => tL.includes(k))) {
-      console.log('Ação por keyword:', acao);
-      return { tipo: 'acao', intencao: acao };
-    }
-  }
-
+  // Saudação e ajuda — sem IA
   if (['oi','olá','ola','bom dia','boa tarde','boa noite'].some(k => tL.startsWith(k))) {
     return { tipo: 'saudacao' };
   }
-  if (['ajuda','help','comando','como usar','o que'].some(k => tL.includes(k))) {
+  if (['ajuda','help','comando','como usar'].some(k => tL.includes(k))) {
     return { tipo: 'ajuda' };
   }
 
-  // Consulta livre — UMA chamada ao Gemini
+  // UMA chamada ao Gemini — classifica E responde/extrai tudo
+  const ultimoValor = {};
+  dados.alunos.forEach(function(a) {
+    var pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+    var keys = Object.keys(pags).filter(function(k){return pags[k]>0;}).sort();
+    if (keys.length) ultimoValor[a.nome] = pags[keys[keys.length-1]];
+  });
+
   const prompt = `Você é o assistente do LCA Studio de Pilates (Rio de Janeiro, ${ctx.hoje}).
-Responda diretamente em Markdown simples. Máximo 5 linhas curtas.
 
 DADOS (${mes}):
-Ativos: ${ctx.estudio.ativos} | Inativos: ${ctx.estudio.inativos}
+Ativos: ${ctx.estudio.ativos} | Inadimplentes: ${ctx.inadimplentes.map(function(a){return a.nome;}).join(', ')||'Nenhum'}
 Receita: ${brl(ctx.financeiro.receita)} | Professoras: ${brl(ctx.financeiro.professoras)} | Custos: ${brl(ctx.financeiro.custos)} | Resultado: ${brl(ctx.financeiro.resultado)}
-Inadimplentes: ${ctx.inadimplentes.map(a=>a.nome).join(', ')||'Nenhum'}
-Planos vencendo (30 dias): ${ctx.planosVencendo.length?ctx.planosVencendo.map(p=>p.nome+' ('+p.plano+', vence dia '+p.diaVenc+'/'+p.mesVenc+')').join(' | '):'Nenhum'}
-Custos: ${ctx.custosMes.map(c=>c.desc+' '+brl(c.valor)).join(', ')||'Nenhum'}
+Planos vencendo: ${ctx.planosVencendo.length?ctx.planosVencendo.map(function(p){return p.nome+' ('+p.plano+', dia '+p.diaVenc+'/'+p.mesVenc+', '+p.dias+' dias)';}).join(' | '):'Nenhum'}
+Custos lancados: ${ctx.custosMes.map(function(c){return c.desc+' '+brl(c.valor);}).join(', ')||'Nenhum'}
 Faltas frequentes: ${ctx.faltasFrequentes.join(', ')||'Nenhuma'}
+Ultimo pagamento por aluno: ${JSON.stringify(ultimoValor)}
 
-PERGUNTA: ${texto}`;
+MENSAGEM: "${texto}"
 
-  const resp = await ai(prompt);
-  return { tipo: 'consulta', resposta: resp };
+Retorne JSON (sem markdown):
+{
+  "tipo": "consulta" ou "acao",
+  "resposta": "resposta em Markdown se consulta, null se acao",
+  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin,
+  "params": {
+    "aluno_nome": string ou null,
+    "valor": numero (se pagamento sem valor informado, use o ultimo pagamento do aluno acima) ou null,
+    "mes": "YYYY-MM" ou null (atual ${mes}),
+    "categoria": string ou null,
+    "descricao": string ou null,
+    "professora": string ou null,
+    "horas": numero ou null,
+    "meses_utilizados": numero ou null,
+    "data": "YYYY-MM-DD" ou null (hoje ${new Date().toISOString().slice(0,10)}),
+    "hora": "HH:MM" ou null,
+    "status_checkin": presente ou falta ou repos ou null,
+    "custo_id": numero ou null
+  }
+}`;
+
+  const raw = await aiJSON(prompt);
+  if (!raw) return { tipo: 'consulta', resposta: null };
+  console.log('IA:', raw.tipo, raw.intencao||'consulta');
+  return raw;
 }
 
 // ── Extrair parâmetros de ação ────────────────────────────────────
@@ -539,6 +551,33 @@ async function processar(msg) {
     );
   }
 
+  // Consultas diretas — sem IA, resposta imediata
+  if (aiResult.tipo === 'consulta_direta') {
+    clearTimeout(_timer);
+    const tL3 = texto.toLowerCase();
+    let resp3 = '';
+    if (aiResult.intencao === 'consulta_inadimplentes') {
+      const inads = dados.alunos.filter(function(a) {
+        if (a.ativo !== 'SIM') return false;
+        var pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+        return !(pags[mes]||0);
+      });
+      resp3 = inads.length
+        ? '*Inadimplentes em '+mes+' ('+inads.length+'):*\n' + inads.map(a=>'• '+a.nome+' ('+a.tipo_plano+')').join('\n')
+        : '✅ Todos os alunos pagaram em '+mes+'.';
+    } else if (aiResult.intencao === 'consulta_financeiro') {
+      const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});return s+(p[mes]||0);},0);
+      const cst = dados.custos.filter(function(c){return c.mes===mes;}).reduce(function(s,c){return s+(c.valor||0);},0);
+      resp3 = '*Resumo '+mes+':*\n💰 Receita: '+brl(rec)+'\n🔴 Custos: '+brl(cst)+'\n📈 Bruto: '+brl(rec-cst);
+    } else if (aiResult.intencao === 'consulta_vencendo') {
+      const pv = dados._planosVencendo || [];
+      resp3 = pv.length
+        ? '*Planos vencendo (próx. 30 dias):*\n' + pv.map(p=>'• '+p.nome+' — '+p.plano+', dia '+p.diaVenc+'/'+p.mesVenc+' ('+p.dias+' dias)').join('\n')
+        : 'Nenhum plano vencendo nos próximos 30 dias.';
+    }
+    _respondeu=true; return tgSend(chatId, resp3 || '❌ Sem dados.');
+  }
+
   // Consulta livre — IA respondeu direto ou fallback estruturado
   if (aiResult.tipo === 'consulta') {
     clearTimeout(_timer);
@@ -576,19 +615,24 @@ async function processar(msg) {
     }
   }
 
-  // Ação que altera dados
-  const intencao = aiResult.intencao;
-  const params = await extrairParams(intencao, texto, dados);
-  if (!params) {
+  // Ação — params já vêm da IA
+  const intencao = aiResult.intencao || 'desconhecido';
+  if (!intencao || intencao === 'desconhecido') {
     clearTimeout(_timer);
-    return tgSend(chatId, '❌ Não consegui extrair os dados. Tente reformular.');
+    _respondeu=true; return tgSend(chatId, '🤔 Não entendi. Mande *ajuda* para ver exemplos.');
+  }
+  const params = aiResult.params || {};
+  // Tentar encontrar aluno_id pelo nome se não veio
+  if (params.aluno_nome && !params.aluno_id) {
+    const al = dados.alunos.find(function(a){ return a.nome.toLowerCase().includes((params.aluno_nome||'').toLowerCase()); });
+    if (al) params.aluno_id = al.id;
   }
 
   // Rescisão: mostrar cálculo e aguardar confirmação
-  if (aiResult.intencao === 'calcular_rescisao') {
+  if (intencao === 'calcular_rescisao') {
     const preview = await executar(intencao, params, dados);
     clearTimeout(_timer);
-    if (preview) { pendente[chatId] = { intencao, params }; return tgSend(chatId, preview); }
+    if (preview) { pendente[chatId] = { intencao, params }; _respondeu=true; return tgSend(chatId, preview); }
   }
 
   const resultado = await executar(intencao, params, dados);
