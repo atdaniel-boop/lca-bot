@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase
-// Versão 2.2 — fallback inteligente, dia de vencimento nos planos
+// Versão 2.3 — timeout corrigido, fallback sempre entrega resposta
 
 const https = require('https');
 
@@ -67,11 +67,11 @@ async function ai(prompt) {
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
         'POST', { 'Content-Type': 'application/json' },
         { contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 800 } },
-        12000
-      ), 14000);
+        8000
+      ), 9000);
       if (r?.candidates?.[0]?.content) return r.candidates[0].content.parts[0].text.trim();
-      if (r?.error?.code === 503) { console.log(model+' sobrecarregado, tentando próximo...'); continue; }
-      if (r?.error) { console.error('Gemini erro em '+model+':', r.error.message); continue; }
+      if (r?.error?.code === 503 || r?.error?.code === 429) { console.log(model+' indisponível ('+r.error.code+'), tentando próximo...'); continue; }
+      if (r?.error) { console.error('Gemini erro em '+model+':', r.error.code, r.error.message?.slice(0,80)); continue; }
     } catch(e) {
       console.error('Gemini '+model+':', e.message);
       if (e.message.includes('timeout')) continue;
@@ -530,9 +530,8 @@ async function processar(msg) {
   // Consulta livre — IA respondeu direto ou fallback estruturado
   if (aiResult.tipo === 'consulta') {
     clearTimeout(_timer);
-    if (_timedOut) return;
     if (aiResult.resposta) return tgSend(chatId, aiResult.resposta);
-    // Fallback: resposta estruturada sem IA
+    // Fallback: resposta estruturada sem IA (ignora _timedOut — é rápido)
     const ctx2 = buildContexto(dados, mes);
     const tL2  = texto.toLowerCase();
     let fallback = '';
