@@ -247,7 +247,7 @@ async function executar(cmd, dados) {
       categoria: p.categoria,
       mes: mes
     });
-    return '✅ Custo lançado!\n*' + (p.descricao||p.categoria) + '* — ' + brl(p.valor) + ' — ' + mes;
+    return '✅ Custo lançado! \n*' + (p.descricao||p.categoria).replace(' [via Bot Telegram]','') + '* — ' + brl(p.valor) + ' — ' + mes + '\n_Para desfazer: "remover custo aluguel maio"_';
   }
 
   // ── Lançar aula ──
@@ -397,18 +397,15 @@ async function processar(msg) {
     return tgSend(chatId, '❌ Não consegui interpretar. Tente novamente.');
   }
 
-  // Ações que precisam de confirmação
-  if (['calcular_rescisao','confirmar_pagamento','lancar_custo','lancar_aula'].indexOf(cmd.acao) >= 0) {
+  // Rescisão: mostrar cálculo e aguardar confirmação
+  if (cmd.acao === 'calcular_rescisao') {
     var preview;
     try { preview = await executar(cmd, dados); } catch(e) { preview = cmd.confirmacao || cmd.acao; }
     pendente[chatId] = { cmd: cmd, dados: dados };
-    if (cmd.acao === 'calcular_rescisao') {
-      return tgSend(chatId, preview);
-    }
-    return tgSend(chatId, '⚠️ *Confirmar?*\n\n' + cmd.confirmacao + '\n\nResponda *sim* para confirmar.');
+    return tgSend(chatId, preview);
   }
 
-  // Consultas: responder direto
+  // Todos os outros (custo, aula, pagamento): executar direto sem confirmação
   try {
     var resp = await executar(cmd, dados);
     return tgSend(chatId, resp);
@@ -448,6 +445,9 @@ async function main() {
     console.log('Aviso ao limpar fila:', e.message);
   }
 
+  // Registro de update_ids já processados (evita duplicação)
+  var processados = {};
+
   while (true) {
     try {
       var res = await tgUpdates(offset);
@@ -455,6 +455,20 @@ async function main() {
         for (var i = 0; i < res.result.length; i++) {
           var upd = res.result[i];
           offset = upd.update_id + 1;
+
+          // Ignorar se já foi processado nesta sessão
+          if (processados[upd.update_id]) {
+            console.log('Update já processado, ignorando:', upd.update_id);
+            continue;
+          }
+          processados[upd.update_id] = true;
+
+          // Limpar registro antigo para não acumular memória
+          var ids = Object.keys(processados);
+          if (ids.length > 200) {
+            delete processados[ids[0]];
+          }
+
           if (upd.message && upd.message.text) {
             processar(upd.message).catch(function(e){ console.error('Erro:', e.message); });
           }
