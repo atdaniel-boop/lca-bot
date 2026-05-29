@@ -290,6 +290,31 @@ async function executar(cmd, dados) {
     return '✅ Pagamento confirmado!\n*' + aluno.nome + '* — ' + brl(p.valor) + ' — ' + mes;
   }
 
+  // ── Remover custo ──
+  if (cmd.acao === 'remover_custo') {
+    var busca = ((p.descricao || p.categoria) || '').toLowerCase().replace('[via bot telegram]','').trim();
+    var mesR  = p.mes || mes;
+    if (!busca) return '❌ Informe a categoria do custo a remover (ex: aluguel, energia).';
+    var custosFiltro = dados.custos.filter(function(c) {
+      var descOk = (c.descricao||'').toLowerCase().indexOf(busca) >= 0;
+      var catOk  = (c.categoria||'').toLowerCase().indexOf(busca) >= 0;
+      return c.mes === mesR && (descOk || catOk);
+    });
+    if (!custosFiltro.length) {
+      var doMes = dados.custos.filter(function(c){ return c.mes === mesR; });
+      var listaM = doMes.length ? doMes.map(function(c){ return '• '+(c.descricao||c.categoria)+' — '+brl(c.valor); }).join('\n') : 'Nenhum custo lançado.';
+      return '❌ Custo "' + busca + '" não encontrado em ' + mesR + '.\n\nCustos em ' + mesR + ':\n' + listaM;
+    }
+    if (custosFiltro.length > 1) {
+      var listaC = custosFiltro.map(function(c){ return '• ID '+(c.id||c._id)+': '+(c.descricao||c.categoria)+' — '+brl(c.valor); }).join('\n');
+      return '⚠️ Encontrei ' + custosFiltro.length + ' registros:\n' + listaC + '\n\nMande: "remover custo ID XX"';
+    }
+    var custo = custosFiltro[0];
+    var custoId = custo.id || custo._id;
+    await req(SUPABASE_URL + '/rest/v1/custos?id=eq.' + custoId, 'DELETE', sbHeaders(), null);
+    return '✅ Custo removido!\n*' + (custo.descricao||custo.categoria) + '* — ' + brl(custo.valor) + ' — ' + mesR;
+  }
+
   // ── Calcular rescisão ──
   if (cmd.acao === 'calcular_rescisao') {
     var aluno = dados.alunos.find(function(a){
