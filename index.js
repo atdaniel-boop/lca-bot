@@ -103,16 +103,21 @@ async function ai(prompt) {
 
 // ── Dados do sistema ──────────────────────────────────────────────
 async function getDados() {
-  var results = await Promise.all([
-    sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,pagamentos,pagamentos_pendentes,pagamentos_rescisao'),
-    sbGet('custos', 'select=*&order=id.desc'),
-    sbGet('aulas',  'select=*&order=id.desc')
-  ]);
-  return {
-    alunos: Array.isArray(results[0]) ? results[0] : [],
-    custos: Array.isArray(results[1]) ? results[1] : [],
-    aulas:  Array.isArray(results[2]) ? results[2] : []
-  };
+  var alunos = [], custos = [], aulas = [];
+  try {
+    var ra = await sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,pagamentos,pagamentos_pendentes,pagamentos_rescisao');
+    console.log('Alunos raw type:', typeof ra, '| isArray:', Array.isArray(ra), '| length:', Array.isArray(ra)?ra.length:'N/A', '| sample:', JSON.stringify(ra).slice(0,150));
+    alunos = Array.isArray(ra) ? ra : [];
+  } catch(e) { console.error('Erro alunos:', e.message); }
+  try {
+    var rc = await sbGet('custos', 'select=*&order=id.desc');
+    custos = Array.isArray(rc) ? rc : [];
+  } catch(e) { console.error('Erro custos:', e.message); }
+  try {
+    var rk = await sbGet('aulas', 'select=*&order=id.desc');
+    aulas = Array.isArray(rk) ? rk : [];
+  } catch(e) { console.error('Erro aulas:', e.message); }
+  return { alunos: alunos, custos: custos, aulas: aulas };
 }
 
 // ── Interpretar comando via IA ────────────────────────────────────
