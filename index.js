@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase
-// Versão 2.0 — IA como motor central
+// Versão 2.1 — IA unificada, timeout, desfazeres, check-in
 
 const https = require('https');
 
@@ -220,60 +220,54 @@ function buildContexto(dados, mes) {
 const INTENCOES_ACAO = ['lancar_custo','lancar_aula','confirmar_pagamento','calcular_rescisao',
   'remover_custo','remover_custo_id','desfazer_pagamento','desfazer_aula','checkin','desfazer_checkin'];
 
-async function classificar(texto, ctx) {
-  const prompt = `Você é o assistente do LCA Studio de Pilates. Analise a mensagem abaixo e classifique a intenção.
-
-CONTEXTO DO ESTÚDIO (mês ${ctx.mes}):
-- Alunos: ${ctx.estudio.ativos} ativos
-- Inadimplentes: ${ctx.inadimplentes.length}
-- Receita: ${brl(ctx.financeiro.receita)}
-- Resultado: ${brl(ctx.financeiro.resultado)}
-
-MENSAGEM: "${texto}"
-
-Classifique em UMA das categorias:
-- "consulta_livre" → perguntas, análises, dúvidas sobre dados do estúdio
-- "ajuda" → perguntas sobre como usar o bot, quais comandos existem
-- "lancar_custo" → registrar despesa/custo novo
-- "lancar_aula" → registrar horas de aula (Kelly ou Monica)
-- "confirmar_pagamento" → confirmar que aluno pagou mensalidade
-- "calcular_rescisao" → calcular rescisão de contrato
-- "remover_custo" → apagar/remover custo por nome/categoria
-- "remover_custo_id" → apagar custo por ID numérico
-- "desfazer_pagamento" → cancelar/desfazer pagamento registrado
-- "desfazer_aula" → remover lançamento de aula
-- "checkin" → marcar presença/falta/reposição de aluno
-- "desfazer_checkin" → desfazer check-in registrado
-- "saudacao" → oi, olá, início de conversa
-
-Retorne JSON: {"intencao": "...", "confianca": 0-100}`;
-
-  const r = await aiJSON(prompt);
-  return r?.intencao || 'consulta_livre';
-}
-
-// ── Consulta livre via IA ─────────────────────────────────────────
-async function consultaLivre(texto, dados, mes) {
+// Chamada unificada: classifica E responde em uma só requisição
+async function processarComIA(texto, dados, mes) {
   const ctx = buildContexto(dados, mes);
 
+  // Detectar ações por palavras-chave (sem IA) — economiza cota
+  const tL = texto.toLowerCase();
+  const KEYWORDS = [
+    ['lancar_custo',        ['custo ','despesa','aluguel','energia','luz ','internet']],
+    ['lancar_aula',         ['aula ','horas de aula','deu aula','deu 1','deu 2','deu 3']],
+    ['confirmar_pagamento', ['pagou','pagamento']],
+    ['calcular_rescisao',   ['rescindir','rescisão','rescisao','cancelar contrato']],
+    ['remover_custo',       ['remover custo','apagar custo','deletar custo','excluir custo','desfazer custo']],
+    ['remover_custo_id',    ['remover custo id','apagar custo id']],
+    ['desfazer_pagamento',  ['desfazer pagamento','cancelar pagamento']],
+    ['desfazer_aula',       ['remover aula','apagar aula','desfazer aula']],
+    ['checkin',             ['presente','faltou','falta hoje','reposição','repôs','check-in','checkin']],
+    ['desfazer_checkin',    ['desfazer check']],
+  ];
+  for (const [acao, kws] of KEYWORDS) {
+    if (kws.some(k => tL.includes(k))) {
+      console.log('Ação por keyword:', acao);
+      return { tipo: 'acao', intencao: acao };
+    }
+  }
+
+  if (['oi','olá','ola','bom dia','boa tarde','boa noite'].some(k => tL.startsWith(k))) {
+    return { tipo: 'saudacao' };
+  }
+  if (['ajuda','help','comando','como usar','o que'].some(k => tL.includes(k))) {
+    return { tipo: 'ajuda' };
+  }
+
+  // Consulta livre — UMA chamada ao Gemini
   const prompt = `Você é o assistente do LCA Studio de Pilates (Rio de Janeiro, ${ctx.hoje}).
-Responda a pergunta do gestor de forma direta e útil, usando os dados abaixo.
-Use formatação Markdown simples. Seja objetivo — máximo 3 parágrafos curtos.
+Responda diretamente em Markdown simples. Máximo 5 linhas curtas.
 
-=== DADOS DO ESTÚDIO (${mes}) ===
-Alunos ativos: ${ctx.estudio.ativos} | Inativos: ${ctx.estudio.inativos}
+DADOS (${mes}):
+Ativos: ${ctx.estudio.ativos} | Inativos: ${ctx.estudio.inativos}
 Receita: ${brl(ctx.financeiro.receita)} | Professoras: ${brl(ctx.financeiro.professoras)} | Custos: ${brl(ctx.financeiro.custos)} | Resultado: ${brl(ctx.financeiro.resultado)}
-  → Leda: ${brl(ctx.financeiro.detalheProfessoras.leda)} | Mônica: ${brl(ctx.financeiro.detalheProfessoras.monica)} | Kelly: ${brl(ctx.financeiro.detalheProfessoras.kelly)}
-Inadimplentes (${ctx.inadimplentes.length}): ${ctx.inadimplentes.map(a=>a.nome).join(', ')||'Nenhum'}
-Custos do mês: ${ctx.custosMes.map(c=>c.desc+' '+brl(c.valor)).join(', ')||'Nenhum'}
-Aulas Kelly: ${ctx.aulasKelly.map(k=>k.horas+'h em '+k.data).join(', ')||'Nenhuma'}
+Inadimplentes: ${ctx.inadimplentes.map(a=>a.nome).join(', ')||'Nenhum'}
+Planos vencendo (30 dias): ${ctx.planosVencendo.length?ctx.planosVencendo.map(p=>p.nome+' ('+p.plano+', vence '+p.dataVenc+')').join(' | '):'Nenhum'}
+Custos: ${ctx.custosMes.map(c=>c.desc+' '+brl(c.valor)).join(', ')||'Nenhum'}
 Faltas frequentes: ${ctx.faltasFrequentes.join(', ')||'Nenhuma'}
-Planos vencendo (próx. 30 dias): ${ctx.planosVencendo.length ? ctx.planosVencendo.map(p=>p.nome+' ('+p.plano+', vence '+p.dataVenc+', '+p.dias+' dias)').join(' | ') : 'Nenhum'}
 
-=== PERGUNTA DO GESTOR ===
-${texto}`;
+PERGUNTA: ${texto}`;
 
-  return await ai(prompt);
+  const resp = await ai(prompt);
+  return { tipo: 'consulta', resposta: resp };
 }
 
 // ── Extrair parâmetros de ação ────────────────────────────────────
@@ -442,7 +436,7 @@ async function executar(intencao, p, dados) {
     return `✅ Check-in desfeito!\n*${aluno.nome}* — ${dataCi.slice(8)}/${dataCi.slice(5,7)}`;
   }
 
-  if (intencao === 'calcular_rescisao') {
+  if (aiResult.intencao === 'calcular_rescisao') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
     if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
@@ -503,16 +497,15 @@ async function processar(msg) {
   try { dados = await getDados(); }
   catch(e) { return tgSend(chatId, '❌ Erro ao conectar ao banco: '+e.message); }
 
-  // Classificar intenção
-  const ctx = buildContexto(dados, mes);
-  let intencao;
-  try { intencao = await classificar(texto, ctx); }
-  catch(e) { intencao = 'consulta_livre'; }
+  // Processar com IA
+  let aiResult;
+  try { aiResult = await processarComIA(texto, dados, mes); }
+  catch(e) { console.error('processarComIA erro:', e.message); aiResult = { tipo: 'consulta', resposta: null }; }
 
-  console.log('Intenção:', intencao, '|', texto.slice(0,50));
+  console.log('IA result:', aiResult.tipo, aiResult.intencao||'', '|', texto.slice(0,40));
 
-  // Ajuda
-  if (intencao === 'ajuda' || intencao === 'saudacao') {
+  // Ajuda / saudacao
+  if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     return tgSend(chatId,
       '👋 *LCA Studio Bot v2*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio em linguagem natural!\n\n' +
@@ -530,21 +523,26 @@ async function processar(msg) {
     );
   }
 
-  // Consulta livre — IA responde diretamente
-  if (intencao === 'consulta_livre') {
-    const resp = await consultaLivre(texto, dados, mes);
+  // Consulta livre — IA respondeu direto
+  if (aiResult.tipo === 'consulta') {
     clearTimeout(_timer);
-  if (_timedOut) return;
-  return tgSend(chatId, resp || '❌ Não consegui gerar uma resposta.');
+    if (_timedOut) return;
+    if (!aiResult.resposta) return tgSend(chatId, '⚠️ O Gemini não respondeu (cota esgotada ou sobrecarga). Tente em 1 minuto.');
+    return tgSend(chatId, aiResult.resposta);
   }
 
-  // Ação que altera dados — extrair parâmetros e executar
+  // Ação que altera dados
+  const intencao = aiResult.intencao;
   const params = await extrairParams(intencao, texto, dados);
-  if (!params) return tgSend(chatId, '❌ Não consegui extrair os dados. Tente reformular.');
+  if (!params) {
+    clearTimeout(_timer);
+    return tgSend(chatId, '❌ Não consegui extrair os dados. Tente reformular.');
+  }
 
   // Rescisão: mostrar cálculo e aguardar confirmação
-  if (intencao === 'calcular_rescisao') {
+  if (aiResult.intencao === 'calcular_rescisao') {
     const preview = await executar(intencao, params, dados);
+    clearTimeout(_timer);
     if (preview) { pendente[chatId] = { intencao, params }; return tgSend(chatId, preview); }
   }
 
