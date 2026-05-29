@@ -186,11 +186,21 @@ async function executar(cmd, dados) {
     dados.alunos.forEach(function(a) {
       var pags = a.pagamentos;
       if (typeof pags === 'string') { try { pags = JSON.parse(pags); } catch(e) { pags = {}; } }
-      pags = pags || {};
-      var v = pags[mes] || 0;
+      if (!pags || typeof pags !== 'object') { pags = {}; }
+      var v = 0;
+      // Try direct key access
+      if (pags[mes] !== undefined) {
+        v = Number(pags[mes]) || 0;
+      } else {
+        // Log first aluno's pagamentos keys to debug
+        if (total === 0 && pagos === 0 && a.id) {
+          console.log('DEBUG pags type:', typeof a.pagamentos, '| keys:', Object.keys(pags).slice(0,3), '| mes buscado:', mes);
+        }
+      }
       var rescisao = a.pagamentos_rescisao;
       if (typeof rescisao === 'string') { try { rescisao = JSON.parse(rescisao); } catch(e) { rescisao = {}; } }
-      var vR = (rescisao||{})[mes] || 0;
+      if (!rescisao || typeof rescisao !== 'object') rescisao = {};
+      var vR = Number(rescisao[mes]) || 0;
       var liq = Math.max(0, v - vR);
       total += liq;
       if (v > 0) pagos++;
