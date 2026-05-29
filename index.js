@@ -52,19 +52,30 @@ const sbPatch = (t, q, b) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'PATCH', sbHe
 const sbDelete= (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'DELETE', sbHeaders(), null);
 
 // ── Gemini ────────────────────────────────────────────────────────
+function aiWithTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('AI timeout '+ms+'ms')), ms))
+  ]);
+}
+
 async function ai(prompt) {
   const models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash-lite'];
   for (const model of models) {
     try {
-      const r = await req(
+      const r = await aiWithTimeout(req(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
         'POST', { 'Content-Type': 'application/json' },
-        { contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 1000 } },
-        15000
-      );
+        { contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 800 } },
+        12000
+      ), 14000);
       if (r?.candidates?.[0]?.content) return r.candidates[0].content.parts[0].text.trim();
-      if (r?.error?.code === 503) continue;
-    } catch(e) { console.error('Gemini erro:', e.message); }
+      if (r?.error?.code === 503) { console.log(model+' sobrecarregado, tentando próximo...'); continue; }
+      if (r?.error) { console.error('Gemini erro em '+model+':', r.error.message); continue; }
+    } catch(e) {
+      console.error('Gemini '+model+':', e.message);
+      if (e.message.includes('timeout')) continue;
+    }
   }
   return null;
 }
@@ -258,8 +269,6 @@ Custos do mês: ${ctx.custosMes.map(c=>c.desc+' '+brl(c.valor)).join(', ')||'Nen
 Aulas Kelly: ${ctx.aulasKelly.map(k=>k.horas+'h em '+k.data).join(', ')||'Nenhuma'}
 Faltas frequentes: ${ctx.faltasFrequentes.join(', ')||'Nenhuma'}
 Planos vencendo (próx. 30 dias): ${ctx.planosVencendo.length ? ctx.planosVencendo.map(p=>p.nome+' ('+p.plano+', vence '+p.dataVenc+', '+p.dias+' dias)').join(' | ') : 'Nenhum'}
-
-Lista de alunos: ${JSON.stringify(ctx.listaAlunos)}
 
 === PERGUNTA DO GESTOR ===
 ${texto}`;
@@ -483,6 +492,12 @@ async function processar(msg) {
 
   await tgSend(chatId, '⏳ Processando...');
   const mes = new Date().toISOString().slice(0,7);
+  // Timeout geral — responde se demorar mais de 45s
+  let _timedOut = false;
+  const _timer = setTimeout(() => {
+    _timedOut = true;
+    tgSend(chatId, '⚠️ Demorou mais que o esperado. O Gemini pode estar sobrecarregado. Tente novamente em alguns segundos.');
+  }, 45000);
 
   let dados;
   try { dados = await getDados(); }
@@ -518,7 +533,9 @@ async function processar(msg) {
   // Consulta livre — IA responde diretamente
   if (intencao === 'consulta_livre') {
     const resp = await consultaLivre(texto, dados, mes);
-    return tgSend(chatId, resp || '❌ Não consegui gerar uma resposta.');
+    clearTimeout(_timer);
+  if (_timedOut) return;
+  return tgSend(chatId, resp || '❌ Não consegui gerar uma resposta.');
   }
 
   // Ação que altera dados — extrair parâmetros e executar
@@ -532,6 +549,8 @@ async function processar(msg) {
   }
 
   const resultado = await executar(intencao, params, dados);
+  clearTimeout(_timer);
+  if (_timedOut) return;
   return tgSend(chatId, resultado || '❌ Não consegui executar a ação.');
 }
 
