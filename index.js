@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase
-// Versão 2.4 — fallback com try-catch, sem crash no Node
+// Versão 2.6 — timer não envia se já respondeu
 
 const https = require('https');
 
@@ -495,8 +495,10 @@ async function processar(msg) {
   let _timedOut = false;
   const _timer = setTimeout(() => {
     _timedOut = true;
-    tgSend(chatId, '⚠️ Demorou mais que o esperado. O Gemini pode estar sobrecarregado. Tente novamente em alguns segundos.');
+    // Só envia aviso se ainda não respondeu
+    if (!_respondeu) tgSend(chatId, '⚠️ Demorou mais que o esperado. Tente novamente em alguns segundos.');
   }, 45000);
+  let _respondeu = false;
 
   let dados;
   try { dados = await getDados(); }
@@ -511,19 +513,28 @@ async function processar(msg) {
 
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
-    return tgSend(chatId,
+    _respondeu=true; return tgSend(chatId,
       '👋 *LCA Studio Bot v2*\n\n' +
-      'Pode me perguntar qualquer coisa sobre o estúdio em linguagem natural!\n\n' +
-      '*Exemplos de perguntas:*\n' +
-      '• _"Qual aluna falta mais?"_\n' +
-      '• _"Como estamos comparado ao mês passado?"_\n' +
-      '• _"Quem tem plano vencendo?"_\n\n' +
-      '*Exemplos de ações:*\n' +
+      'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
+      '*📊 Consultas:*\n' +
+      '• _"quem não pagou maio?"_\n' +
+      '• _"quem tem plano vencendo?"_\n' +
+      '• _"resumo financeiro de maio"_\n' +
+      '• _"qual aluna falta mais?"_\n\n' +
+      '*💰 Lançamentos:*\n' +
       '• _"custo aluguel 3700 junho"_\n' +
       '• _"kelly deu 2 aulas hoje"_\n' +
-      '• _"Ana Lima pagou 329"_\n' +
-      '• _"Luiza presente terça 09:00"_\n' +
+      '• _"Ana Lima pagou 329"_\n\n' +
+      '*✅ Check-in de aula:*\n' +
+      '• _"Luiza presente terça 09:00"_ — marcar presença\n' +
+      '• _"Ana faltou hoje 07:00"_ — registrar falta\n' +
+      '• _"Maria repôs quinta 10:00"_ — registrar reposição\n\n' +
+      '*↩️ Desfazer:*\n' +
+      '• _"apagar custo aluguel 2026-05"_\n' +
       '• _"desfazer pagamento Ana maio"_\n' +
+      '• _"remover aula kelly"_\n' +
+      '• _"desfazer check-in Ana hoje 09:00"_\n\n' +
+      '*📋 Rescisão:*\n' +
       '• _"Mara quer rescindir, semestral, pagou 3 meses"_'
     );
   }
@@ -558,10 +569,10 @@ async function processar(msg) {
       } else {
         fallback = '⚠️ Gemini indisponível. Tente em 1 minuto.\nOu use comandos diretos — mande *ajuda*.';
       }
-      return tgSend(chatId, fallback);
+      _respondeu=true; return tgSend(chatId, fallback);
     } catch(err) {
       console.error('Fallback erro:', err.message);
-      return tgSend(chatId, '⚠️ Gemini indisponível agora. Tente novamente em 1 minuto.');
+      _respondeu=true; return tgSend(chatId, '⚠️ Gemini indisponível agora. Tente novamente em 1 minuto.');
     }
   }
 
@@ -583,7 +594,7 @@ async function processar(msg) {
   const resultado = await executar(intencao, params, dados);
   clearTimeout(_timer);
   if (_timedOut) return;
-  return tgSend(chatId, resultado || '❌ Não consegui executar a ação.');
+  _respondeu=true; return tgSend(chatId, resultado || '❌ Não consegui executar a ação.');
 }
 
 // ── Loop principal ────────────────────────────────────────────────
