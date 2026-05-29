@@ -84,7 +84,7 @@ async function ai(prompt) {
         { contents: [{ parts: [{ text: prompt }] }] }
       );
       if (r && r.candidates && r.candidates[0] && r.candidates[0].content) {
-        console.log('Gemini OK com modelo:', models[i]);
+        // modelo funcionou
         return r.candidates[0].content.parts[0].text.trim();
       }
       if (r && r.error && r.error.code === 503) {
@@ -179,21 +179,29 @@ async function executar(cmd, dados) {
 
   // ── Resumo financeiro ──
   if (cmd.acao === 'consulta_financeiro') {
-    var total = dados.alunos.reduce(function(s,a){ return s + (((a.pagamentos||{})[mes])||0); }, 0);
+    // Only count confirmed payments (pagamentos), exclude pending and rescisao
+    var total = dados.alunos.reduce(function(s,a){
+      var v  = (a.pagamentos||{})[mes] || 0;
+      var vR = (a.pagamentos_rescisao||{})[mes] || 0;
+      return s + Math.max(0, v - vR);
+    }, 0);
     var pagos = dados.alunos.filter(function(a){ return ((a.pagamentos||{})[mes]||0) > 0; }).length;
     var custosMes   = dados.custos.filter(function(c){ return c.mes === mes; });
     var totalCustos = custosMes.reduce(function(s,c){ return s + (c.valor||0); }, 0);
+    var resultado   = total - totalCustos;
     return '📊 *Resumo ' + mes + '*\n\n' +
-      '💰 Receita: *' + brl(total) + '* (' + pagos + ' pagamentos)\n' +
-      '🔴 Custos: *' + brl(totalCustos) + '*\n' +
-      '📈 Resultado: *' + brl(total - totalCustos) + '*';
+      '💰 Receita confirmada: *' + brl(total) + '* (' + pagos + ' pagamentos)\n' +
+      '🔴 Custos lançados: *' + brl(totalCustos) + '*\n' +
+      '📈 Resultado líquido: *' + brl(resultado) + '*' +
+      (resultado < 0 ? ' ⚠️' : ' ✅');
   }
 
   // ── Lançar custo ──
   if (cmd.acao === 'lancar_custo') {
     if (!p.valor || !p.categoria) return '❌ Informe o valor e a categoria do custo.';
+    var descBot = (p.descricao || p.categoria) + ' [via Bot Telegram]';
     await sbPost('custos', {
-      descricao: p.descricao || p.categoria,
+      descricao: descBot,
       valor: p.valor,
       categoria: p.categoria,
       mes: mes
@@ -215,7 +223,7 @@ async function executar(cmd, dados) {
       data_fmt: data.split('-').reverse().join('/'),
       horas: p.horas,
       vh: p.horas,
-      desc_aula: 'Lançado via bot — ' + p.horas + 'h'
+      desc_aula: 'Lançado via Bot Telegram — ' + p.horas + 'h'
     });
     return '✅ Aula lançada!\n*' + (p.professora||profId) + '* — ' + p.horas + 'h — ' + data;
   }
@@ -230,7 +238,14 @@ async function executar(cmd, dados) {
     if (!p.valor) return '❌ Informe o valor do pagamento.';
     var pags = Object.assign({}, aluno.pagamentos || {});
     pags[mes] = p.valor;
-    await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags });
+    // Registrar no historico que foi lancado via bot
+    var histBot = aluno.historico_alteracoes || [];
+    histBot.push({
+      data: new Date().toLocaleDateString('pt-BR'),
+      tipo: 'pagamento_bot',
+      desc: 'Pagamento ' + mes + ' confirmado via Bot Telegram: ' + brl(p.valor)
+    });
+    await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags, historico_alteracoes: histBot });
     return '✅ Pagamento confirmado!\n*' + aluno.nome + '* — ' + brl(p.valor) + ' — ' + mes;
   }
 
@@ -295,18 +310,21 @@ async function processar(msg) {
   }
 
   // Resposta a confirmação pendente
-  if (pendente[chatId]) {
+  if (pendente[chatId] && !pendente[chatId].executando) {
     var conf = pendente[chatId];
-    delete pendente[chatId];
     if (['sim','confirmar','ok','s'].indexOf(texto.toLowerCase()) >= 0) {
+      pendente[chatId].executando = true; // lock para evitar duplicidade
+      delete pendente[chatId];
       try {
         var result = await executar(conf.cmd, conf.dados);
         return tgSend(chatId, result);
       } catch(e) {
         return tgSend(chatId, '❌ Erro ao executar: ' + e.message);
       }
+    } else {
+      delete pendente[chatId];
+      return tgSend(chatId, '❌ Cancelado.');
     }
-    return tgSend(chatId, '❌ Cancelado.');
   }
 
   // Processar novo comando
