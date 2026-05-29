@@ -526,7 +526,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v2*\n\n' +
+      '👋 *LCA Studio Bot v2.8*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
@@ -643,7 +643,7 @@ async function processar(msg) {
 
 // ── Loop principal ────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v2 iniciado ✓');
+  console.log('LCA Bot v2.8 iniciado ✓');
   let offset = 0;
   try {
     const init = await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=-1&limit=1&timeout=0`, 'GET', {}, null);
