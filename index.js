@@ -396,6 +396,7 @@ async function processar(msg) {
   if (!cmd) {
     return tgSend(chatId, '❌ Não consegui interpretar. Tente novamente.');
   }
+  console.log('Acao interpretada:', cmd.acao, '| params:', JSON.stringify(cmd.params).slice(0,100));
 
   // Rescisão: mostrar cálculo e aguardar confirmação
   if (cmd.acao === 'calcular_rescisao') {
