@@ -209,10 +209,12 @@ async function executar(cmd, dados) {
     // Custos: filtrar por mês
     var custosMes = dados.custos.filter(function(c){ return c.mes === mes; });
     var totalCustos = custosMes.reduce(function(s,c){ return s + (c.valor||0); }, 0);
-    // Professoras: calcular do mês
+    // Professoras: calcular do mês (igual ao sistema web)
     var totalProf = 0;
     var ativos = dados.alunos.filter(function(a){ return a.ativo==='SIM'; });
-    // Monica: 40% dos alunos dela
+    // Leda: retirada fixa de R$6.000/mês
+    totalProf += 6000;
+    // Monica: 40% dos alunos exclusivos dela
     var alunosMonica = ativos.filter(function(a){ return a.professora==='monica'; });
     var recMonica = alunosMonica.reduce(function(s,a){
       var pags = a.pagamentos;
@@ -220,9 +222,9 @@ async function executar(cmd, dados) {
       return s + ((pags||{})[mes]||0);
     }, 0);
     totalProf += recMonica * 0.4;
-    // Kelly: soma das horas × R$35
+    // Kelly: soma das horas x R$35
     var aulasKelly = dados.aulas.filter(function(k){ return k.prof_id==='kelly' && k.mes===mes; });
-    totalProf += aulasKelly.reduce(function(s,k){ return s + (k.horas||0)*35; }, 0);
+    totalProf += aulasKelly.reduce(function(s,k){ return s + ((k.horas||k.vh||0)*35); }, 0);
     var resultado = total - totalProf - totalCustos;
     return '📊 *Resumo ' + mes + '*\n\n' +
       '💰 Receita: *' + brl(total) + '* (' + pagos + ' pagamentos)\n' +
@@ -412,23 +414,31 @@ async function processar(msg) {
 async function main() {
   console.log('LCA Bot iniciado ✓');
 
-  // IMPORTANTE: ao iniciar, pular todas as mensagens antigas
-  // Isso evita reprocessar mensagens quando o servidor reinicia
+  // IMPORTANTE: ao iniciar, descartar TODAS as mensagens pendentes
+  // usando offset=-1 para pegar a ultima, depois offset+1 para ignorar tudo anterior
   var offset = 0;
   try {
-    console.log('Inicializando offset...');
+    console.log('Limpando fila de mensagens antigas...');
+    // Pega as ultimas 100 mensagens pendentes e descarta todas
     var init = await req(
-      'https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1',
+      'https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=100&timeout=0',
       'GET', {}, null
     );
     if (init && init.result && init.result.length > 0) {
       offset = init.result[init.result.length - 1].update_id + 1;
-      console.log('Offset inicializado em:', offset, '(mensagens antigas ignoradas)');
+      console.log('Fila limpa. Offset:', offset, '— apenas mensagens NOVAS serao processadas.');
     } else {
-      console.log('Nenhuma mensagem anterior. Aguardando novas mensagens...');
+      // Confirmar limpeza enviando offset=1 para garantir
+      console.log('Nenhuma mensagem pendente. Bot pronto.');
     }
+    // Confirmar descarte marcando o offset no Telegram
+    await req(
+      'https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=' + offset + '&limit=1&timeout=0',
+      'GET', {}, null
+    );
+    console.log('Fila confirmada como limpa. Aguardando novas mensagens...');
   } catch(e) {
-    console.log('Nao foi possivel inicializar offset:', e.message);
+    console.log('Aviso ao limpar fila:', e.message);
   }
 
   while (true) {
