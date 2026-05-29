@@ -74,18 +74,28 @@ function sbPatch(table, query, body) {
 
 // ── Gemini ────────────────────────────────────────────────────────
 async function ai(prompt) {
-  try {
-    const r = await req(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + GEMINI_KEY,
-      'POST',
-      { 'Content-Type': 'application/json' },
-      { contents: [{ parts: [{ text: prompt }] }] }
-    );
-    return r.candidates[0].content.parts[0].text.trim();
-  } catch(e) {
-    console.error('Gemini error:', e.message);
-    return null;
+  var models = [
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-pro'
+  ];
+  for (var i = 0; i < models.length; i++) {
+    try {
+      var r = await req(
+        'https://generativelanguage.googleapis.com/v1beta/models/' + models[i] + ':generateContent?key=' + GEMINI_KEY,
+        'POST',
+        { 'Content-Type': 'application/json' },
+        { contents: [{ parts: [{ text: prompt }] }] }
+      );
+      if (r && r.candidates && r.candidates[0]) {
+        return r.candidates[0].content.parts[0].text.trim();
+      }
+      console.error('Gemini ' + models[i] + ' response:', JSON.stringify(r).slice(0, 200));
+    } catch(e) {
+      console.error('Gemini ' + models[i] + ' error:', e.message);
+    }
   }
+  return null;
 }
 
 // ── Dados do sistema ──────────────────────────────────────────────
