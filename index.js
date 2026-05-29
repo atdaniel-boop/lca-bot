@@ -105,7 +105,7 @@ async function ai(prompt) {
 async function getDados() {
   var alunos = [], custos = [], aulas = [];
   try {
-    var ra = await sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,pagamentos,pagamentos_pendentes,pagamentos_rescisao');
+    var ra = await sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,pagamentos,pagamentos_pendentes');
     console.log('Alunos raw type:', typeof ra, '| isArray:', Array.isArray(ra), '| length:', Array.isArray(ra)?ra.length:'N/A', '| sample:', JSON.stringify(ra).slice(0,150));
     alunos = Array.isArray(ra) ? ra : [];
   } catch(e) { console.error('Erro alunos:', e.message); }
@@ -202,11 +202,7 @@ async function executar(cmd, dados) {
           console.log('DEBUG pags type:', typeof a.pagamentos, '| keys:', Object.keys(pags).slice(0,3), '| mes buscado:', mes);
         }
       }
-      var rescisao = a.pagamentos_rescisao;
-      if (typeof rescisao === 'string') { try { rescisao = JSON.parse(rescisao); } catch(e) { rescisao = {}; } }
-      if (!rescisao || typeof rescisao !== 'object') rescisao = {};
-      var vR = Number(rescisao[mes]) || 0;
-      var liq = Math.max(0, v - vR);
+      var liq = Math.max(0, v);
       total += liq;
       if (v > 0) pagos++;
     });
