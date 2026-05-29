@@ -76,7 +76,7 @@ async function aiJSON(prompt) {
 // ── Dados ─────────────────────────────────────────────────────────
 async function getDados() {
   const [ra, rc, rk] = await Promise.all([
-    sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes'),
+    sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,data_matricula,historico_alteracoes'),
     sbGet('custos', 'select=*&order=id.desc'),
     sbGet('aulas',  'select=*&order=id.desc')
   ]);
@@ -154,6 +154,32 @@ function buildContexto(dados, mes) {
     }
   });
 
+  // Calcular planos vencendo (próximos 30 dias)
+  const hojeTs = new Date(); hojeTs.setHours(0,0,0,0);
+  const DUR = { mensal:1, trimestral:3, semestral:6 };
+  const planosVencendo = ativos.map(a => {
+    // Última renovação
+    let ultRen = null;
+    const hist = typeof a.historico_alteracoes==='string'?JSON.parse(a.historico_alteracoes||'[]'):(a.historico_alteracoes||[]);
+    hist.forEach(h => {
+      if (h.tipo==='renovacao' && h.data) {
+        const dp = h.data.split('/');
+        const d = new Date(parseInt(dp[2]), parseInt(dp[1])-1, parseInt(dp[0]));
+        if (!ultRen || d > ultRen) ultRen = d;
+      }
+    });
+    if (!ultRen && a.data_matricula) {
+      const dm = a.data_matricula.split('-');
+      ultRen = new Date(parseInt(dm[0]), parseInt(dm[1])-1, parseInt(dm[2]));
+    }
+    if (!ultRen) return null;
+    const dur = DUR[a.tipo_plano]||1;
+    const venc = new Date(ultRen.getFullYear(), ultRen.getMonth()+dur, ultRen.getDate());
+    const dias = Math.round((venc-hojeTs)/86400000);
+    return { nome: a.nome, plano: a.tipo_plano, dias, dataVenc: venc.toLocaleDateString('pt-BR') };
+  }).filter(p => p && p.dias >= 0 && p.dias <= 30)
+    .sort((a,b) => a.dias-b.dias);
+
   return {
     hoje: new Date().toLocaleDateString('pt-BR'),
     mes,
@@ -167,6 +193,7 @@ function buildContexto(dados, mes) {
       .filter(([,n]) => n >= 2)
       .map(([id, n]) => { const a = dados.alunos.find(x => x.id === parseInt(id)); return a ? a.nome+' ('+n+' faltas)' : null; })
       .filter(Boolean),
+    planosVencendo: planosVencendo,
     listaAlunos: dados.alunos.map(a => ({ id: a.id, nome: a.nome, ativo: a.ativo,
       plano: a.tipo_plano, vezes: a.vezes_semana, prof: a.professora })),
     todosOsCustos: dados.custos.slice(0,20).map(c => ({ id: c.id, desc: c.descricao, valor: c.valor, mes: c.mes }))
@@ -226,6 +253,7 @@ Inadimplentes (${ctx.inadimplentes.length}): ${ctx.inadimplentes.map(a=>a.nome).
 Custos do mês: ${ctx.custosMes.map(c=>c.desc+' '+brl(c.valor)).join(', ')||'Nenhum'}
 Aulas Kelly: ${ctx.aulasKelly.map(k=>k.horas+'h em '+k.data).join(', ')||'Nenhuma'}
 Faltas frequentes: ${ctx.faltasFrequentes.join(', ')||'Nenhuma'}
+Planos vencendo (próx. 30 dias): ${ctx.planosVencendo.length ? ctx.planosVencendo.map(p=>p.nome+' ('+p.plano+', vence '+p.dataVenc+', '+p.dias+' dias)').join(' | ') : 'Nenhum'}
 
 Lista de alunos: ${JSON.stringify(ctx.listaAlunos)}
 
