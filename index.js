@@ -163,25 +163,26 @@ function buildContexto(dados, mes) {
   const planosVencendo = ativos
     .filter(a => a.tipo_plano === 'trimestral' || a.tipo_plano === 'semestral')
     .map(a => {
-      // Usar último pagamento como base de cálculo (mais confiável que data_matricula)
+      const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
       const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
-      const keys = Object.keys(pags).filter(k=>pags[k]>0).sort();
-      if (!keys.length) return null;
-      // Último mês pago
-      const lastKey = keys[keys.length-1];
-      const lp = lastKey.split('-');
-      const ultPag = new Date(parseInt(lp[0]), parseInt(lp[1])-1, 1);
-      const dur = DUR[a.tipo_plano]||3;
-      // Vencimento = último pagamento + duração do plano
-      const venc = new Date(ultPag.getFullYear(), ultPag.getMonth()+dur, parseInt(a.dia_vencimento||10));
+      // Todos os meses com valor (pago ou pendente)
+      const todosMeses = [...new Set([
+        ...Object.keys(pend).filter(k=>(pend[k]||0)>0),
+        ...Object.keys(pags).filter(k=>(pags[k]||0)>0)
+      ])].sort();
+      if (!todosMeses.length) return null;
+      // Último mês do plano atual
+      const lastMes = todosMeses[todosMeses.length-1];
+      const lp = lastMes.split('-');
+      const diaVenc = parseInt(a.dia_vencimento||10);
+      // Vencimento = dia de vencimento no mês seguinte ao último mês pago
+      const venc = new Date(parseInt(lp[0]), parseInt(lp[1]), diaVenc);
       const dias = Math.round((venc-hojeTs)/86400000);
-      return { nome: a.nome, plano: a.tipo_plano, dias, dataVenc: venc.toLocaleDateString('pt-BR'), ultPag: lastKey };
+      return { nome: a.nome, plano: a.tipo_plano, dias, dataVenc: venc.toLocaleDateString('pt-BR'), ultimoMes: lastMes };
     }).filter(p => p && p.dias >= -5 && p.dias <= 30)
     .sort((a,b) => a.dias-b.dias);
-  
-  if (planosVencendo.length > 0) {
-    console.log('Planos vencendo:', planosVencendo.map(p=>p.nome+' '+p.dias+'d').join(', '));
-  }
+
+  console.log('Planos vencendo calculados:', planosVencendo.length, '| Trim/Sem ativos:', ativos.filter(a=>a.tipo_plano==='trimestral'||a.tipo_plano==='semestral').length);
 
   return {
     hoje: new Date().toLocaleDateString('pt-BR'),
