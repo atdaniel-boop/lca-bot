@@ -359,4 +359,15 @@ async function main() {
   }
 }
 
+
+// ── Servidor HTTP mínimo (exigido pelo Render) ────────────────────
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+http.createServer(function(req, res) {
+  res.writeHead(200);
+  res.end('LCA Bot rodando ✓');
+}).listen(PORT, function() {
+  console.log('Servidor HTTP na porta ' + PORT);
+});
+
 main();
