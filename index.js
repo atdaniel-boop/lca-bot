@@ -424,6 +424,35 @@ async function processar(msg) {
 
   // Detectar remoção ANTES da IA
   var textoL = texto.toLowerCase();
+
+  // Detectar pedido de ajuda ANTES da IA
+  var palavrasAjuda = ['ajuda','help','comando','como','exemplos','o que','quais','instrucao','instrução','orienta'];
+  var ehAjuda = palavrasAjuda.some(function(p){ return textoL.indexOf(p)>=0; });
+  if (ehAjuda) {
+    return tgSend(chatId,
+      '📋 *Comandos disponíveis*\n\n' +
+      '*📊 Consultas:*\n' +
+      '• _"quem não pagou maio?"_\n' +
+      '• _"resumo financeiro de maio"_\n\n' +
+      '*💰 Lançamentos:*\n' +
+      '• _"custo aluguel 3500 junho"_\n' +
+      '• _"kelly deu 2 aulas hoje"_\n' +
+      '• _"Ana Lima pagou 329 boleto"_\n\n' +
+      '*✅ Check-in de aula:*\n' +
+      '• _"Luiza presente terça 09:00"_\n' +
+      '• _"Ana faltou hoje 07:00"_\n' +
+      '• _"Maria repôs quinta 10:00"_\n\n' +
+      '*↩️ Desfazer:*\n' +
+      '• _"apagar custo aluguel 2026-05"_\n' +
+      '• _"remover custo ID 20"_\n' +
+      '• _"desfazer pagamento Ana maio"_\n' +
+      '• _"remover aula kelly"_\n' +
+      '• _"desfazer check-in Ana hoje 09:00"_\n\n' +
+      '*📋 Rescisão:*\n' +
+      '• _"Mara quer rescindir, plano semestral, pagou 2 meses"_'
+    );
+  }
+
   var ehRemocao = ['remover','apagar','deletar','excluir','desfazer'].some(function(p){ return textoL.indexOf(p)>=0; });
   if (ehRemocao && (textoL.indexOf('custo')>=0 || textoL.indexOf('id ')>=0)) {
     // Verificar se é remoção por ID
