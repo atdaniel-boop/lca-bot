@@ -105,7 +105,7 @@ async function ai(prompt) {
 async function getDados() {
   var alunos = [], custos = [], aulas = [];
   try {
-    var ra = await sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,pagamentos,pagamentos_pendentes');
+    var ra = await sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes');
     console.log('Alunos raw type:', typeof ra, '| isArray:', Array.isArray(ra), '| length:', Array.isArray(ra)?ra.length:'N/A', '| sample:', JSON.stringify(ra).slice(0,150));
     alunos = Array.isArray(ra) ? ra : [];
   } catch(e) { console.error('Erro alunos:', e.message); }
@@ -214,14 +214,23 @@ async function executar(cmd, dados) {
     var ativos = dados.alunos.filter(function(a){ return a.ativo==='SIM'; });
     // Leda: retirada fixa de R$6.000/mês
     totalProf += 6000;
-    // Monica: 40% dos alunos exclusivos dela
-    var alunosMonica = ativos.filter(function(a){ return a.professora==='monica'; });
-    var recMonica = alunosMonica.reduce(function(s,a){
+    // Monica: 40% dos alunos exclusivos + fração dos alunos 'ambas'
+    var recMonica = 0;
+    ativos.forEach(function(a) {
       var pags = a.pagamentos;
       if (typeof pags==='string'){try{pags=JSON.parse(pags);}catch(e){pags={};}}
-      return s + ((pags||{})[mes]||0);
-    }, 0);
-    totalProf += recMonica * 0.4;
+      var v = (pags||{})[mes] || 0;
+      if (!v) return;
+      if (a.professora === 'monica') {
+        recMonica += v * 0.4;
+      } else if (a.professora === 'ambas' && a.prof_secundaria === 'monica') {
+        var aulasProf = Number(a.aulas_prof) || 1;
+        var vezesSem  = Number(a.vezes_semana) || 2;
+        var frac = aulasProf / vezesSem;
+        recMonica += v * 0.4 * frac;
+      }
+    });
+    totalProf += recMonica;
     // Kelly: soma das horas x R$35
     var aulasKelly = dados.aulas.filter(function(k){ return k.prof_id==='kelly' && k.mes===mes; });
     totalProf += aulasKelly.reduce(function(s,k){ return s + ((k.horas||k.vh||0)*35); }, 0);
@@ -340,6 +349,14 @@ async function processar(msg) {
   var chatId   = msg.chat.id;
   var username = (msg.from.username || '').toLowerCase();
   var texto    = (msg.text || '').trim();
+
+  // Ignorar mensagens com mais de 60 segundos (evita reprocessar após restart)
+  var agora = Math.floor(Date.now() / 1000);
+  var msgTs  = msg.date || 0;
+  if (agora - msgTs > 60) {
+    console.log('Mensagem ignorada (antiga):', texto.slice(0,30), '| idade:', (agora-msgTs)+'s');
+    return;
+  }
 
   // Segurança: só o usuário autorizado
   if (ALLOWED_USER && username !== ALLOWED_USER) {
