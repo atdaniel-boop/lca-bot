@@ -290,6 +290,16 @@ async function executar(cmd, dados) {
     return '✅ Pagamento confirmado!\n*' + aluno.nome + '* — ' + brl(p.valor) + ' — ' + mes;
   }
 
+  // ── Remover custo por ID ──
+  if (cmd.acao === 'remover_custo_id') {
+    var cId = p.custo_id;
+    if (!cId) return '❌ ID inválido.';
+    var custoAchado = dados.custos.find(function(c){ return (c.id||c._id) === cId; });
+    if (!custoAchado) return '❌ Custo ID ' + cId + ' não encontrado.';
+    await req(SUPABASE_URL + '/rest/v1/custos?id=eq.' + cId, 'DELETE', sbHeaders(), null);
+    return '✅ Custo removido!\n*' + (custoAchado.descricao||custoAchado.categoria) + '* — ' + brl(custoAchado.valor);
+  }
+
   // ── Remover custo ──
   if (cmd.acao === 'remover_custo') {
     var busca = ((p.descricao || p.categoria) || '').toLowerCase().replace('[via bot telegram]','').trim();
@@ -415,12 +425,19 @@ async function processar(msg) {
   // Detectar remoção ANTES da IA
   var textoL = texto.toLowerCase();
   var ehRemocao = ['remover','apagar','deletar','excluir','desfazer'].some(function(p){ return textoL.indexOf(p)>=0; });
-  if (ehRemocao && textoL.indexOf('custo')>=0) {
-    var cats=['aluguel','energia','luz','agua','internet','telefone','limpeza','material'];
-    var catAchada = cats.find(function(cat){ return textoL.indexOf(cat)>=0; }) || null;
-    var mM = texto.match(/[0-9]{4}-[0-9]{2}/);
-    cmd = { acao:'remover_custo', params:{ categoria:catAchada, descricao:catAchada, mes: mM ? mM[0] : new Date().toISOString().slice(0,7) }, confirmacao:'' };
-    console.log('Remocao detectada diretamente:', catAchada);
+  if (ehRemocao && (textoL.indexOf('custo')>=0 || textoL.indexOf('id ')>=0)) {
+    // Verificar se é remoção por ID
+    var idMatch = texto.match(/id\s*(\d+)/i);
+    if (idMatch) {
+      cmd = { acao:'remover_custo_id', params:{ custo_id: parseInt(idMatch[1]) }, confirmacao:'' };
+      console.log('Remocao por ID detectada:', idMatch[1]);
+    } else {
+      var cats=['aluguel','energia','luz','agua','internet','telefone','limpeza','material'];
+      var catAchada = cats.find(function(cat){ return textoL.indexOf(cat)>=0; }) || null;
+      var mM = texto.match(/[0-9]{4}-[0-9]{2}/);
+      cmd = { acao:'remover_custo', params:{ categoria:catAchada, descricao:catAchada, mes: mM ? mM[0] : new Date().toISOString().slice(0,7) }, confirmacao:'' };
+      console.log('Remocao por categoria detectada:', catAchada);
+    }
   } else {
     try {
       cmd = await interpretar(texto, dados);
