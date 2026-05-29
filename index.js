@@ -74,25 +74,31 @@ function sbPatch(table, query, body) {
 
 // ── Gemini ────────────────────────────────────────────────────────
 async function ai(prompt) {
-  try {
-    var r = await req(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + GEMINI_KEY,
-      'POST',
-      { 'Content-Type': 'application/json' },
-      { contents: [{ parts: [{ text: prompt }] }] }
-    );
-    console.log('Gemini raw:', JSON.stringify(r).slice(0, 300));
-    if (r && r.candidates && r.candidates[0] && r.candidates[0].content) {
-      return r.candidates[0].content.parts[0].text.trim();
+  var models = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.0-flash-lite'];
+  for (var i = 0; i < models.length; i++) {
+    try {
+      var r = await req(
+        'https://generativelanguage.googleapis.com/v1beta/models/' + models[i] + ':generateContent?key=' + GEMINI_KEY,
+        'POST',
+        { 'Content-Type': 'application/json' },
+        { contents: [{ parts: [{ text: prompt }] }] }
+      );
+      if (r && r.candidates && r.candidates[0] && r.candidates[0].content) {
+        console.log('Gemini OK com modelo:', models[i]);
+        return r.candidates[0].content.parts[0].text.trim();
+      }
+      if (r && r.error && r.error.code === 503) {
+        console.log('Modelo ' + models[i] + ' sobrecarregado, tentando proximo...');
+        continue;
+      }
+      if (r && r.error) {
+        console.error('Gemini erro em ' + models[i] + ':', r.error.message);
+      }
+    } catch(e) {
+      console.error('Gemini excecao em ' + models[i] + ':', e.message);
     }
-    if (r && r.error) {
-      console.error('Gemini API error:', r.error.message);
-    }
-    return null;
-  } catch(e) {
-    console.error('Gemini exception:', e.message);
-    return null;
   }
+  return null;
 }
 
 // ── Dados do sistema ──────────────────────────────────────────────
@@ -122,7 +128,7 @@ async function interpretar(texto, dados) {
     'COMANDO DO GESTOR: "' + texto + '"\n\n' +
     'Retorne APENAS um JSON válido, sem markdown, sem explicação:\n' +
     '{\n' +
-    '  "acao": "consulta_inadimplentes" | "consulta_financeiro" | "lancar_custo" | "lancar_aula" | "confirmar_pagamento" | "calcular_rescisao" | "saudacao" | "desconhecido",\n' +
+    '  "acao": "consulta_inadimplentes" (quem nao pagou / inadimplentes / em atraso) | "consulta_financeiro" (resumo / faturamento / quanto entrou) | "lancar_custo" (custo / despesa / aluguel / energia) | "lancar_aula" (aula / horas de aula) | "confirmar_pagamento" (pagou / confirmou pagamento) | "calcular_rescisao" (rescindir / cancelar contrato) | "saudacao" (oi / ola / start) | "desconhecido",\n' +
     '  "params": {\n' +
     '    "aluno_id": numero ou null,\n' +
     '    "aluno_nome": string ou null,\n' +
