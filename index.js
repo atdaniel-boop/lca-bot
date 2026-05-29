@@ -367,6 +367,12 @@ async function processar(msg) {
   var dados, cmd;
   try {
     dados = await getDados();
+    // DEBUG: log first aluno's pagamentos raw
+    if (dados.alunos && dados.alunos[0]) {
+      var _a0 = dados.alunos[0];
+      console.log('DEBUG aluno0:', _a0.nome, '| pags type:', typeof _a0.pagamentos, '| raw:', JSON.stringify(_a0.pagamentos).slice(0,100));
+    }
+    console.log('DEBUG total alunos:', dados.alunos.length, '| total custos:', dados.custos.length, '| total aulas:', dados.aulas.length);
   } catch(e) {
     return tgSend(chatId, '❌ Erro ao conectar ao banco de dados: ' + e.message);
   }
