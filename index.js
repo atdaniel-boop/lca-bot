@@ -5,23 +5,27 @@ const https = require('https');
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const GEMINI_KEY     = process.env.GEMINI_API_KEY;
-const SUPABASE_URL   = process.env.SUPABASE_URL   || 'https://amkuqijbwjspxajiguxz.supabase.co';
+const SUPABASE_URL   = process.env.SUPABASE_URL || 'https://amkuqijbwjspxajiguxz.supabase.co';
 const SUPABASE_KEY   = process.env.SUPABASE_KEY;
-const ALLOWED_USER   = (process.env.ALLOWED_USER  || '').toLowerCase();
+const ALLOWED_USER   = (process.env.ALLOWED_USER || '').toLowerCase();
 
-// ── HTTP ──────────────────────────────────────────────────────────
-function req(url, opts, body) {
+// ── HTTP helper ───────────────────────────────────────────────────
+function req(url, method, headers, body) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
-    const r = https.request({
-      hostname: u.hostname, port: 443,
+    const options = {
+      hostname: u.hostname,
+      port: 443,
       path: u.pathname + u.search,
-      method: opts.method || 'GET',
-      headers: opts.headers || {}
-    }, res => {
+      method: method || 'GET',
+      headers: headers || {}
+    };
+    const r = https.request(options, res => {
       let d = '';
       res.on('data', c => d += c);
-      res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } });
+      res.on('end', () => {
+        try { resolve(JSON.parse(d)); } catch { resolve(d); }
+      });
     });
     r.on('error', reject);
     if (body) r.write(typeof body === 'string' ? body : JSON.stringify(body));
@@ -31,33 +35,57 @@ function req(url, opts, body) {
 
 // ── Telegram ──────────────────────────────────────────────────────
 function tgSend(chatId, text) {
-  return req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' } },
-    { chat_id: chatId, text, parse_mode: 'Markdown' });
+  return req(
+    `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+    'POST',
+    { 'Content-Type': 'application/json' },
+    { chat_id: chatId, text, parse_mode: 'Markdown' }
+  );
 }
+
 function tgUpdates(offset) {
-  return req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${offset}&timeout=25`);
+  return req(
+    `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${offset}&timeout=25`,
+    'GET', {}, null
+  );
 }
 
 // ── Supabase ──────────────────────────────────────────────────────
-const SB_HEADERS = () => ({
-  apikey: SUPABASE_KEY,
-  Authorization: `Bearer ${SUPABASE_KEY}`,
-  'Content-Type': 'application/json',
-  Prefer: 'return=representation'
-});
-const sbGet  = (t, q='') => req(`${SUPABASE_URL}/rest/v1/${t}?${q}`, { headers: SB_HEADERS() });
-const sbPost = (t, b)    => req(`${SUPABASE_URL}/rest/v1/${t}`, { method:'POST', headers: SB_HEADERS() }, b);
-const sbPatch= (t, q, b) => req(`${SUPABASE_URL}/rest/v1/${t}?${q}`, { method:'PATCH', headers: SB_HEADERS() }, b);
+function sbHeaders() {
+  return {
+    'apikey': SUPABASE_KEY,
+    'Authorization': 'Bearer ' + SUPABASE_KEY,
+    'Content-Type': 'application/json',
+    'Prefer': 'return=representation'
+  };
+}
+
+function sbGet(table, query) {
+  return req(SUPABASE_URL + '/rest/v1/' + table + '?' + (query||''), 'GET', sbHeaders(), null);
+}
+
+function sbPost(table, body) {
+  return req(SUPABASE_URL + '/rest/v1/' + table, 'POST', sbHeaders(), body);
+}
+
+function sbPatch(table, query, body) {
+  return req(SUPABASE_URL + '/rest/v1/' + table + '?' + query, 'PATCH', sbHeaders(), body);
+}
 
 // ── Gemini ────────────────────────────────────────────────────────
 async function ai(prompt) {
-  const r = await req(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' } },
-    { contents: [{ parts: [{ text: prompt }] }] }
-  );
-  try { return r.candidates[0].content.parts[0].text.trim(); } catch { return null; }
+  try {
+    const r = await req(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + GEMINI_KEY,
+      'POST',
+      { 'Content-Type': 'application/json' },
+      { contents: [{ parts: [{ text: prompt }] }] }
+    );
+    return r.candidates[0].content.parts[0].text.trim();
+  } catch(e) {
+    console.error('Gemini error:', e.message);
+    return null;
+  }
 }
 
 // ── Dados do sistema ──────────────────────────────────────────────
@@ -66,229 +94,267 @@ async function getDados() {
     sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,pagamentos,pagamentos_pendentes&ativo=eq.SIM'),
     sbGet('custos', 'select=*&order=id.desc&limit=50')
   ]);
-  return { alunos: Array.isArray(alunos) ? alunos : [], custos: Array.isArray(custos) ? custos : [] };
+  return {
+    alunos: Array.isArray(alunos) ? alunos : [],
+    custos: Array.isArray(custos) ? custos : []
+  };
 }
 
 // ── Interpretar comando via IA ────────────────────────────────────
 async function interpretar(texto, dados) {
   const hoje = new Date().toLocaleDateString('pt-BR');
   const mes  = new Date().toISOString().slice(0, 7);
-  const resumoAlunos = dados.alunos.map(a => `${a.id}|${a.nome}|${a.tipo_plano}|${a.vezes_semana}x`).join('\n');
+  const resumoAlunos = dados.alunos
+    .map(a => a.id + '|' + a.nome + '|' + a.tipo_plano + '|' + a.vezes_semana + 'x')
+    .join('\n');
 
-  const prompt = `Você é o assistente do LCA Studio de Pilates (Rio de Janeiro).
-Hoje: ${hoje} | Mês atual: ${mes}
-
-ALUNOS ATIVOS:
-${resumoAlunos}
-
-COMANDO DO GESTOR: "${texto}"
-
-Retorne APENAS um JSON válido, sem markdown:
-{
-  "acao": "consulta_inadimplentes" | "consulta_financeiro" | "lancar_custo" | "lancar_aula" | "confirmar_pagamento" | "calcular_rescisao" | "saudacao" | "desconhecido",
-  "params": {
-    "aluno_id": número ou null,
-    "aluno_nome": string ou null,
-    "valor": número ou null,
-    "mes": "YYYY-MM" ou null,
-    "categoria": string ou null,
-    "descricao": string ou null,
-    "professora": string ou null,
-    "horas": número ou null,
-    "meses_utilizados": número ou null,
-    "data": "YYYY-MM-DD" ou null
-  },
-  "confirmacao": "frase resumindo a ação a executar (máx 1 linha)"
-}`;
+  const prompt =
+    'Você é o assistente do LCA Studio de Pilates (Rio de Janeiro).\n' +
+    'Hoje: ' + hoje + ' | Mês atual: ' + mes + '\n\n' +
+    'ALUNOS ATIVOS:\n' + resumoAlunos + '\n\n' +
+    'COMANDO DO GESTOR: "' + texto + '"\n\n' +
+    'Retorne APENAS um JSON válido, sem markdown, sem explicação:\n' +
+    '{\n' +
+    '  "acao": "consulta_inadimplentes" | "consulta_financeiro" | "lancar_custo" | "lancar_aula" | "confirmar_pagamento" | "calcular_rescisao" | "saudacao" | "desconhecido",\n' +
+    '  "params": {\n' +
+    '    "aluno_id": numero ou null,\n' +
+    '    "aluno_nome": string ou null,\n' +
+    '    "valor": numero ou null,\n' +
+    '    "mes": "YYYY-MM" ou null,\n' +
+    '    "categoria": string ou null,\n' +
+    '    "descricao": string ou null,\n' +
+    '    "professora": string ou null,\n' +
+    '    "horas": numero ou null,\n' +
+    '    "meses_utilizados": numero ou null,\n' +
+    '    "data": "YYYY-MM-DD" ou null\n' +
+    '  },\n' +
+    '  "confirmacao": "frase resumindo a acao (max 1 linha)"\n' +
+    '}';
 
   const raw = await ai(prompt);
   if (!raw) return null;
   try {
-    return JSON.parse(raw.replace(/```json\n?/g,'').replace(/```/g,''));
-  } catch {
+    const clean = raw.replace(/```json\n?/g,'').replace(/```/g,'').trim();
+    return JSON.parse(clean);
+  } catch(e) {
+    console.error('Parse error:', e.message, '| raw:', raw.slice(0,200));
     return null;
   }
+}
+
+// ── Formatar valor ────────────────────────────────────────────────
+function brl(v) {
+  return 'R$ ' + Math.abs(Number(v)).toFixed(2).replace('.', ',');
 }
 
 // ── Executar ação ─────────────────────────────────────────────────
 async function executar(cmd, dados) {
   const p   = cmd.params;
   const mes = p.mes || new Date().toISOString().slice(0, 7);
-  const brl = v => 'R$ ' + Number(v).toFixed(2).replace('.', ',');
 
+  // ── Consulta inadimplentes ──
   if (cmd.acao === 'consulta_inadimplentes') {
-    const list = dados.alunos.filter(a => {
-      const pago    = (a.pagamentos         || {})[mes] || 0;
-      const aguard  = (a.pagamentos_pendentes|| {})[mes] || 0;
+    const list = dados.alunos.filter(function(a) {
+      var pago   = ((a.pagamentos          || {})[mes]) || 0;
+      var aguard = ((a.pagamentos_pendentes || {})[mes]) || 0;
       return pago === 0 && aguard === 0;
     });
-    if (!list.length) return `✅ Todos pagaram em ${mes}!`;
-    return `⚠️ *Inadimplentes — ${mes}*\n\n` + list.map(a => `• ${a.nome} (${a.tipo_plano})`).join('\n');
+    if (!list.length) return '✅ Todos pagaram em ' + mes + '!';
+    return '⚠️ *Inadimplentes — ' + mes + '*\n\n' +
+      list.map(function(a){ return '• ' + a.nome + ' (' + a.tipo_plano + ')'; }).join('\n');
   }
 
+  // ── Resumo financeiro ──
   if (cmd.acao === 'consulta_financeiro') {
-    const total = dados.alunos.reduce((s, a) => s + ((a.pagamentos || {})[mes] || 0), 0);
-    const pagos = dados.alunos.filter(a => ((a.pagamentos || {})[mes] || 0) > 0).length;
-    const custosMes = dados.custos.filter(c => c.mes === mes);
-    const totalCustos = custosMes.reduce((s, c) => s + (c.valor || 0), 0);
-    return `📊 *Resumo ${mes}*\n\n💰 Receita: *${brl(total)}* (${pagos} pagamentos)\n🔴 Custos: *${brl(totalCustos)}*\n📈 Resultado: *${brl(total - totalCustos)}*`;
+    var total = dados.alunos.reduce(function(s,a){ return s + (((a.pagamentos||{})[mes])||0); }, 0);
+    var pagos = dados.alunos.filter(function(a){ return ((a.pagamentos||{})[mes]||0) > 0; }).length;
+    var custosMes   = dados.custos.filter(function(c){ return c.mes === mes; });
+    var totalCustos = custosMes.reduce(function(s,c){ return s + (c.valor||0); }, 0);
+    return '📊 *Resumo ' + mes + '*\n\n' +
+      '💰 Receita: *' + brl(total) + '* (' + pagos + ' pagamentos)\n' +
+      '🔴 Custos: *' + brl(totalCustos) + '*\n' +
+      '📈 Resultado: *' + brl(total - totalCustos) + '*';
   }
 
+  // ── Lançar custo ──
   if (cmd.acao === 'lancar_custo') {
     if (!p.valor || !p.categoria) return '❌ Informe o valor e a categoria do custo.';
     await sbPost('custos', {
       descricao: p.descricao || p.categoria,
       valor: p.valor,
       categoria: p.categoria,
-      mes
+      mes: mes
     });
-    return `✅ Custo lançado!\n*${p.descricao || p.categoria}* — ${brl(p.valor)} — ${mes}`;
+    return '✅ Custo lançado!\n*' + (p.descricao||p.categoria) + '* — ' + brl(p.valor) + ' — ' + mes;
   }
 
+  // ── Lançar aula ──
   if (cmd.acao === 'lancar_aula') {
     if (!p.horas) return '❌ Informe o número de horas.';
-    const profId = (p.professora || '').toLowerCase().includes('kelly') ? 'kelly' :
-                   (p.professora || '').toLowerCase().includes('monica') ? 'monica' : 'leda';
-    const data = p.data || new Date().toISOString().slice(0, 10);
+    var profNome = (p.professora || '').toLowerCase();
+    var profId = profNome.includes('kelly') ? 'kelly' :
+                 profNome.includes('monica') ? 'monica' : 'leda';
+    var data = p.data || new Date().toISOString().slice(0, 10);
     await sbPost('aulas', {
-      prof_id: profId, mes,
-      data, data_fmt: data.split('-').reverse().join('/'),
-      horas: p.horas, vh: p.horas,
-      desc_aula: `Lançado via bot — ${p.horas}h`
+      prof_id: profId,
+      mes: mes,
+      data: data,
+      data_fmt: data.split('-').reverse().join('/'),
+      horas: p.horas,
+      vh: p.horas,
+      desc_aula: 'Lançado via bot — ' + p.horas + 'h'
     });
-    return `✅ Aula lançada!\n*${p.professora || profId}* — ${p.horas}h — ${data}`;
+    return '✅ Aula lançada!\n*' + (p.professora||profId) + '* — ' + p.horas + 'h — ' + data;
   }
 
+  // ── Confirmar pagamento ──
   if (cmd.acao === 'confirmar_pagamento') {
-    const aluno = dados.alunos.find(a =>
-      (p.aluno_id && a.id === p.aluno_id) ||
-      (p.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
-    );
-    if (!aluno) return `❌ Aluno não encontrado: "${p.aluno_nome}".`;
-    if (!p.valor)  return `❌ Informe o valor do pagamento.`;
-    const pags = { ...(aluno.pagamentos || {}) };
+    var aluno = dados.alunos.find(function(a){
+      return (p.aluno_id && a.id === p.aluno_id) ||
+             (p.aluno_nome && a.nome.toLowerCase().indexOf(p.aluno_nome.toLowerCase()) >= 0);
+    });
+    if (!aluno) return '❌ Aluno não encontrado: "' + p.aluno_nome + '".';
+    if (!p.valor) return '❌ Informe o valor do pagamento.';
+    var pags = Object.assign({}, aluno.pagamentos || {});
     pags[mes] = p.valor;
-    await sbPatch('alunos', `id=eq.${aluno.id}`, { pagamentos: pags });
-    return `✅ Pagamento confirmado!\n*${aluno.nome}* — ${brl(p.valor)} — ${mes}`;
+    await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags });
+    return '✅ Pagamento confirmado!\n*' + aluno.nome + '* — ' + brl(p.valor) + ' — ' + mes;
   }
 
+  // ── Calcular rescisão ──
   if (cmd.acao === 'calcular_rescisao') {
-    const aluno = dados.alunos.find(a =>
-      (p.aluno_id && a.id === p.aluno_id) ||
-      (p.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
-    );
-    if (!aluno) return `❌ Aluno não encontrado: "${p.aluno_nome}".`;
-    const DUR = { mensal: 1, trimestral: 3, semestral: 6 };
-    const dur = DUR[aluno.tipo_plano] || 1;
-    const pags = Object.entries(aluno.pagamentos || {}).filter(e => e[1] > 0)
-      .sort((a, b) => a[0].localeCompare(b[0]));
-    const totalPago = pags.reduce((s, e) => s + e[1], 0);
-    const ultV      = pags.length ? pags[pags.length - 1][1] : 329;
-    const mUsados   = p.meses_utilizados || 1;
-    const mRestantes= dur - mUsados;
-    const deveria   = ultV * mUsados;
-    const diferenca = deveria - totalPago;
-    const multa     = ultV * 0.2 * mRestantes;
-    const saldo     = diferenca + multa;
-    const brl2 = v => 'R$ ' + Math.abs(v).toFixed(2).replace('.', ',');
-    return (
-      `📋 *Rescisão — ${aluno.nome}*\n\n` +
-      `Plano: ${aluno.tipo_plano} (${dur} meses)\n` +
-      `Meses utilizados: ${mUsados} | Restantes: ${mRestantes}\n\n` +
-      `Deveria pagar: ${brl2(deveria)}\n` +
-      `Total já pago: ${brl2(totalPago)}\n` +
-      `Diferença de plano: ${brl2(diferenca)}\n` +
-      `Multa 20% × ${mRestantes} meses: ${brl2(multa)}\n\n` +
-      `*Saldo a pagar: ${brl2(saldo)}*\n\n` +
-      `_Para confirmar e lançar no sistema, responda:_ *sim*`
-    );
+    var aluno = dados.alunos.find(function(a){
+      return (p.aluno_id && a.id === p.aluno_id) ||
+             (p.aluno_nome && a.nome.toLowerCase().indexOf(p.aluno_nome.toLowerCase()) >= 0);
+    });
+    if (!aluno) return '❌ Aluno não encontrado: "' + p.aluno_nome + '".';
+    var DUR = { mensal: 1, trimestral: 3, semestral: 6 };
+    var dur = DUR[aluno.tipo_plano] || 1;
+    var pags = Object.entries(aluno.pagamentos || {})
+      .filter(function(e){ return e[1] > 0; })
+      .sort(function(a,b){ return a[0].localeCompare(b[0]); });
+    var totalPago  = pags.reduce(function(s,e){ return s+e[1]; }, 0);
+    var ultV       = pags.length ? pags[pags.length-1][1] : 329;
+    var mUsados    = p.meses_utilizados || 1;
+    var mRestantes = dur - mUsados;
+    var deveria    = ultV * mUsados;
+    var diferenca  = deveria - totalPago;
+    var multa      = ultV * 0.2 * mRestantes;
+    var saldo      = diferenca + multa;
+    return '📋 *Rescisão — ' + aluno.nome + '*\n\n' +
+      'Plano: ' + aluno.tipo_plano + ' (' + dur + ' meses)\n' +
+      'Meses utilizados: ' + mUsados + ' | Restantes: ' + mRestantes + '\n\n' +
+      'Deveria pagar: ' + brl(deveria) + '\n' +
+      'Total já pago: ' + brl(totalPago) + '\n' +
+      'Diferença de plano: ' + brl(diferenca) + '\n' +
+      'Multa 20% × ' + mRestantes + ' meses: ' + brl(multa) + '\n\n' +
+      '*Saldo a pagar: ' + brl(saldo) + '*\n\n' +
+      '_Para confirmar e lançar no sistema, responda:_ *sim*';
   }
 
+  // ── Saudação ──
   if (cmd.acao === 'saudacao') {
-    return (
-      `👋 *LCA Studio Bot*\n\n` +
-      `Olá Daniel! Estou pronto. Exemplos:\n\n` +
-      `• _"quem não pagou junho?"_\n` +
-      `• _"custo aluguel 3500 junho"_\n` +
-      `• _"kelly deu 2 aulas hoje"_\n` +
-      `• _"Ana Lima pagou 329 boleto"_\n` +
-      `• _"resumo financeiro de maio"_\n` +
-      `• _"Mara quer rescindir, plano semestral, pagou 2 meses"_`
-    );
+    return '👋 *LCA Studio Bot*\n\n' +
+      'Olá Daniel! Estou pronto. Exemplos:\n\n' +
+      '• _"quem não pagou junho?"_\n' +
+      '• _"custo aluguel 3500 junho"_\n' +
+      '• _"kelly deu 2 aulas hoje"_\n' +
+      '• _"Ana Lima pagou 329 boleto"_\n' +
+      '• _"resumo financeiro de maio"_\n' +
+      '• _"Mara quer rescindir, plano semestral, pagou 2 meses"_';
   }
 
-  return `🤔 Não entendi. Tente reformular ou veja exemplos enviando: *oi*`;
+  return '🤔 Não entendi. Tente reformular ou envie *oi* para ver exemplos.';
 }
 
 // ── Confirmações pendentes ────────────────────────────────────────
-const pendente = {};
+var pendente = {};
 
 // ── Processar mensagem ────────────────────────────────────────────
 async function processar(msg) {
-  const chatId   = msg.chat.id;
-  const username = (msg.from.username || '').toLowerCase();
-  const texto    = (msg.text || '').trim();
+  var chatId   = msg.chat.id;
+  var username = (msg.from.username || '').toLowerCase();
+  var texto    = (msg.text || '').trim();
 
-  // Segurança: só Daniel pode usar
+  // Segurança: só o usuário autorizado
   if (ALLOWED_USER && username !== ALLOWED_USER) {
     return tgSend(chatId, '🔒 Acesso não autorizado.');
   }
 
-  // Resposta a confirmação pendente (rescisão)
+  // Resposta a confirmação pendente
   if (pendente[chatId]) {
-    const { cmd, dados } = pendente[chatId];
+    var conf = pendente[chatId];
     delete pendente[chatId];
-    if (['sim', 'confirmar', 'ok', 's'].includes(texto.toLowerCase())) {
-      const result = await executar(cmd, dados);
-      return tgSend(chatId, result);
+    if (['sim','confirmar','ok','s'].indexOf(texto.toLowerCase()) >= 0) {
+      try {
+        var result = await executar(conf.cmd, conf.dados);
+        return tgSend(chatId, result);
+      } catch(e) {
+        return tgSend(chatId, '❌ Erro ao executar: ' + e.message);
+      }
     }
     return tgSend(chatId, '❌ Cancelado.');
   }
 
+  // Processar novo comando
   await tgSend(chatId, '⏳ Processando...');
-  const dados = await getDados();
-  const cmd   = await interpretar(texto, dados);
+
+  var dados, cmd;
+  try {
+    dados = await getDados();
+  } catch(e) {
+    return tgSend(chatId, '❌ Erro ao conectar ao banco de dados: ' + e.message);
+  }
+
+  try {
+    cmd = await interpretar(texto, dados);
+  } catch(e) {
+    return tgSend(chatId, '❌ Erro na IA: ' + e.message);
+  }
 
   if (!cmd) {
-    return tgSend(chatId, '❌ Erro ao interpretar. Tente novamente.');
+    return tgSend(chatId, '❌ Não consegui interpretar. Tente novamente.');
   }
 
-  // Rescisão: confirmar antes de salvar
-  if (cmd.acao === 'calcular_rescisao') {
-    const preview = await executar(cmd, dados);
-    pendente[chatId] = { cmd, dados };
-    return tgSend(chatId, preview);
-  }
-
-  // Pagamento e custo: confirmar antes
-  if (['confirmar_pagamento', 'lancar_custo', 'lancar_aula'].includes(cmd.acao)) {
-    pendente[chatId] = { cmd, dados };
-    return tgSend(chatId, `⚠️ *Confirmar?*\n\n${cmd.confirmacao}\n\nResponda *sim* para confirmar.`);
+  // Ações que precisam de confirmação
+  if (['calcular_rescisao','confirmar_pagamento','lancar_custo','lancar_aula'].indexOf(cmd.acao) >= 0) {
+    var preview;
+    try { preview = await executar(cmd, dados); } catch(e) { preview = cmd.confirmacao || cmd.acao; }
+    pendente[chatId] = { cmd: cmd, dados: dados };
+    if (cmd.acao === 'calcular_rescisao') {
+      return tgSend(chatId, preview);
+    }
+    return tgSend(chatId, '⚠️ *Confirmar?*\n\n' + cmd.confirmacao + '\n\nResponda *sim* para confirmar.');
   }
 
   // Consultas: responder direto
-  const result = await executar(cmd, dados);
-  return tgSend(chatId, result);
+  try {
+    var resp = await executar(cmd, dados);
+    return tgSend(chatId, resp);
+  } catch(e) {
+    return tgSend(chatId, '❌ Erro: ' + e.message);
+  }
 }
 
 // ── Loop principal ────────────────────────────────────────────────
 async function main() {
   console.log('LCA Bot iniciado ✓');
-  let offset = 0;
+  var offset = 0;
   while (true) {
     try {
-      const res = await tgUpdates(offset);
-      if (res.result && res.result.length) {
-        for (const upd of res.result) {
+      var res = await tgUpdates(offset);
+      if (res && res.result && res.result.length) {
+        for (var i = 0; i < res.result.length; i++) {
+          var upd = res.result[i];
           offset = upd.update_id + 1;
           if (upd.message && upd.message.text) {
-            processar(upd.message).catch(e => console.error('Erro:', e.message));
+            processar(upd.message).catch(function(e){ console.error('Erro:', e.message); });
           }
         }
       }
-    } catch (e) {
+    } catch(e) {
       console.error('Loop error:', e.message);
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise(function(r){ setTimeout(r, 5000); });
     }
   }
 }
