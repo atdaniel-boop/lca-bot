@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase
-// Versão 2.8 — IA unificada, sem keywords, pagamento infere valor, modelos corretos
+// Versão 2.9 — JSON robusto, Kelly no contexto, despedidas tratadas
 
 const https = require('https');
 
@@ -82,10 +82,19 @@ async function ai(prompt) {
 }
 
 async function aiJSON(prompt) {
-  const raw = await ai(prompt + '\n\nRetorne APENAS JSON válido, sem markdown, sem explicação.');
+  const raw = await ai(prompt + '\n\nRetorne APENAS JSON válido, sem markdown, sem explicação, sem texto antes ou depois.');
   if (!raw) return null;
-  try { return JSON.parse(raw.replace(/```json\n?/g,'').replace(/```/g,'').trim()); }
-  catch(e) { console.error('JSON parse erro:', e.message, '| raw:', raw.slice(0,100)); return null; }
+  try {
+    // Extrai apenas o bloco JSON entre o primeiro { e o último }
+    const clean = raw.replace(/```json\n?/g,'').replace(/```/g,'').trim();
+    const start = clean.indexOf('{');
+    const end   = clean.lastIndexOf('}');
+    if (start < 0 || end < 0) throw new Error('No JSON object found');
+    return JSON.parse(clean.slice(start, end+1));
+  } catch(e) {
+    console.error('JSON parse erro:', e.message, '| raw:', raw.slice(0,120));
+    return null;
+  }
 }
 
 // ── Dados ─────────────────────────────────────────────────────────
@@ -239,6 +248,11 @@ async function processarComIA(texto, dados, mes) {
   if (['ajuda','help','comando','como usar'].some(k => tL.includes(k))) {
     return { tipo: 'ajuda' };
   }
+  // Despedidas e respostas curtas não-acionáveis
+  const despedidas = ['obrigado','obrigada','valeu','tchau','até','flw','ok','entendi','certo','legal','perfeito','ótimo','otimo','show','blz','beleza'];
+  if (texto.length < 30 && despedidas.some(k => tL.includes(k))) {
+    return { tipo: 'consulta', resposta: '😊 Disponível quando precisar!' };
+  }
 
   // UMA chamada ao Gemini — classifica E responde/extrai tudo
   const ultimoValor = {};
@@ -256,6 +270,7 @@ Receita: ${brl(ctx.financeiro.receita)} | Professoras: ${brl(ctx.financeiro.prof
 Planos vencendo: ${ctx.planosVencendo.length?ctx.planosVencendo.map(function(p){return p.nome+' ('+p.plano+', dia '+p.diaVenc+'/'+p.mesVenc+', '+p.dias+' dias)';}).join(' | '):'Nenhum'}
 Custos lancados: ${ctx.custosMes.map(function(c){return c.desc+' '+brl(c.valor);}).join(', ')||'Nenhum'}
 Faltas frequentes: ${ctx.faltasFrequentes.join(', ')||'Nenhuma'}
+Professoras este mes: Leda R$6.000 fixo | Monica ${brl(ctx.financeiro.detalheProfessoras.monica)} (40% alunos dela) | Kelly ${brl(ctx.financeiro.detalheProfessoras.kelly)} (${ctx.aulasKelly.reduce(function(s,k){return s+(k.horas||0);},0)}h x R$35)
 Ultimo pagamento por aluno: ${JSON.stringify(ultimoValor)}
 
 MENSAGEM: "${texto}"
