@@ -10,20 +10,22 @@ const SUPABASE_KEY   = process.env.SUPABASE_KEY;
 const ALLOWED_USER   = (process.env.ALLOWED_USER || '').toLowerCase();
 
 // ── HTTP ──────────────────────────────────────────────────────────
-function req(url, method, headers, body) {
+function req(url, method, headers, body, timeoutMs) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const r = https.request({
       hostname: u.hostname, port: 443,
       path: u.pathname + u.search,
       method: method || 'GET',
-      headers: headers || {}
+      headers: headers || {},
+      timeout: timeoutMs || 25000
     }, res => {
       let d = '';
       res.on('data', c => d += c);
       res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } });
     });
     r.on('error', reject);
+    r.on('timeout', () => { r.destroy(); reject(new Error('Request timeout')); });
     if (body) r.write(typeof body === 'string' ? body : JSON.stringify(body));
     r.end();
   });
@@ -57,7 +59,8 @@ async function ai(prompt) {
       const r = await req(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
         'POST', { 'Content-Type': 'application/json' },
-        { contents: [{ parts: [{ text: prompt }] }] }
+        { contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 1000 } },
+        15000
       );
       if (r?.candidates?.[0]?.content) return r.candidates[0].content.parts[0].text.trim();
       if (r?.error?.code === 503) continue;
@@ -171,6 +174,15 @@ function buildContexto(dados, mes) {
     if (!ultRen && a.data_matricula) {
       const dm = a.data_matricula.split('-');
       ultRen = new Date(parseInt(dm[0]), parseInt(dm[1])-1, parseInt(dm[2]));
+    }
+    // Fallback: use first payment as start date
+    if (!ultRen) {
+      const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+      const keys = Object.keys(pags).filter(k=>pags[k]>0).sort();
+      if (keys.length) {
+        const kp = keys[0].split('-');
+        ultRen = new Date(parseInt(kp[0]), parseInt(kp[1])-1, 1);
+      }
     }
     if (!ultRen) return null;
     const dur = DUR[a.tipo_plano]||1;
@@ -478,6 +490,10 @@ async function processar(msg) {
   }
 
   await tgSend(chatId, '⏳ Processando...');
+  // Timeout geral de 30s para evitar travar
+  const processTimer = setTimeout(() => {
+    tgSend(chatId, '⚠️ Tempo esgotado. O servidor pode estar sobrecarregado. Tente novamente.');
+  }, 30000);
   const mes = new Date().toISOString().slice(0,7);
 
   let dados;
@@ -514,7 +530,8 @@ async function processar(msg) {
   // Consulta livre — IA responde diretamente
   if (intencao === 'consulta_livre') {
     const resp = await consultaLivre(texto, dados, mes);
-    return tgSend(chatId, resp || '❌ Não consegui gerar uma resposta.');
+    clearTimeout(processTimer);
+  return tgSend(chatId, resp || '❌ Não consegui gerar uma resposta.');
   }
 
   // Ação que altera dados — extrair parâmetros e executar
@@ -528,6 +545,7 @@ async function processar(msg) {
   }
 
   const resultado = await executar(intencao, params, dados);
+  clearTimeout(processTimer);
   return tgSend(chatId, resultado || '❌ Não consegui executar a ação.');
 }
 
