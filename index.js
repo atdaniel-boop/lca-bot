@@ -76,7 +76,7 @@ function sbPatch(table, query, body) {
 async function ai(prompt) {
   try {
     var r = await req(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + GEMINI_KEY,
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + GEMINI_KEY,
       'POST',
       { 'Content-Type': 'application/json' },
       { contents: [{ parts: [{ text: prompt }] }] }
