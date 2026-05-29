@@ -180,12 +180,21 @@ async function executar(cmd, dados) {
   // ── Resumo financeiro ──
   if (cmd.acao === 'consulta_financeiro') {
     // Only count confirmed payments (pagamentos), exclude pending and rescisao
-    var total = dados.alunos.reduce(function(s,a){
-      var v  = (a.pagamentos||{})[mes] || 0;
-      var vR = (a.pagamentos_rescisao||{})[mes] || 0;
-      return s + Math.max(0, v - vR);
-    }, 0);
-    var pagos = dados.alunos.filter(function(a){ return ((a.pagamentos||{})[mes]||0) > 0; }).length;
+    var total = 0;
+    var pagos = 0;
+    dados.alunos.forEach(function(a) {
+      var pags = a.pagamentos;
+      // pags pode vir como string (JSON) ou objeto
+      if (typeof pags === 'string') { try { pags = JSON.parse(pags); } catch(e) { pags = {}; } }
+      pags = pags || {};
+      var v  = pags[mes] || 0;
+      var rescisao = a.pagamentos_rescisao;
+      if (typeof rescisao === 'string') { try { rescisao = JSON.parse(rescisao); } catch(e) { rescisao = {}; } }
+      var vR = (rescisao||{})[mes] || 0;
+      var liquido = Math.max(0, v - vR);
+      total += liquido;
+      if (v > 0) pagos++;
+    });
     var custosMes   = dados.custos.filter(function(c){ return c.mes === mes; });
     var totalCustos = custosMes.reduce(function(s,c){ return s + (c.valor||0); }, 0);
     var resultado   = total - totalCustos;
@@ -370,7 +379,26 @@ async function processar(msg) {
 // ── Loop principal ────────────────────────────────────────────────
 async function main() {
   console.log('LCA Bot iniciado ✓');
+
+  // IMPORTANTE: ao iniciar, pular todas as mensagens antigas
+  // Isso evita reprocessar mensagens quando o servidor reinicia
   var offset = 0;
+  try {
+    console.log('Inicializando offset...');
+    var init = await req(
+      'https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1',
+      'GET', {}, null
+    );
+    if (init && init.result && init.result.length > 0) {
+      offset = init.result[init.result.length - 1].update_id + 1;
+      console.log('Offset inicializado em:', offset, '(mensagens antigas ignoradas)');
+    } else {
+      console.log('Nenhuma mensagem anterior. Aguardando novas mensagens...');
+    }
+  } catch(e) {
+    console.log('Nao foi possivel inicializar offset:', e.message);
+  }
+
   while (true) {
     try {
       var res = await tgUpdates(offset);
