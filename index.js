@@ -102,14 +102,20 @@ async function ai(prompt) {
 }
 
 // ── Dados do sistema ──────────────────────────────────────────────
-async function getDados() {
-  const [alunos, custos] = await Promise.all([
-    sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,pagamentos,pagamentos_pendentes&ativo=eq.SIM'),
-    sbGet('custos', 'select=*&order=id.desc&limit=50')
+async function getDados(mes) {
+  var mesFiltro = mes || new Date().toISOString().slice(0, 7);
+  var results = await Promise.all([
+    // Todos os alunos (ativos e inativos) para capturar pagamentos do mês
+    sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,pagamentos,pagamentos_pendentes,pagamentos_rescisao'),
+    // Custos filtrados por mês direto no Supabase
+    sbGet('custos', 'select=*&mes=eq.' + mesFiltro),
+    // Aulas do mês para calcular professoras
+    sbGet('aulas', 'select=*&mes=eq.' + mesFiltro)
   ]);
   return {
-    alunos: Array.isArray(alunos) ? alunos : [],
-    custos: Array.isArray(custos) ? custos : []
+    alunos: Array.isArray(results[0]) ? results[0] : [],
+    custos: Array.isArray(results[1]) ? results[1] : [],
+    aulas:  Array.isArray(results[2]) ? results[2] : []
   };
 }
 
@@ -178,34 +184,46 @@ async function executar(cmd, dados) {
   }
 
   // ── Resumo financeiro ──
-  if (cmd.acao === 'consulta_financeiro') {
-    // Only count confirmed payments (pagamentos), exclude pending and rescisao
-    var total = 0;
-    var pagos = 0;
+    if (cmd.acao === 'consulta_financeiro') {
+    // Receita: soma pagamentos confirmados de TODOS os alunos (ativos e inativos)
+    var total = 0; var pagos = 0;
     dados.alunos.forEach(function(a) {
       var pags = a.pagamentos;
-      // pags pode vir como string (JSON) ou objeto
       if (typeof pags === 'string') { try { pags = JSON.parse(pags); } catch(e) { pags = {}; } }
       pags = pags || {};
-      var v  = pags[mes] || 0;
+      var v = pags[mes] || 0;
       var rescisao = a.pagamentos_rescisao;
       if (typeof rescisao === 'string') { try { rescisao = JSON.parse(rescisao); } catch(e) { rescisao = {}; } }
       var vR = (rescisao||{})[mes] || 0;
-      var liquido = Math.max(0, v - vR);
-      total += liquido;
+      var liq = Math.max(0, v - vR);
+      total += liq;
       if (v > 0) pagos++;
     });
-    var custosMes   = dados.custos.filter(function(c){ return c.mes === mes; });
-    var totalCustos = custosMes.reduce(function(s,c){ return s + (c.valor||0); }, 0);
-    var resultado   = total - totalCustos;
+    // Custos: já vêm filtrados por mês do Supabase
+    var totalCustos = dados.custos.reduce(function(s,c){ return s + (c.valor||0); }, 0);
+    // Professoras: calcular do mês
+    var totalProf = 0;
+    var ativos = dados.alunos.filter(function(a){ return a.ativo==='SIM'; });
+    // Monica: 40% dos alunos dela
+    var alunosMonica = ativos.filter(function(a){ return a.professora==='monica'; });
+    var recMonica = alunosMonica.reduce(function(s,a){
+      var pags = a.pagamentos;
+      if (typeof pags==='string'){try{pags=JSON.parse(pags);}catch(e){pags={};}}
+      return s + ((pags||{})[mes]||0);
+    }, 0);
+    totalProf += recMonica * 0.4;
+    // Kelly: soma das horas × R$35
+    var aulasKelly = dados.aulas.filter(function(k){ return k.prof_id==='kelly'; });
+    totalProf += aulasKelly.reduce(function(s,k){ return s + (k.horas||0)*35; }, 0);
+    var resultado = total - totalProf - totalCustos;
     return '📊 *Resumo ' + mes + '*\n\n' +
-      '💰 Receita confirmada: *' + brl(total) + '* (' + pagos + ' pagamentos)\n' +
-      '🔴 Custos lançados: *' + brl(totalCustos) + '*\n' +
+      '💰 Receita: *' + brl(total) + '* (' + pagos + ' pagamentos)\n' +
+      '👩 Professoras: *' + brl(totalProf) + '*\n' +
+      '🔴 Custos: *' + brl(totalCustos) + '*\n' +
       '📈 Resultado líquido: *' + brl(resultado) + '*' +
       (resultado < 0 ? ' ⚠️' : ' ✅');
   }
 
-  // ── Lançar custo ──
   if (cmd.acao === 'lancar_custo') {
     if (!p.valor || !p.categoria) return '❌ Informe o valor e a categoria do custo.';
     var descBot = (p.descricao || p.categoria) + ' [via Bot Telegram]';
@@ -341,7 +359,7 @@ async function processar(msg) {
 
   var dados, cmd;
   try {
-    dados = await getDados();
+    dados = await getDados(cmd.params && cmd.params.mes ? cmd.params.mes : new Date().toISOString().slice(0,7));
   } catch(e) {
     return tgSend(chatId, '❌ Erro ao conectar ao banco de dados: ' + e.message);
   }
