@@ -468,7 +468,7 @@ async function executar(intencao, p, dados) {
     return `✅ Check-in desfeito!\n*${aluno.nome}* — ${dataCi.slice(8)}/${dataCi.slice(5,7)}`;
   }
 
-  if (aiResult.intencao === 'calcular_rescisao') {
+  if (intencao === 'calcular_rescisao') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
     if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
@@ -541,7 +541,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v2.8*\n\n' +
+      '👋 *LCA Studio Bot v2.9*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
@@ -658,7 +658,7 @@ async function processar(msg) {
 
 // ── Loop principal ────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v2.8 iniciado ✓');
+  console.log('LCA Bot v2.9 iniciado ✓');
   let offset = 0;
   try {
     const init = await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=-1&limit=1&timeout=0`, 'GET', {}, null);
