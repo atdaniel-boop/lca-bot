@@ -99,12 +99,27 @@ async function aiJSON(prompt) {
 
 // ── Dados ─────────────────────────────────────────────────────────
 async function getDados() {
-  const [ra, rc, rk, rp] = await Promise.all([
+  const [ra, rc, rk] = await Promise.all([
     sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes'),
     sbGet('custos', 'select=*&order=id.desc'),
-    sbGet('aulas',  'select=*&order=id.desc'),
-    sbGet('professoras', 'select=id,nome,tipo,percentual,valor_hora,retirada,cor')
+    sbGet('aulas',  'select=*&order=id.desc')
   ]);
+  // Professoras: query separada com fallback silencioso (evita travar o bot se schema cache estiver desatualizado)
+  let professoras = [];
+  try {
+    const rp = await sbGet('professoras', 'select=id,nome,tipo,percentual,valor_hora,retirada,cor');
+    if (Array.isArray(rp) && rp.length) professoras = rp;
+  } catch(e) {
+    console.error('getDados professoras erro (usando fallback):', e.message);
+  }
+  // Fallback para os valores históricos caso a tabela esteja vazia ou inacessível
+  if (!professoras.length) {
+    professoras = [
+      {id:'leda',   nome:'Leda',   tipo:'proprietaria', percentual:0,  valor_hora:0,  retirada:6000},
+      {id:'monica', nome:'Monica', tipo:'percentual',   percentual:40, valor_hora:0,  retirada:0},
+      {id:'kelly',  nome:'Kelly',  tipo:'hora',         percentual:0,  valor_hora:35, retirada:0}
+    ];
+  }
   // Buscar agenda/checkins
   let changes = null;
   try {
@@ -113,12 +128,6 @@ async function getDados() {
       changes = typeof rch[0].data === 'string' ? JSON.parse(rch[0].data) : rch[0].data;
     }
   } catch(e) {}
-  // Professoras com fallback para os valores históricos caso a tabela esteja vazia
-  let professoras = Array.isArray(rp) && rp.length ? rp : [
-    {id:'leda',   nome:'Leda',   tipo:'proprietaria', percentual:0,  valor_hora:0,  retirada:6000},
-    {id:'monica', nome:'Monica', tipo:'percentual',   percentual:40, valor_hora:0,  retirada:0},
-    {id:'kelly',  nome:'Kelly',  tipo:'hora',         percentual:0,  valor_hora:35, retirada:0}
-  ];
   return {
     alunos:  Array.isArray(ra) ? ra : [],
     custos:  Array.isArray(rc) ? rc : [],
