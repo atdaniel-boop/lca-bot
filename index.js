@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase
-// Versão 2.9 — JSON robusto, Kelly no contexto, despedidas tratadas
+// Versão 3.2 — professoras lidas da tabela (retirada/percentual/valor-hora reais), correção do vh no lançamento de aula
 
 const https = require('https');
 
@@ -99,10 +99,11 @@ async function aiJSON(prompt) {
 
 // ── Dados ─────────────────────────────────────────────────────────
 async function getDados() {
-  const [ra, rc, rk] = await Promise.all([
-    sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,data_matricula,historico_alteracoes'),
+  const [ra, rc, rk, rp] = await Promise.all([
+    sbGet('alunos', 'select=id,nome,ativo,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes'),
     sbGet('custos', 'select=*&order=id.desc'),
-    sbGet('aulas',  'select=*&order=id.desc')
+    sbGet('aulas',  'select=*&order=id.desc'),
+    sbGet('professoras', 'select=id,nome,tipo,percentual,valor_hora,retirada,cor')
   ]);
   // Buscar agenda/checkins
   let changes = null;
@@ -112,10 +113,17 @@ async function getDados() {
       changes = typeof rch[0].data === 'string' ? JSON.parse(rch[0].data) : rch[0].data;
     }
   } catch(e) {}
+  // Professoras com fallback para os valores históricos caso a tabela esteja vazia
+  let professoras = Array.isArray(rp) && rp.length ? rp : [
+    {id:'leda',   nome:'Leda',   tipo:'proprietaria', percentual:0,  valor_hora:0,  retirada:6000},
+    {id:'monica', nome:'Monica', tipo:'percentual',   percentual:40, valor_hora:0,  retirada:0},
+    {id:'kelly',  nome:'Kelly',  tipo:'hora',         percentual:0,  valor_hora:35, retirada:0}
+  ];
   return {
     alunos:  Array.isArray(ra) ? ra : [],
     custos:  Array.isArray(rc) ? rc : [],
     aulas:   Array.isArray(rk) ? rk : [],
+    professoras: professoras,
     changes: changes
   };
 }
@@ -142,7 +150,12 @@ function buildContexto(dados, mes) {
              professora: a.professora, pagou: v > 0, valor: v };
   });
 
-  const receitaMes = pagMes.reduce((s, a) => s + a.valor, 0);
+  // Receita líquida do mês = pagamentos - saldos de rescisão (igual ao recMes do web)
+  const totalRescisaoMes = dados.alunos.reduce((s, a) => {
+    const pr = typeof a.pagamentos_rescisao === 'string' ? JSON.parse(a.pagamentos_rescisao||'{}') : (a.pagamentos_rescisao||{});
+    return s + (pr[mes] || 0);
+  }, 0);
+  const receitaMes = pagMes.reduce((s, a) => s + a.valor, 0) - totalRescisaoMes;
   const inadimplentes = ativos.filter(a => {
     const pag = pagMes.find(p => p.id === a.id);
     return !pag || !pag.pagou;
@@ -152,20 +165,28 @@ function buildContexto(dados, mes) {
   const custosMes = dados.custos.filter(c => c.mes === mes);
   const totalCustos = custosMes.reduce((s, c) => s + (c.valor||0), 0);
 
-  // Professoras
+  // Professoras — valores reais da tabela (fonte única de verdade)
+  const profs = dados.professoras || [];
+  const profMonica = profs.find(p => p.id === 'monica') || profs.find(p => p.tipo === 'percentual');
+  const profKelly  = profs.find(p => p.id === 'kelly')  || profs.find(p => p.tipo === 'hora');
+  const profLeda   = profs.find(p => p.id === 'leda')   || profs.find(p => p.tipo === 'proprietaria');
+  const pctMonica  = profMonica && profMonica.percentual > 0 ? profMonica.percentual/100 : 0.4;
+  const vhKelly    = profKelly && profKelly.valor_hora > 0 ? profKelly.valor_hora : 35;
+  const retLeda    = profLeda && profLeda.retirada > 0 ? profLeda.retirada : 6000;
+
   let totalMonica = 0;
   ativos.forEach(a => {
     const pags = typeof a.pagamentos === 'string' ? JSON.parse(a.pagamentos||'{}') : (a.pagamentos||{});
     const v = pags[mes] || 0;
     if (!v) return;
-    if (a.professora === 'monica') totalMonica += v * 0.4;
+    if (a.professora === 'monica') totalMonica += v * pctMonica;
     else if (a.professora === 'ambas' && a.prof_secundaria === 'monica') {
-      totalMonica += v * 0.4 * ((a.aulas_prof||1)/(a.vezes_semana||2));
+      totalMonica += v * pctMonica * ((a.aulas_prof||1)/(a.vezes_semana||2));
     }
   });
   const aulasKelly = dados.aulas.filter(k => k.prof_id === 'kelly' && k.mes === mes);
-  const totalKelly = aulasKelly.reduce((s, k) => s + (k.horas||k.vh||0)*35, 0);
-  const totalLeda = 6000;
+  const totalKelly = aulasKelly.reduce((s, k) => s + (k.horas||k.vh||0)*vhKelly, 0);
+  const totalLeda = retLeda;
   const totalProf = totalLeda + totalMonica + totalKelly;
   const resultado = receitaMes - totalProf - totalCustos;
 
@@ -215,7 +236,8 @@ function buildContexto(dados, mes) {
     mes,
     estudio: { totalAlunos: dados.alunos.length, ativos: ativos.length, inativos: inativos.length },
     financeiro: { receita: receitaMes, professoras: totalProf, custos: totalCustos, resultado,
-      detalheProfessoras: { leda: totalLeda, monica: totalMonica, kelly: totalKelly } },
+      detalheProfessoras: { leda: totalLeda, monica: totalMonica, kelly: totalKelly },
+      paramProf: { retLeda: retLeda, pctMonica: pctMonica, vhKelly: vhKelly } },
     inadimplentes: inadimplentes.map(a => ({ id: a.id, nome: a.nome, plano: a.tipo_plano })),
     custosMes: custosMes.map(c => ({ id: c.id, desc: c.descricao, valor: c.valor })),
     aulasKelly: aulasKelly.map(k => ({ id: k.id, horas: k.horas||k.vh, data: k.data_fmt||k.data })),
@@ -270,7 +292,7 @@ Receita: ${brl(ctx.financeiro.receita)} | Professoras: ${brl(ctx.financeiro.prof
 Planos vencendo: ${ctx.planosVencendo.length?ctx.planosVencendo.map(function(p){return p.nome+' ('+p.plano+', dia '+p.diaVenc+'/'+p.mesVenc+', '+p.dias+' dias)';}).join(' | '):'Nenhum'}
 Custos lancados: ${ctx.custosMes.map(function(c){return c.desc+' '+brl(c.valor);}).join(', ')||'Nenhum'}
 Faltas frequentes: ${ctx.faltasFrequentes.join(', ')||'Nenhuma'}
-Professoras este mes: Leda R$6.000 fixo | Monica ${brl(ctx.financeiro.detalheProfessoras.monica)} (40% alunos dela) | Kelly ${brl(ctx.financeiro.detalheProfessoras.kelly)} (${ctx.aulasKelly.reduce(function(s,k){return s+(k.horas||0);},0)}h x R$35)
+Professoras este mes: Leda ${brl(ctx.financeiro.paramProf.retLeda)} fixo | Monica ${brl(ctx.financeiro.detalheProfessoras.monica)} (${Math.round(ctx.financeiro.paramProf.pctMonica*100)}% alunos dela) | Kelly ${brl(ctx.financeiro.detalheProfessoras.kelly)} (${ctx.aulasKelly.reduce(function(s,k){return s+(k.horas||0);},0)}h x ${brl(ctx.financeiro.paramProf.vhKelly)})
 Ultimo pagamento por aluno: ${JSON.stringify(ultimoValor)}
 
 MENSAGEM: "${texto}"
@@ -349,9 +371,12 @@ async function executar(intencao, p, dados) {
     const profId = (p.professora||'').toLowerCase().includes('kelly') ? 'kelly' :
                    (p.professora||'').toLowerCase().includes('monica') ? 'monica' : 'kelly';
     const data = p.data || new Date().toISOString().slice(0,10);
+    // Valor/hora real da professora (tabela professoras), com fallback 35
+    const profObj = (dados.professoras||[]).find(x => x.id === profId);
+    const vhReal = profObj && profObj.valor_hora > 0 ? profObj.valor_hora : 35;
     await sbPost('aulas', { prof_id: profId, mes, data, data_fmt: data.split('-').reverse().join('/'),
-      horas: p.horas, vh: p.horas, desc_aula: 'Lançado via Bot Telegram — '+p.horas+'h' });
-    return `✅ Aula lançada!\n*${profId}* — ${p.horas}h — ${data}\n_Para desfazer: "remover aula ${profId}"_`;
+      horas: p.horas, vh: vhReal, desc_aula: 'Lançado via Bot Telegram — '+p.horas+'h' });
+    return `✅ Aula lançada!\n*${profId}* — ${p.horas}h × ${brl(vhReal)} = ${brl(p.horas*vhReal)} — ${data}\n_Para desfazer: "remover aula ${profId}"_`;
   }
 
   if (intencao === 'confirmar_pagamento') {
@@ -361,11 +386,18 @@ async function executar(intencao, p, dados) {
     if (!p?.valor) return '❌ Informe o valor.';
     const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{});
     pags[mes] = p.valor;
+    // Remover de pendentes se existir (consistência com o sistema web)
+    let pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
+    pend = Object.assign({}, pend);
+    let tinhaPend = false;
+    if (pend[mes]) { delete pend[mes]; tinhaPend = true; }
     const hist = (aluno.historico_alteracoes||[]);
     hist.push({ data: new Date().toLocaleDateString('pt-BR'), tipo:'pagamento_bot',
       desc: `Pagamento ${mes} via Bot Telegram: ${brl(p.valor)}` });
-    await sbPatch('alunos', `id=eq.${aluno.id}`, { pagamentos: pags, historico_alteracoes: hist });
-    return `✅ Pagamento confirmado!\n*${aluno.nome}* — ${brl(p.valor)} — ${mes}\n_Para desfazer: "desfazer pagamento ${aluno.nome.split(' ')[0]} ${mes}"_`;
+    const patchData = { pagamentos: pags, historico_alteracoes: hist };
+    if (tinhaPend) patchData.pagamentos_pendentes = pend;
+    await sbPatch('alunos', `id=eq.${aluno.id}`, patchData);
+    return `✅ Pagamento confirmado!\n*${aluno.nome}* — ${brl(p.valor)} — ${mes}${tinhaPend?'\n_(boleto que estava aguardando foi baixado)_':''}\n_Para desfazer: "desfazer pagamento ${aluno.nome.split(' ')[0]} ${mes}"_`;
   }
 
   if (intencao === 'desfazer_pagamento') {
@@ -472,19 +504,23 @@ async function executar(intencao, p, dados) {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
     if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
-    const DUR = { mensal:1, trimestral:3, semestral:6 };
-    const dur = DUR[aluno.tipo_plano]||1;
+    if (aluno.tipo_plano === 'mensal') return `⚠️ ${aluno.nome} tem plano mensal — não há multa de rescisão. Basta inativar.`;
+    const DUR = { trimestral:3, semestral:6 };
+    const dur = DUR[aluno.tipo_plano]||3;
     const pags = Object.entries(typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{})
       .filter(e=>e[1]>0).sort((a,b)=>a[0].localeCompare(b[0]));
-    const totalPago = pags.reduce((s,e)=>s+e[1],0);
-    const ultV = pags.length?pags[pags.length-1][1]:329;
+    // Valor mensal de referência = último pagamento (ou informado)
+    const valorMensal = p?.valor || (pags.length?pags[pags.length-1][1]:329);
     const mUsados    = p?.meses_utilizados||1;
-    const mRestantes = dur-mUsados;
-    const deveria    = ultV*mUsados;
-    const diferenca  = deveria-totalPago;
-    const multa      = ultV*0.2*mRestantes;
-    const saldo      = diferenca+multa;
-    return `📋 *Rescisão — ${aluno.nome}*\n\nPlano: ${aluno.tipo_plano} (${dur} meses)\nMeses utilizados: ${mUsados} | Restantes: ${mRestantes}\n\nDeveria pagar: ${brl(deveria)}\nTotal já pago: ${brl(totalPago)}\nDiferença de plano: ${brl(diferenca)}\nMulta 20% × ${mRestantes} meses: ${brl(multa)}\n\n*Saldo a pagar: ${brl(saldo)}*\n\n_Para confirmar e lançar: responda_ *sim*`;
+    const mNaoUsados = Math.max(0, dur - mUsados);
+    // FÓRMULA CLÁUSULA 6 (idêntica ao sistema web):
+    // totalPago considera apenas os ÚLTIMOS mUsados pagamentos (plano atual), não todo o histórico
+    const pagosPlanoAtual = pags.slice(-mUsados).reduce((s,e)=>s+e[1],0);
+    const deveria    = valorMensal * mUsados;
+    const diferenca  = deveria - pagosPlanoAtual;
+    const multa      = valorMensal * 0.20 * mNaoUsados;
+    const saldo      = diferenca + multa;
+    return `📋 *Rescisão — ${aluno.nome}*\n\nPlano: ${aluno.tipo_plano} (${dur} meses)\nValor mensal ref.: ${brl(valorMensal)}\nMeses utilizados: ${mUsados} | Não usados: ${mNaoUsados}\n\nDeveria pagar (mensal × usados): ${brl(deveria)}\nPago no plano atual: ${brl(pagosPlanoAtual)}\nDiferença de plano: ${brl(diferenca)}\nMulta 20% × ${mNaoUsados} meses: ${brl(multa)}\n\n*Saldo a pagar: ${brl(saldo)}*\n\n_Confira o valor mensal. Se estiver errado, mande "${aluno.nome.split(' ')[0]} rescindir, ${mUsados} meses, mensal 329"_\n_Para confirmar e lançar: responda_ *sim*`;
   }
 
   return null;
@@ -510,8 +546,78 @@ async function processar(msg) {
     const conf = pendente[chatId];
     delete pendente[chatId];
     if (['sim','confirmar','ok','s'].includes(texto.toLowerCase())) {
-      // TODO: implementar lançamento da rescisão no Supabase
-      return tgSend(chatId, '✅ Rescisão registrada! Lembre de atualizar o status do aluno no sistema web.');
+      if (!conf.calc) {
+        return tgSend(chatId, '⚠️ Não há cálculo de rescisão para lançar. Refaça o pedido.');
+      }
+      try {
+        // Buscar o aluno atual no banco
+        const ra = await sbGet('alunos', `id=eq.${conf.calc.aluno_id}&select=*`);
+        const aluno = Array.isArray(ra) && ra[0];
+        if (!aluno) return tgSend(chatId, '❌ Aluno não encontrado no banco.');
+
+        const hoje = new Date();
+        const hojeStr = hoje.toISOString().slice(0,10);
+        const dataFmt = hojeStr.split('-').reverse().join('/');
+        const rescMes = hojeStr.slice(0,7);
+
+        // Numeração sequencial da rescisão (consistente com o sistema web)
+        let numeroResc = '(via bot)';
+        try {
+          const rCh = await sbGet('changes', 'select=data&id=eq.1');
+          let chData = Array.isArray(rCh) && rCh[0] && rCh[0].data;
+          if (typeof chData === 'string') { try { chData = JSON.parse(chData); } catch { chData = null; } }
+          if (chData && typeof chData === 'object') {
+            const seq = (chData.rescisao_seq || 0) + 1;
+            chData.rescisao_seq = seq;
+            numeroResc = String(seq).padStart(3,'0') + '/' + hoje.getFullYear();
+            await req(SUPABASE_URL+'/rest/v1/changes', 'POST',
+              { ...sbHeaders(), Prefer: 'resolution=merge-duplicates' }, { id: 1, data: chData });
+          }
+        } catch(e) { console.error('rescisao_seq erro:', e.message); }
+
+        // 1. Inativar aluno
+        // 2. Registrar inativação + rescisão no histórico
+        let hist = aluno.historico_alteracoes;
+        if (typeof hist === 'string') { try { hist = JSON.parse(hist); } catch { hist = []; } }
+        if (!Array.isArray(hist)) hist = [];
+        hist.push({ data: dataFmt, tipo: 'inativacao' });
+        hist.push({ data: dataFmt, tipo: 'rescisao', numero: numeroResc, plano: aluno.tipo_plano,
+          meses_utilizados: conf.calc.mUsados, valor_mensal: conf.calc.valorMensal, saldo: conf.calc.saldo });
+
+        // 3. Cancelar pendentes futuros (>= mês da rescisão)
+        let pend = aluno.pagamentos_pendentes;
+        if (typeof pend === 'string') { try { pend = JSON.parse(pend); } catch { pend = {}; } }
+        if (!pend || typeof pend !== 'object') pend = {};
+        Object.keys(pend).forEach(m => { if (m >= rescMes) delete pend[m]; });
+
+        // 4. Lançar saldo em pagamentos_rescisao no mês seguinte (se houver saldo)
+        let pagResc = aluno.pagamentos_rescisao;
+        if (typeof pagResc === 'string') { try { pagResc = JSON.parse(pagResc); } catch { pagResc = {}; } }
+        if (!pagResc || typeof pagResc !== 'object') pagResc = {};
+        if (conf.calc.saldo > 0.01) {
+          const dNxt = new Date(hoje.getFullYear(), hoje.getMonth()+1, 1);
+          const mNxtStr = dNxt.getFullYear()+'-'+String(dNxt.getMonth()+1).padStart(2,'0');
+          pagResc[mNxtStr] = conf.calc.saldo;
+        }
+
+        const histTxt = (aluno.historico ? aluno.historico + ' | ' : '') +
+          'Rescisão (via bot) em '+dataFmt+': '+aluno.tipo_plano+', '+conf.calc.mUsados+' meses, saldo '+brl(conf.calc.saldo);
+
+        await sbPatch('alunos', `id=eq.${aluno.id}`, {
+          ativo: 'NAO',
+          historico_alteracoes: hist,
+          pagamentos_pendentes: pend,
+          pagamentos_rescisao: pagResc,
+          historico: histTxt
+        });
+
+        const saldoMsg = conf.calc.saldo > 0.01 ? `\n💰 Saldo a receber lançado: ${brl(conf.calc.saldo)}` :
+          conf.calc.saldo < -0.01 ? `\n↩️ Saldo a restituir: ${brl(Math.abs(conf.calc.saldo))}` : '\n✅ Quitado';
+        return tgSend(chatId, `✅ *Rescisão ${numeroResc} lançada!*\n\n*${aluno.nome}* marcado como inativo.${saldoMsg}\n\n_Emita o termo formal pelo sistema web (botão Rescindir → 2ª via)._`);
+      } catch(e) {
+        console.error('Lançamento rescisão erro:', e.message);
+        return tgSend(chatId, '❌ Erro ao lançar rescisão: '+e.message+'\nTente pelo sistema web.');
+      }
     }
     return tgSend(chatId, '❌ Rescisão cancelada.');
   }
@@ -541,7 +647,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v2.9*\n\n' +
+      '👋 *LCA Studio Bot v3.2*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
@@ -581,7 +687,7 @@ async function processar(msg) {
         ? '*Inadimplentes em '+mes+' ('+inads.length+'):*\n' + inads.map(a=>'• '+a.nome+' ('+a.tipo_plano+')').join('\n')
         : '✅ Todos os alunos pagaram em '+mes+'.';
     } else if (aiResult.intencao === 'consulta_financeiro') {
-      const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});return s+(p[mes]||0);},0);
+      const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});var pr=typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});return s+(p[mes]||0)-(pr[mes]||0);},0);
       const cst = dados.custos.filter(function(c){return c.mes===mes;}).reduce(function(s,c){return s+(c.valor||0);},0);
       resp3 = '*Resumo '+mes+':*\n💰 Receita: '+brl(rec)+'\n🔴 Custos: '+brl(cst)+'\n📈 Bruto: '+brl(rec-cst);
     } else if (aiResult.intencao === 'consulta_vencendo') {
@@ -617,7 +723,7 @@ async function processar(msg) {
           ? '*Inadimplentes em '+mesAtual+':*\n' + inads.map(a=>'• '+a.nome+' ('+a.tipo_plano+')').join('\n')
           : '✅ Todos pagaram em '+mesAtual+'.';
       } else if (tL2.includes('result') || tL2.includes('resumo') || tL2.includes('financ')) {
-        const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});return s+(p[mes]||0);},0);
+        const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});var pr=typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});return s+(p[mes]||0)-(pr[mes]||0);},0);
         const cst = dados.custos.filter(function(c){return c.mes===mes;}).reduce(function(s,c){return s+(c.valor||0);},0);
         fallback = '*Resumo '+mes+':*\n💰 Receita: '+brl(rec)+'\n🔴 Custos: '+brl(cst)+'\n📈 Bruto: '+brl(rec-cst);
       } else {
@@ -647,7 +753,26 @@ async function processar(msg) {
   if (intencao === 'calcular_rescisao') {
     const preview = await executar(intencao, params, dados);
     clearTimeout(_timer);
-    if (preview) { pendente[chatId] = { intencao, params }; _respondeu=true; return tgSend(chatId, preview); }
+    if (preview) {
+      // Recalcular os dados estruturados para o lançamento (mesma fórmula do preview)
+      const aluno = dados.alunos.find(a => (params?.aluno_id && a.id===params.aluno_id) ||
+        (params?.aluno_nome && a.nome.toLowerCase().includes(params.aluno_nome.toLowerCase())));
+      if (aluno && aluno.tipo_plano !== 'mensal') {
+        const DUR = { trimestral:3, semestral:6 };
+        const dur = DUR[aluno.tipo_plano]||3;
+        const pags = Object.entries(typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{})
+          .filter(e=>e[1]>0).sort((a,b)=>a[0].localeCompare(b[0]));
+        const valorMensal = params?.valor || (pags.length?pags[pags.length-1][1]:329);
+        const mUsados = params?.meses_utilizados||1;
+        const mNaoUsados = Math.max(0, dur - mUsados);
+        const pagosPlanoAtual = pags.slice(-mUsados).reduce((s,e)=>s+e[1],0);
+        const saldo = (valorMensal*mUsados - pagosPlanoAtual) + (valorMensal*0.20*mNaoUsados);
+        pendente[chatId] = { intencao, params, calc: { aluno_id: aluno.id, mUsados, valorMensal, saldo } };
+      } else {
+        pendente[chatId] = { intencao, params };
+      }
+      _respondeu=true; return tgSend(chatId, preview);
+    }
   }
 
   const resultado = await executar(intencao, params, dados);
@@ -658,7 +783,7 @@ async function processar(msg) {
 
 // ── Loop principal ────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v2.9 iniciado ✓');
+  console.log('LCA Bot v3.2 iniciado ✓');
   let offset = 0;
   try {
     const init = await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=-1&limit=1&timeout=0`, 'GET', {}, null);
