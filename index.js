@@ -803,9 +803,16 @@ async function main() {
 
   const processados = {};
 
-  // Servidor HTTP para o Render
-  require('http').createServer((req, res) => { res.writeHead(200); res.end('LCA Bot v2 ✓'); })
-    .listen(process.env.PORT||3000, () => console.log('HTTP OK'));
+  // Servidor HTTP para o Render + endpoint /ping para keep-alive (UptimeRobot)
+  require('http').createServer((req, res) => {
+    if (req.url === '/ping') {
+      res.writeHead(200, {'Content-Type':'text/plain'});
+      res.end('pong');
+    } else {
+      res.writeHead(200, {'Content-Type':'text/plain'});
+      res.end('LCA Bot v3.2 ✓ — ' + new Date().toLocaleString('pt-BR'));
+    }
+  }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
   while (true) {
     try {
