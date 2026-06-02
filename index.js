@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.13 — PDFs de boletos enviados via Telegram com nome correto
+// Versão 3.15 — saldo horário BRT, extrato 30 dias com debug, resumo financeiro mês correto e resultado negativo destacado
 
 const https = require('https');
 
@@ -787,11 +787,14 @@ async function executar(intencao, p, dados) {
     try {
       const s = await interSaldo();
       if (s && s.disponivel !== undefined) {
+        // Horário em BRT (UTC-3)
+        const agora = new Date(Date.now() - 3*60*60*1000);
+        const horaStr = agora.toISOString().replace('T',' ').slice(0,16) + ' (BRT)';
         return `🏦 *Saldo Banco Inter*\n\n` +
           `💰 Disponível: *${brl(s.disponivel)}*\n` +
           (s.bloqueadoCheque   ? `🔒 Bloqueado Cheque: ${brl(s.bloqueadoCheque)}\n` : '') +
           (s.bloqueadoJudicial ? `⚖️ Bloqueado Judicial: ${brl(s.bloqueadoJudicial)}\n` : '') +
-          `\n_Consultado em ${new Date().toLocaleString('pt-BR')}_`;
+          `\n_Consultado em ${horaStr}_`;
       }
       return '⚠️ Resposta inesperada do Inter: ' + JSON.stringify(s);
     } catch(e) { return '❌ Erro Inter: ' + e.message; }
@@ -801,20 +804,22 @@ async function executar(intencao, p, dados) {
     try {
       const hoje = new Date();
       const dataFim = hoje.toISOString().slice(0,10);
-      const dataInicio = p?.data_inicio || new Date(hoje.getFullYear(), hoje.getMonth(), 1).toISOString().slice(0,10);
+      // Extrato dos últimos 30 dias por padrão (não só mês corrente)
+      const dataInicio = p?.data_inicio || new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
       const ext = await interExtrato(dataInicio, dataFim);
-      const transacoes = ext?.transacoes || ext?.content || [];
-      if (!transacoes.length) return `📄 *Extrato Inter*\n\n_Nenhuma transação de ${dataInicio} a ${dataFim}_`;
+      console.log('[EXTRATO] resposta raw:', JSON.stringify(ext).slice(0,300));
+      const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
+      if (!transacoes.length) return `📄 *Extrato Inter* (${dataInicio} a ${dataFim})\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ${JSON.stringify(ext).slice(0,200)}`;
       const linhas = transacoes.slice(0,15).map(t => {
-        const sinal = (t.tipoTransacao === 'D' || t.tipoOperacao === 'D') ? '🔴' : '🟢';
+        const tipo = t.tipoTransacao || t.tipoOperacao || t.tipo || '';
+        const sinal = (tipo === 'D' || tipo === 'DEBITO' || (t.valor||0) < 0) ? '🔴' : '🟢';
         const val = brl(Math.abs(t.valor || t.valorOperacao || 0));
-        const desc = (t.titulo || t.descricao || t.tipoTransacao || '').slice(0,35);
-        const data = (t.dataTransacao || t.dataOperacao || '').slice(5).split('-').reverse().join('/');
+        const desc = (t.titulo || t.descricao || t.historico || tipo).slice(0,35);
+        const data = (t.dataTransacao || t.dataOperacao || t.data || '').slice(0,10).split('-').reverse().join('/');
         return `${sinal} ${data} ${val} — ${desc}`;
       }).join('\n');
-      const total = transacoes.length;
-      return `📄 *Extrato Inter* (${dataInicio.slice(5).split('-').reverse().join('/')} a ${dataFim.slice(5).split('-').reverse().join('/')})\n\n${linhas}` +
-        (total > 15 ? `\n\n_...e mais ${total - 15} transações._` : '');
+      return `📄 *Extrato Inter* (${dataInicio.split('-').reverse().join('/')} a ${dataFim.split('-').reverse().join('/')})\n\n${linhas}` +
+        (transacoes.length > 15 ? `\n\n_...e mais ${transacoes.length - 15} transações._` : '');
     } catch(e) { return '❌ Erro extrato Inter: ' + e.message; }
   }
 
@@ -845,14 +850,26 @@ async function executar(intencao, p, dados) {
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
     if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
-    if (!p?.valor) return '❌ Informe o valor do boleto.';
     const hoje = new Date();
     const venc = p?.vencimento || new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10).toISOString().slice(0,10);
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
     if (!cpf) return `⚠️ *${aluno.nome}* não tem CPF cadastrado. Cadastre na ficha antes de emitir o boleto.`;
+    // Calcular valor automaticamente
+    const _pendB = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
+    const _pagsB = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
+    const _pVals = Object.values(_pendB).filter(v=>v>0);
+    const _gVals = Object.values(_pagsB).filter(v=>v>0).sort();
+    const valorBoleto = p?.valor ||
+      (_pVals.length ? _pVals[_pVals.length-1] : null) ||
+      (_gVals.length ? _gVals[_gVals.length-1] : null) ||
+      aluno.valor_referencia || 0;
+    if (!valorBoleto) {
+      ctx[chatId] = { intencao: 'inter_emitir_boleto', aluno_id: aluno.id, aluno_nome: aluno.nome, aguardando: 'valor', mes };
+      return `⚠️ Não encontrei o valor do plano de *${aluno.nome.split(' ')[0]}*.\nQual o valor? (ex: 329)`;
+    }
     try {
       const result = await interEmitirBoleto({
-        valor: p.valor, vencimento: venc,
+        valor: valorBoleto, vencimento: venc,
         nomePagador: aluno.nome, cpfCnpj: cpf,
         email: aluno.email || undefined,
         endereco: aluno.logradouro || aluno.endereco || 'Não informado',
@@ -903,8 +920,23 @@ async function executar(intencao, p, dados) {
     const DURACAO = { mensal:1, trimestral:3, semestral:6 };
     const plano = aluno.tipo_plano || 'mensal';
     const dur = DURACAO[plano] || 1;
-    const valor = p?.valor || aluno.valor_referencia || 0;
-    if (!valor) return '❌ Informe o valor mensal do plano.';
+
+    // Calcular valor automaticamente: último pagamento pendente > último pago > valor_referencia
+    const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
+    const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
+    const pendVals = Object.values(pend).filter(v=>v>0);
+    const pagVals  = Object.values(pags).filter(v=>v>0);
+    const valorAuto = p?.valor ||
+      (pendVals.length ? pendVals[pendVals.length-1] : null) ||
+      (pagVals.length  ? pagVals[pagVals.length-1]   : null) ||
+      aluno.valor_referencia || 0;
+
+    if (!valorAuto) {
+      // Salvar contexto e pedir valor
+      ctx[chatId] = { intencao: 'inter_emitir_plano', aluno_id: aluno.id, aluno_nome: aluno.nome, aguardando: 'valor', mes };
+      return `⚠️ Não encontrei o valor do plano de *${aluno.nome.split(' ')[0]}*.\nQual o valor mensal? (ex: 329)`;
+    }
+    const valor = valorAuto;
 
     let anoBase, mesBase;
     if (p?.mes) {
@@ -1157,6 +1189,23 @@ async function processar(msg) {
   try { dados = await getDados(); }
   catch(e) { return tgSend(chatId, '❌ Erro ao conectar ao banco: '+e.message); }
 
+  // Restaurar contexto anterior se mensagem for só um número (valor)
+  if (/^\d+([.,]\d+)?$/.test(texto.trim()) && ctx[chatId]) {
+    const c = ctx[chatId];
+    if (c.aguardando === 'valor' && c.intencao) {
+      const valorInformado = parseFloat(texto.replace(',','.'));
+      const aluno = dados.alunos.find(a => a.id === c.aluno_id);
+      if (aluno) {
+        clearTimeout(_timer);
+        delete ctx[chatId];
+        _respondeu = true;
+        const resultado = await executar(c.intencao, { aluno_id: c.aluno_id, aluno_nome: c.aluno_nome, valor: valorInformado, mes: c.mes }, dados);
+        if (resultado === null) return;
+        return tgSend(chatId, resultado || '❌ Erro ao executar.');
+      }
+    }
+  }
+
   // Processar com IA
   let aiResult;
   try { aiResult = await processarComIA(texto, dados, mes); }
@@ -1247,9 +1296,12 @@ async function processar(msg) {
           ? '*Inadimplentes em '+mesAtual+':*\n' + inads.map(a=>'• '+a.nome+' ('+a.tipo_plano+')').join('\n')
           : '✅ Todos pagaram em '+mesAtual+'.';
       } else if (tL2.includes('result') || tL2.includes('resumo') || tL2.includes('financ')) {
-        const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});var pr=typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});return s+(p[mes]||0)-(pr[mes]||0);},0);
-        const cst = dados.custos.filter(function(c){return c.mes===mes;}).reduce(function(s,c){return s+(c.valor||0);},0);
-        fallback = '*Resumo '+mes+':*\n💰 Receita: '+brl(rec)+'\n🔴 Custos: '+brl(cst)+'\n📈 Bruto: '+brl(rec-cst);
+        const mesRes = _mesMatch || mes; // usa mês extraído do texto
+        const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});var pr=typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});return s+(p[mesRes]||0)-(pr[mesRes]||0);},0);
+        const cst = dados.custos.filter(function(c){return c.mes===mesRes;}).reduce(function(s,c){return s+(c.valor||0);},0);
+        const resultado = rec - cst;
+        const resIcon = resultado >= 0 ? '📈 *Resultado: +' : '📉 *Resultado: ';
+        fallback = '*Resumo ' + mesRes + ':*\n💰 Receita: ' + brl(rec) + '\n🔴 Custos: ' + brl(cst) + '\n' + resIcon + brl(Math.abs(resultado)) + '*' + (resultado < 0 ? ' ⚠️ NEGATIVO' : '');
       } else {
         fallback = '⚠️ Gemini indisponível. Tente em 1 minuto.\nOu use comandos diretos — mande *ajuda*.';
       }
@@ -1319,6 +1371,7 @@ async function main() {
   } catch(e) { console.log('Init aviso:', e.message); }
 
   const processados = {};
+  const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguardando }
 
   // Servidor HTTP para o Render + endpoint /ping para keep-alive (UptimeRobot)
   require('http').createServer(async (req, res) => {
