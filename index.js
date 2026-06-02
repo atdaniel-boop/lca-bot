@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.4 — integração Banco Inter (extrato, saldo, boletos)
+// Versão 3.5 — inadimplentes consideram dia de vencimento, URL saldo Inter corrigida
 
 const https = require('https');
 
@@ -82,7 +82,7 @@ async function interSaldo() {
   const token = await interGetToken('extrato.read');
   const hoje = new Date().toISOString().slice(0,10);
   const r = await interReq(
-    '/banking/v3/saldo?dataSaldo=' + hoje,
+    '/banking/v3/saldo',
     'GET', null, token
   );
   return r.data;
@@ -300,9 +300,16 @@ function buildContexto(dados, mes) {
     return s + (pr[mes] || 0);
   }, 0);
   const receitaMes = pagMes.reduce((s, a) => s + a.valor, 0) - totalRescisaoMes;
+  // Inadimplentes = ativos que não pagaram E cujo dia de vencimento já passou neste mês
+  const hojeBot = new Date();
+  const diaHoje = hojeBot.getDate();
+  const mesAtualBot = hojeBot.getFullYear() + '-' + String(hojeBot.getMonth()+1).padStart(2,'0');
   const inadimplentes = ativos.filter(a => {
     const pag = pagMes.find(p => p.id === a.id);
-    return !pag || !pag.pagou;
+    if (pag && pag.pagou) return false; // Já pagou
+    // Só considera inadimplente se o dia de vencimento já passou
+    const diaVenc = parseInt(a.dia_vencimento || 10);
+    return diaHoje >= diaVenc;
   });
 
   // Custos do mês
@@ -903,7 +910,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v3.4*\n\n' +
+      '👋 *LCA Studio Bot v3.5*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
@@ -1042,7 +1049,7 @@ async function processar(msg) {
 
 // ── Loop principal ────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v3.4 iniciado ✓');
+  console.log('LCA Bot v3.5 iniciado ✓');
   let offset = 0;
   try {
     const init = await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=-1&limit=1&timeout=0`, 'GET', {}, null);
@@ -1060,7 +1067,7 @@ async function main() {
       res.end('pong');
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v3.4 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v3.5 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
