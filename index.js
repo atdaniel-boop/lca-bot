@@ -1,5 +1,5 @@
-// LCA Studio Bot — Telegram + Gemini + Supabase
-// Versão 3.2 — professoras lidas da tabela (retirada/percentual/valor-hora reais), correção do vh no lançamento de aula
+// LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
+// Versão 3.4 — integração Banco Inter (extrato, saldo, boletos)
 
 const https = require('https');
 
@@ -8,6 +8,141 @@ const GEMINI_KEY     = process.env.GEMINI_API_KEY;
 const SUPABASE_URL   = process.env.SUPABASE_URL || 'https://amkuqijbwjspxajiguxz.supabase.co';
 const SUPABASE_KEY   = process.env.SUPABASE_KEY;
 const ALLOWED_USER   = (process.env.ALLOWED_USER || '').toLowerCase();
+
+// ── Banco Inter ───────────────────────────────────────────────────
+// Certificados via variáveis de ambiente (INTER_CERT e INTER_KEY)
+// Client ID/Secret também via env para segurança
+const INTER_CLIENT_ID     = process.env.INTER_CLIENT_ID     || 'bac02151-c212-4982-ab50-35ae5fceaf96';
+const INTER_CLIENT_SECRET = process.env.INTER_CLIENT_SECRET || '61897158-54b2-4722-8a99-357628f56050';
+const INTER_BASE          = 'cdpj.partners.bancointer.com.br';
+const INTER_CERT          = process.env.INTER_CERT || ''; // conteúdo do .crt
+const INTER_KEY           = process.env.INTER_KEY  || ''; // conteúdo do .key
+
+let interToken = null;
+let interTokenExp = 0;
+
+// Requisição mTLS para a API do Inter
+function interReq(path, method, body, token, extraHeaders) {
+  return new Promise((resolve, reject) => {
+    if (!INTER_CERT || !INTER_KEY) {
+      return reject(new Error('Certificados Inter não configurados. Adicione INTER_CERT e INTER_KEY no Render.'));
+    }
+    const opts = {
+      hostname: INTER_BASE,
+      port: 443,
+      path: path,
+      method: method || 'GET',
+      cert: INTER_CERT,
+      key: INTER_KEY,
+      headers: {
+        'Content-Type': body ? (path.includes('token') ? 'application/x-www-form-urlencoded' : 'application/json') : undefined,
+        ...(token ? { Authorization: 'Bearer ' + token } : {}),
+        ...(extraHeaders || {})
+      },
+      timeout: 20000
+    };
+    // Remover headers undefined
+    Object.keys(opts.headers).forEach(k => opts.headers[k] === undefined && delete opts.headers[k]);
+    const r = https.request(opts, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, data: JSON.parse(d) }); }
+        catch { resolve({ status: res.statusCode, data: d }); }
+      });
+    });
+    r.on('error', reject);
+    r.on('timeout', () => { r.destroy(); reject(new Error('Inter timeout')); });
+    if (body) r.write(typeof body === 'string' ? body : JSON.stringify(body));
+    r.end();
+  });
+}
+
+// Obter token OAuth2 (com cache de 50 minutos)
+async function interGetToken(scope) {
+  const agora = Date.now();
+  if (interToken && agora < interTokenExp) return interToken;
+  const body = new URLSearchParams({
+    client_id:     INTER_CLIENT_ID,
+    client_secret: INTER_CLIENT_SECRET,
+    grant_type:    'client_credentials',
+    scope:         scope || 'extrato.read boleto-cobranca.read boleto-cobranca.write'
+  }).toString();
+  const r = await interReq('/oauth/v2/token', 'POST', body, null);
+  if (r.data && r.data.access_token) {
+    interToken    = r.data.access_token;
+    interTokenExp = agora + (r.data.expires_in - 60) * 1000;
+    return interToken;
+  }
+  throw new Error('Inter auth falhou: ' + JSON.stringify(r.data));
+}
+
+// Consultar saldo da conta
+async function interSaldo() {
+  const token = await interGetToken('extrato.read');
+  const hoje = new Date().toISOString().slice(0,10);
+  const r = await interReq(
+    '/banking/v3/saldo?dataSaldo=' + hoje,
+    'GET', null, token
+  );
+  return r.data;
+}
+
+// Consultar extrato por período
+async function interExtrato(dataInicio, dataFim) {
+  const token = await interGetToken('extrato.read');
+  const r = await interReq(
+    '/banking/v3/extrato?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
+    'GET', null, token
+  );
+  return r.data;
+}
+
+// Listar cobranças (boletos) por período
+async function interCobranças(situacao, dataInicio, dataFim) {
+  const token = await interGetToken('boleto-cobranca.read');
+  const params = new URLSearchParams({
+    dataInicial: dataInicio,
+    dataFinal:   dataFim,
+    ...(situacao ? { situacao } : {})
+  });
+  const r = await interReq(
+    '/cobranca/v3/cobrancas?' + params.toString(),
+    'GET', null, token
+  );
+  return r.data;
+}
+
+// Emitir boleto de cobrança
+async function interEmitirBoleto(dados) {
+  // dados: { valor, vencimento, nomePagador, cpfCnpj, email, descricao }
+  const token = await interGetToken('boleto-cobranca.write');
+  const body = {
+    seuNumero:    dados.seuNumero || ('LCA-' + Date.now()),
+    valorNominal: dados.valor,
+    dataVencimento: dados.vencimento, // YYYY-MM-DD
+    numDiasAgenda: 30,
+    pagador: {
+      cpfCnpj:    dados.cpfCnpj,
+      tipoPessoa: dados.cpfCnpj.replace(/\D/g,'').length === 11 ? 'FISICA' : 'JURIDICA',
+      nome:       dados.nomePagador,
+      email:      dados.email || undefined,
+      endereco:   dados.endereco || 'Não informado',
+      cidade:     dados.cidade || 'Rio de Janeiro',
+      uf:         dados.uf || 'RJ',
+      cep:        dados.cep || '20000-000',
+      numero:     dados.numero || 'S/N'
+    },
+    mensagem: {
+      linha1: dados.descricao || 'Mensalidade Pilates LCA Studio',
+      linha2: 'Ref: ' + (dados.referencia || new Date().toLocaleDateString('pt-BR'))
+    }
+  };
+  const r = await interReq('/cobranca/v3/cobrancas', 'POST', body, token, {
+    'x-id-idempotente': require('crypto').randomUUID()
+  });
+  return r.data;
+}
 
 // ── HTTP ──────────────────────────────────────────────────────────
 function req(url, method, headers, body, timeoutMs) {
@@ -310,7 +445,7 @@ Retorne JSON (sem markdown):
 {
   "tipo": "consulta" ou "acao",
   "resposta": "resposta em Markdown se consulta, null se acao",
-  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin,
+  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_emitir_boleto,
   "params": {
     "aluno_nome": string ou null,
     "valor": numero (se pagamento sem valor informado, use o ultimo pagamento do aluno acima) ou null,
@@ -470,7 +605,25 @@ async function executar(intencao, p, dados) {
     if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
     const status  = p?.status_checkin || 'presente';
     const dataCi  = p?.data || new Date().toISOString().slice(0,10);
-    const horaCi  = p?.hora || '07:00';
+    // Hora: usa a informada pelo usuário. Se não informada, busca o primeiro slot do aluno na agenda.
+    let horaCi = p?.hora || null;
+    if (!horaCi && dados.changes?.agenda) {
+      const semStr = new Date(dataCi+'T12:00:00').toISOString().slice(0,10);
+      const DIAS_PT = ['Dom','Seg','Ter','Qua','Qui','Sex','Sab'];
+      const dow = new Date(dataCi+'T12:00:00').getDay();
+      const diaKey = DIAS_PT[dow];
+      // Procurar na agenda um slot do aluno no dia da semana
+      for (const [slotKey, slot] of Object.entries(dados.changes.agenda||{})) {
+        if (slot && (slot.alunos||[]).includes(aluno.id)) {
+          // slotKey formato: "HH:MM-DiaSemana" ou "YYYY-WW-DiaSemana-HH:MM"
+          const hora = slotKey.match(/\d{2}:\d{2}/)?.[0];
+          if (hora && slotKey.includes(diaKey)) { horaCi = hora; break; }
+        }
+      }
+    }
+    if (!horaCi) {
+      return `⚠️ Não consegui identificar o horário da aula de *${aluno.nome}*.\nInforme o horário: _"check-in ${aluno.nome.split(' ')[0]} hoje 10:00"_`;
+    }
     const ckKey   = `${dataCi}-${horaCi}`;
     const ch = (dados.changes?.checkins) ? dados.changes.checkins : {};
     if (!ch[ckKey]) ch[ckKey] = { presente:[], falta:[], repos:[] };
@@ -482,9 +635,9 @@ async function executar(intencao, p, dados) {
     else ch[ckKey].presente.push(aluno.id);
     if (dados.changes) { dados.changes.checkins = ch; await saveChanges(dados.changes); }
     const DIAS = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
-    const dow  = new Date(dataCi+'T12:00:00').getDay();
+    const dow2 = new Date(dataCi+'T12:00:00').getDay();
     const LABEL = { presente:'✅ Presente', falta:'❌ Falta', repos:'🔄 Reposição' };
-    return `${LABEL[status]} registrado!\n*${aluno.nome}* — ${DIAS[dow]} ${dataCi.slice(8)}/${dataCi.slice(5,7)} ${horaCi}`;
+    return `${LABEL[status]} registrado!\n*${aluno.nome}* — ${DIAS[dow2]} ${dataCi.slice(8)}/${dataCi.slice(5,7)} ${horaCi}\n_Recarregue o site para ver o check-in atualizado._`;
   }
 
   if (intencao === 'desfazer_checkin') {
@@ -508,6 +661,100 @@ async function executar(intencao, p, dados) {
     if (dados.changes) { dados.changes.checkins = ch; await saveChanges(dados.changes); }
     return `✅ Check-in desfeito!\n*${aluno.nome}* — ${dataCi.slice(8)}/${dataCi.slice(5,7)}`;
   }
+
+  // ── Banco Inter ────────────────────────────────────────────────
+  if (intencao === 'inter_saldo') {
+    try {
+      const s = await interSaldo();
+      if (s && s.disponivel !== undefined) {
+        return `🏦 *Saldo Banco Inter*\n\n` +
+          `💰 Disponível: *${brl(s.disponivel)}*\n` +
+          (s.bloqueadoCheque   ? `🔒 Bloqueado Cheque: ${brl(s.bloqueadoCheque)}\n` : '') +
+          (s.bloqueadoJudicial ? `⚖️ Bloqueado Judicial: ${brl(s.bloqueadoJudicial)}\n` : '') +
+          `\n_Consultado em ${new Date().toLocaleString('pt-BR')}_`;
+      }
+      return '⚠️ Resposta inesperada do Inter: ' + JSON.stringify(s);
+    } catch(e) { return '❌ Erro Inter: ' + e.message; }
+  }
+
+  if (intencao === 'inter_extrato') {
+    try {
+      const hoje = new Date();
+      const dataFim = hoje.toISOString().slice(0,10);
+      const dataInicio = p?.data_inicio || new Date(hoje.getFullYear(), hoje.getMonth(), 1).toISOString().slice(0,10);
+      const ext = await interExtrato(dataInicio, dataFim);
+      const transacoes = ext?.transacoes || ext?.content || [];
+      if (!transacoes.length) return `📄 *Extrato Inter*\n\n_Nenhuma transação de ${dataInicio} a ${dataFim}_`;
+      const linhas = transacoes.slice(0,15).map(t => {
+        const sinal = (t.tipoTransacao === 'D' || t.tipoOperacao === 'D') ? '🔴' : '🟢';
+        const val = brl(Math.abs(t.valor || t.valorOperacao || 0));
+        const desc = (t.titulo || t.descricao || t.tipoTransacao || '').slice(0,35);
+        const data = (t.dataTransacao || t.dataOperacao || '').slice(5).split('-').reverse().join('/');
+        return `${sinal} ${data} ${val} — ${desc}`;
+      }).join('\n');
+      const total = transacoes.length;
+      return `📄 *Extrato Inter* (${dataInicio.slice(5).split('-').reverse().join('/')} a ${dataFim.slice(5).split('-').reverse().join('/')})\n\n${linhas}` +
+        (total > 15 ? `\n\n_...e mais ${total - 15} transações._` : '');
+    } catch(e) { return '❌ Erro extrato Inter: ' + e.message; }
+  }
+
+  if (intencao === 'inter_boletos') {
+    try {
+      const hoje = new Date();
+      const dataFim = hoje.toISOString().slice(0,10);
+      const dataInicio = p?.data_inicio || new Date(hoje.getFullYear(), hoje.getMonth(), 1).toISOString().slice(0,10);
+      const situacao = p?.situacao || null;
+      const result = await interCobranças(situacao, dataInicio, dataFim);
+      const lista = result?.content || result?.cobrancas || [];
+      if (!lista.length) return `📋 *Boletos Inter*\n\n_Nenhuma cobrança encontrada no período_`;
+      const linhas = lista.slice(0,15).map(b => {
+        const status = b.situacao === 'PAGO' ? '✅' : b.situacao === 'CANCELADO' ? '❌' : '⏳';
+        const val = brl(b.valorNominal || 0);
+        const nome = (b.pagador?.nome || '').split(' ').slice(0,2).join(' ');
+        const venc = (b.dataVencimento||''). split('-').reverse().join('/');
+        return `${status} ${venc} ${val} — ${nome}`;
+      }).join('\n');
+      return `📋 *Boletos Inter* (${situacao||'todos'})\n\n${linhas}` +
+        (lista.length > 15 ? `\n\n_...e mais ${lista.length-15}_` : '');
+    } catch(e) { return '❌ Erro boletos Inter: ' + e.message; }
+  }
+
+  if (intencao === 'inter_emitir_boleto') {
+    const aluno = dados.alunos.find(a =>
+      (p?.aluno_id && a.id===p.aluno_id) ||
+      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
+    );
+    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
+    if (!p?.valor) return '❌ Informe o valor do boleto.';
+    const hoje = new Date();
+    const venc = p?.vencimento || new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10).toISOString().slice(0,10);
+    const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
+    if (!cpf) return `⚠️ *${aluno.nome}* não tem CPF cadastrado. Cadastre na ficha antes de emitir o boleto.`;
+    try {
+      const result = await interEmitirBoleto({
+        valor: p.valor, vencimento: venc,
+        nomePagador: aluno.nome, cpfCnpj: cpf,
+        email: aluno.email || undefined,
+        endereco: aluno.logradouro || aluno.endereco || 'Não informado',
+        cidade: aluno.cidade ? aluno.cidade.split('-')[0].trim() : 'Rio de Janeiro',
+        uf: aluno.cidade ? (aluno.cidade.split('-')[1]||'RJ').trim() : 'RJ',
+        cep: aluno.cep ? aluno.cep.replace(/\D/g,'').slice(0,8) : '20000000',
+        numero: aluno.numero || 'S/N',
+        descricao: 'Mensalidade Pilates LCA Studio — ' + aluno.nome.split(' ')[0],
+        referencia: new Date().toLocaleDateString('pt-BR'),
+        seuNumero: 'LCA-' + aluno.id + '-' + mes
+      });
+      if (result?.codigoSolicitacao || result?.nossoNumero) {
+        const cod = result.codigoSolicitacao || result.nossoNumero;
+        const link = result.linkVisualizacaoBoleto || result.link || '';
+        return `✅ *Boleto emitido!*\n\n👤 ${aluno.nome}\n💰 ${brl(p.valor)}\n📅 Vencimento: ${venc.split('-').reverse().join('/')}\n🔑 Código: ${cod}` +
+          (link ? `\n\n[Visualizar boleto](${link})` : '') +
+          `\n\n_Use "confirmar pagamento ${aluno.nome.split(' ')[0]}" quando pagar._`;
+      }
+      return '⚠️ Resposta: ' + JSON.stringify(result).slice(0,200);
+    } catch(e) { return '❌ Erro emissão boleto: ' + e.message; }
+  }
+
 
   if (intencao === 'calcular_rescisao') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
@@ -656,7 +903,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v3.2*\n\n' +
+      '👋 *LCA Studio Bot v3.4*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
@@ -675,7 +922,10 @@ async function processar(msg) {
       '• _"apagar custo aluguel 2026-05"_\n' +
       '• _"desfazer pagamento Ana maio"_\n' +
       '• _"remover aula kelly"_\n' +
-      '• _"desfazer check-in Ana hoje 09:00"_\n\n' +
+      '• _"saldo da conta"_ — saldo Banco Inter\n' +
+      '• _"extrato de hoje"_ / _"extrato do mês"_ — extrato Inter\n' +
+      '• _"boletos em aberto"_ / _"boletos pagos este mês"_ — cobranças\n' +
+      '• _"emitir boleto Ana R$ 329 vence dia 10"_ — emitir cobrança\n\n' +
       '*📋 Rescisão:*\n' +
       '• _"Mara quer rescindir, semestral, pagou 3 meses"_'
     );
@@ -792,7 +1042,7 @@ async function processar(msg) {
 
 // ── Loop principal ────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v3.2 iniciado ✓');
+  console.log('LCA Bot v3.4 iniciado ✓');
   let offset = 0;
   try {
     const init = await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=-1&limit=1&timeout=0`, 'GET', {}, null);
@@ -810,7 +1060,7 @@ async function main() {
       res.end('pong');
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v3.2 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v3.4 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
