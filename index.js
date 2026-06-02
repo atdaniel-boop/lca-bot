@@ -1,9 +1,10 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.8 — validação de horário do checkin contra agenda
+// Versão 3.9 — webhook Inter: pagamento automático ao boleto ser pago
 
 const https = require('https');
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || ''; // seu chat_id para notificações automáticas
 const GEMINI_KEY     = process.env.GEMINI_API_KEY;
 const SUPABASE_URL   = process.env.SUPABASE_URL || 'https://amkuqijbwjspxajiguxz.supabase.co';
 const SUPABASE_KEY   = process.env.SUPABASE_KEY;
@@ -1074,13 +1075,96 @@ async function main() {
   const processados = {};
 
   // Servidor HTTP para o Render + endpoint /ping para keep-alive (UptimeRobot)
-  require('http').createServer((req, res) => {
+  require('http').createServer(async (req, res) => {
     if (req.url === '/ping') {
       res.writeHead(200, {'Content-Type':'text/plain'});
       res.end('pong');
+
+    // ── Webhook do Banco Inter ──────────────────────────────────────────────
+    } else if (req.url === '/webhook-inter' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        try {
+          const payload = JSON.parse(body);
+          console.log('[WEBHOOK-INTER]', JSON.stringify(payload).slice(0, 300));
+
+          // Inter envia evento "PAGO" com o seuNumero que gravamos na emissão
+          const evento = payload?.evento || payload?.tipo || '';
+          const seuNum = payload?.seuNumero || payload?.cobranca?.seuNumero || '';
+          const valorPago = parseFloat(payload?.valorTotalRecebido || payload?.valor || 0);
+          const dataPag = payload?.dataLiquidacao || payload?.dataPagamento || new Date().toISOString().slice(0,10);
+
+          // seuNumero formato: "LCA-{id}-{mes}" ex: "LCA-96-2026-06"
+          const match = seuNum.match(/^LCA-(\d+)-(\d{4}-\d{2})$/);
+
+          if (match && valorPago > 0 && (evento.includes('PAGO') || evento.includes('LIQUIDADO') || evento === '')) {
+            const alunoId = parseInt(match[1]);
+            const mes = match[2];
+
+            // Carregar dados do Supabase
+            const [rAlunos] = await Promise.all([
+              sbGet('alunos', `select=id,nome,pagamentos,pagamentos_pendentes,historico_alteracoes&id=eq.${alunoId}`)
+            ]);
+            const aluno = rAlunos?.data?.[0];
+
+            if (aluno) {
+              const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{}));
+              let pend = Object.assign({}, typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{}));
+
+              // Só confirmar se ainda não está pago
+              if (!(pags[mes] > 0)) {
+                pags[mes] = valorPago;
+                const tinhaPend = !!pend[mes];
+                if (tinhaPend) delete pend[mes];
+
+                const hist = Array.isArray(aluno.historico_alteracoes) ? [...aluno.historico_alteracoes] : [];
+                hist.push({ data: new Date(dataPag+'T12:00:00').toLocaleDateString('pt-BR'), tipo: 'pagamento_auto',
+                  desc: `Pagamento ${mes} via boleto Inter (automático): ${brl(valorPago)}` });
+
+                const patch = { pagamentos: pags, historico_alteracoes: hist };
+                if (tinhaPend) patch.pagamentos_pendentes = pend;
+                await sbPatch('alunos', `id=eq.${alunoId}`, patch);
+
+                // Notificar via Telegram
+                const chatId = process.env.TELEGRAM_CHAT_ID;
+                if (chatId) {
+                  await tgSend(chatId, `🏦 *Pagamento confirmado automaticamente!*\n\n👤 ${aluno.nome}\n💰 ${brl(valorPago)}\n📅 ${mes} — pago em ${dataPag.split('-').reverse().join('/')}\n_Boleto Inter baixado automaticamente._`);
+                }
+                console.log(`[WEBHOOK-INTER] Pagamento confirmado: aluno ${alunoId} mes ${mes} valor ${valorPago}`);
+              } else {
+                console.log(`[WEBHOOK-INTER] Pagamento já existe para aluno ${alunoId} mes ${mes} — ignorado`);
+              }
+            } else {
+              console.log(`[WEBHOOK-INTER] Aluno ${alunoId} não encontrado`);
+            }
+          } else {
+            console.log(`[WEBHOOK-INTER] Evento ignorado: evento="${evento}" seuNum="${seuNum}" valor=${valorPago}`);
+          }
+        } catch(e) {
+          console.error('[WEBHOOK-INTER] Erro:', e.message);
+        }
+        res.writeHead(200, {'Content-Type':'application/json'});
+        res.end('{"ok":true}');
+      });
+
+    // ── Cadastrar webhook no Inter (chamar uma vez via browser) ────────────
+    } else if (req.url === '/cadastrar-webhook-inter' && req.method === 'GET') {
+      try {
+        const token = await interGetToken();
+        const webhookUrl = process.env.RENDER_EXTERNAL_URL + '/webhook-inter';
+        const r = await interReq('/cobranca/v3/cobrancas/webhook', 'PUT',
+          { webhookUrl }, token);
+        res.writeHead(200, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({ ok: true, webhookUrl, resposta: r }));
+      } catch(e) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({ erro: e.message }));
+      }
+
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v3.6 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v3.8 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
