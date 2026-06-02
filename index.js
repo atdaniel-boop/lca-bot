@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.6 — Inter: banking v2, header x-conta-corrente, parâmetros corretos
+// Versão 3.8 — validação de horário do checkin contra agenda
 
 const https = require('https');
 
@@ -614,22 +614,24 @@ async function executar(intencao, p, dados) {
     if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
     const status  = p?.status_checkin || 'presente';
     const dataCi  = p?.data || new Date().toISOString().slice(0,10);
-    // Hora: usa a informada pelo usuário. Se não informada, busca o primeiro slot do aluno na agenda.
-    let horaCi = p?.hora || null;
-    if (!horaCi && dados.changes?.agenda) {
-      const semStr = new Date(dataCi+'T12:00:00').toISOString().slice(0,10);
-      const DIAS_PT = ['Dom','Seg','Ter','Qua','Qui','Sex','Sab'];
-      const dow = new Date(dataCi+'T12:00:00').getDay();
-      const diaKey = DIAS_PT[dow];
-      // Procurar na agenda um slot do aluno no dia da semana
-      for (const [slotKey, slot] of Object.entries(dados.changes.agenda||{})) {
-        if (slot && (slot.alunos||[]).includes(aluno.id)) {
-          // slotKey formato: "HH:MM-DiaSemana" ou "YYYY-WW-DiaSemana-HH:MM"
-          const hora = slotKey.match(/\d{2}:\d{2}/)?.[0];
-          if (hora && slotKey.includes(diaKey)) { horaCi = hora; break; }
-        }
+    const DIAS_PT = ['Dom','Seg','Ter','Qua','Qui','Sex','Sab'];
+    const dow = new Date(dataCi+'T12:00:00').getDay();
+    const diaKey = DIAS_PT[dow];
+    // Buscar horários válidos do aluno neste dia da semana
+    const horariosValidos = [];
+    for (const [slotKey, slot] of Object.entries(dados.changes?.agenda||{})) {
+      if (slot && (slot.alunos||[]).includes(aluno.id)) {
+        const hora = slotKey.match(/\d{2}:\d{2}/)?.[0];
+        if (hora && slotKey.includes(diaKey)) horariosValidos.push(hora);
       }
     }
+    // Hora informada: validar contra agenda
+    let horaCi = p?.hora || null;
+    if (horaCi && horariosValidos.length > 0 && !horariosValidos.includes(horaCi)) {
+      return `⚠️ Horário *${horaCi}* não consta na agenda de *${aluno.nome.split(' ')[0]}* para ${diaKey}.\nHorários cadastrados: ${horariosValidos.join(', ')}\nUse um dos horários acima ou corrija a agenda.`;
+    }
+    // Se não informada, busca o primeiro slot
+    if (!horaCi && horariosValidos.length > 0) horaCi = horariosValidos[0];
     if (!horaCi) {
       return `⚠️ Não consegui identificar o horário da aula de *${aluno.nome}*.\nInforme o horário: _"check-in ${aluno.nome.split(' ')[0]} hoje 10:00"_`;
     }
@@ -888,7 +890,16 @@ async function processar(msg) {
   }
 
   await tgSend(chatId, '⏳ Processando...');
-  const mes = new Date().toISOString().slice(0,7);
+  // Extrair mês do texto da mensagem (ex: "maio", "junho", "04/2026", "2026-05")
+  const MESES_PT = {janeiro:'01',fevereiro:'02',março:'03',marco:'03',abril:'04',maio:'05',junho:'06',julho:'07',agosto:'08',setembro:'09',outubro:'10',novembro:'11',dezembro:'12'};
+  var _mesMatch = null;
+  var _tL = msg.text ? msg.text.toLowerCase() : '';
+  // Tentar nome do mês em português
+  for (var _mn in MESES_PT) { if (_tL.includes(_mn)) { var _d = new Date(); _mesMatch = _d.getFullYear() + '-' + MESES_PT[_mn]; break; } }
+  // Tentar formato MM/AAAA ou AAAA-MM
+  if (!_mesMatch) { var _mm = _tL.match(/(\d{2})\/(\d{4})/); if (_mm) _mesMatch = _mm[2]+'-'+_mm[1]; }
+  if (!_mesMatch) { var _mm2 = _tL.match(/(\d{4})-(\d{2})/); if (_mm2) _mesMatch = _mm2[0]; }
+  const mes = _mesMatch || new Date().toISOString().slice(0,7);
   // Timeout geral — responde se demorar mais de 45s
   let _timedOut = false;
   const _timer = setTimeout(() => {
