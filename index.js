@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.15 — saldo horário BRT, extrato 30 dias com debug, resumo financeiro mês correto e resultado negativo destacado
+// Versão 3.16 — detecção direta de comandos Inter por palavra-chave, prompt clarificado
 
 const https = require('https');
 
@@ -529,6 +529,18 @@ async function processarComIA(texto, dados, mes) {
   if (['ajuda','help','comando','como usar'].some(k => tL.includes(k))) {
     return { tipo: 'ajuda' };
   }
+
+  // Comandos Inter — detecção direta por palavra-chave (sem IA)
+  const temInter = tL.includes('inter') || tL.includes('banco') || tL.includes('conta');
+  if (temInter && (tL.includes('saldo') || tL.includes('quanto tem'))) {
+    return { tipo: 'acao', intencao: 'inter_saldo', params: {} };
+  }
+  if (temInter && (tL.includes('extrato') || tL.includes('transaç') || tL.includes('moviment'))) {
+    return { tipo: 'acao', intencao: 'inter_extrato', params: {} };
+  }
+  if (temInter && (tL.includes('boleto') || tL.includes('cobrança') || tL.includes('cobranca')) && !tL.includes('emitir') && !tL.includes('gerar') && !tL.includes('criar')) {
+    return { tipo: 'acao', intencao: 'inter_boletos', params: {} };
+  }
   // Despedidas e respostas curtas não-acionáveis
   const despedidas = ['obrigado','obrigada','valeu','tchau','até','flw','ok','entendi','certo','legal','perfeito','ótimo','otimo','show','blz','beleza'];
   if (texto.length < 30 && despedidas.some(k => tL.includes(k))) {
@@ -553,6 +565,12 @@ Custos lancados: ${ctx.custosMes.map(function(c){return c.desc+' '+brl(c.valor);
 Faltas frequentes: ${ctx.faltasFrequentes.join(', ')||'Nenhuma'}
 Professoras este mes: Leda ${brl(ctx.financeiro.paramProf.retLeda)} fixo | Monica ${brl(ctx.financeiro.detalheProfessoras.monica)} (${Math.round(ctx.financeiro.paramProf.pctMonica*100)}% alunos dela) | Kelly ${brl(ctx.financeiro.detalheProfessoras.kelly)} (${ctx.aulasKelly.reduce(function(s,k){return s+(k.horas||0);},0)}h x ${brl(ctx.financeiro.paramProf.vhKelly)})
 Ultimo pagamento por aluno: ${JSON.stringify(ultimoValor)}
+
+REGRAS DE INTENCAO (siga rigorosamente):
+- "saldo da conta/inter/banco", "quanto tem no banco" → inter_saldo
+- "extrato", "movimentação da conta", "transações" → inter_extrato
+- "resumo financeiro", "resultado do mes", "receita do estudio" → consulta
+- "saldo" sem mencao a banco/conta/Inter → consulta sobre o estudio
 
 MENSAGEM: "${texto}"
 
