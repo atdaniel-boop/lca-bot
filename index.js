@@ -4,7 +4,7 @@
 const https = require('https');
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '@atdaniel83'; // seu chat_id para notificações automáticas
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
 const GEMINI_KEY     = process.env.GEMINI_API_KEY;
 const SUPABASE_URL   = process.env.SUPABASE_URL || 'https://amkuqijbwjspxajiguxz.supabase.co';
 const SUPABASE_KEY   = process.env.SUPABASE_KEY;
