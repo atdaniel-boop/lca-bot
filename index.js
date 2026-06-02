@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.17 — extrato: testa múltiplas variações de parâmetros com log diagnóstico
+// Versão 3.19 — extrato: nome do aluno identificado pelo valor da transação
 
 const https = require('https');
 
@@ -94,20 +94,11 @@ async function interSaldo() {
 // Consultar extrato por período
 async function interExtrato(dataInicio, dataFim) {
   const token = await interGetToken('extrato.read');
-  // Tentar variações de nomes de parâmetros
-  const urls = [
+  const r = await interReq(
     '/banking/v2/extrato?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
-    '/banking/v2/extrato?dataInicial=' + dataInicio + '&dataFinal=' + dataFim,
-    '/banking/v2/extrato?de=' + dataInicio + '&ate=' + dataFim,
-  ];
-  for (const url of urls) {
-    const r = await interReq(url, 'GET', null, token);
-    console.log('[EXTRATO] url=' + url + ' status=' + r.status + ' data=' + JSON.stringify(r.data).slice(0,150));
-    if (r.status >= 200 && r.status < 300) return r.data;
-  }
-  // Retornar o erro da última tentativa para diagnóstico
-  const last = await interReq(urls[0], 'GET', null, token);
-  return last.data;
+    'GET', null, token
+  );
+  return r.data;
 }
 
 // Listar cobranças (boletos) por período
@@ -834,16 +825,46 @@ async function executar(intencao, p, dados) {
       // Extrato dos últimos 30 dias por padrão (não só mês corrente)
       const dataInicio = p?.data_inicio || new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
       const ext = await interExtrato(dataInicio, dataFim);
-      console.log('[EXTRATO] resposta raw:', JSON.stringify(ext).slice(0,300));
       const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
       if (!transacoes.length) return `📄 *Extrato Inter* (${dataInicio} a ${dataFim})\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ${JSON.stringify(ext).slice(0,200)}`;
+
+      // Índice de alunos por valor pago no período para cruzamento
+      const valorParaAlunos = {};
+      dados.alunos.forEach(a => {
+        const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+        const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
+        [pags, pend].forEach(obj => {
+          Object.entries(obj).forEach(([m, v]) => {
+            if (v > 0 && m >= dataInicio.slice(0,7) && m <= dataFim.slice(0,7)) {
+              const key = parseFloat(v).toFixed(0);
+              if (!valorParaAlunos[key]) valorParaAlunos[key] = [];
+              if (!valorParaAlunos[key].includes(a.nome.split(' ')[0]))
+                valorParaAlunos[key].push(a.nome.split(' ')[0]);
+            }
+          });
+        });
+      });
+
       const linhas = transacoes.slice(0,15).map(t => {
-        const tipo = t.tipoTransacao || t.tipoOperacao || t.tipo || '';
-        const sinal = (tipo === 'D' || tipo === 'DEBITO' || (t.valor||0) < 0) ? '🔴' : '🟢';
-        const val = brl(Math.abs(t.valor || t.valorOperacao || 0));
-        const desc = (t.titulo || t.descricao || t.historico || tipo).slice(0,35);
-        const data = (t.dataTransacao || t.dataOperacao || t.data || '').slice(0,10).split('-').reverse().join('/');
-        return `${sinal} ${data} ${val} — ${desc}`;
+        const sinal = (t.tipoOperacao === 'C') ? '🟢' : '🔴';
+        const valNum = parseFloat(t.valor || t.valorOperacao || 0);
+        const val = brl(Math.abs(valNum));
+        const desc = (t.titulo || t.descricao || t.tipoTransacao || '').slice(0,35);
+        const data = (t.dataEntrada || t.dataTransacao || t.dataOperacao || '').slice(0,10).split('-').reverse().join('/');
+        // Tentar identificar o aluno pelo valor (só para créditos)
+        let nomeAluno = '';
+        if (t.tipoOperacao === 'C') {
+          // Nome do pagador via campo direto (Pix costuma ter)
+          const nomePag = t.nomePagador || t.pagador?.nome || t.remetente?.nome || '';
+          if (nomePag) {
+            nomeAluno = ' _(' + nomePag.split(' ')[0] + ')_';
+          } else {
+            const candidatos = valorParaAlunos[Math.round(valNum).toString()] || [];
+            if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ')_';
+            else if (candidatos.length > 1) nomeAluno = ' _(' + candidatos.slice(0,2).join('/') + ')_';
+          }
+        }
+        return `${sinal} ${data} ${val}${nomeAluno} — ${desc}`;
       }).join('\n');
       return `📄 *Extrato Inter* (${dataInicio.split('-').reverse().join('/')} a ${dataFim.split('-').reverse().join('/')})\n\n${linhas}` +
         (transacoes.length > 15 ? `\n\n_...e mais ${transacoes.length - 15} transações._` : '');
