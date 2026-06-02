@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.21 — extrato enriquecido Inter para capturar nome pagador Pix
+// Versão 3.22 — log_operacoes: todas as ações registradas no Supabase
 
 const https = require('https');
 
@@ -165,15 +165,12 @@ async function interCancelarBoleto(codigoSolicitacao) {
 async function gravarBoleto(alunoId, mes, codigoSolicitacao, seuNumero, valor, vencimento) {
   try {
     await sbPost('boletos', {
-      aluno_id: alunoId,
-      mes,
+      aluno_id: alunoId, mes,
       codigo_solicitacao: codigoSolicitacao,
-      seu_numero: seuNumero,
-      valor,
-      vencimento,
-      status: 'aberto',
-      criado_em: new Date().toISOString()
+      seu_numero: seuNumero, valor, vencimento,
+      status: 'aberto', criado_em: new Date().toISOString()
     });
+    await logOp('boleto_emitido', seuNumero + ' — vence ' + vencimento, alunoId, valor, mes, {codigoSolicitacao});
   } catch(e) {
     console.error('[gravarBoleto] erro:', e.message);
   }
@@ -300,6 +297,24 @@ const sbGet   = (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+(q||''), 'GET', sbH
 const sbPost  = (t, b) => req(SUPABASE_URL+'/rest/v1/'+t, 'POST', sbHeaders(), b);
 const sbPatch = (t, q, b) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'PATCH', sbHeaders(), b);
 const sbDelete= (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'DELETE', sbHeaders(), null);
+
+// ── Log de operações ──────────────────────────────────────────────
+async function logOp(tipo, descricao, alunoId, valor, mes, extra) {
+  try {
+    await sbPost('log_operacoes', {
+      tipo,
+      descricao,
+      aluno_id: alunoId || null,
+      valor: valor || null,
+      mes: mes || null,
+      extra: extra ? JSON.stringify(extra) : null,
+      origem: 'bot',
+      criado_em: new Date().toISOString()
+    });
+  } catch(e) {
+    console.error('[logOp] erro:', e.message);
+  }
+}
 
 // ── Gemini ────────────────────────────────────────────────────────
 function aiWithTimeout(promise, ms) {
@@ -660,6 +675,7 @@ async function executar(intencao, p, dados) {
     const vhReal = profObj && profObj.valor_hora > 0 ? profObj.valor_hora : 35;
     await sbPost('aulas', { prof_id: profId, mes, data, data_fmt: data.split('-').reverse().join('/'),
       horas: p.horas, vh: vhReal, desc_aula: 'Lançado via Bot Telegram — '+p.horas+'h' });
+    await logOp('aula_lancada', profId + ' — ' + p.horas + 'h — ' + data, null, p.horas*vhReal, mes, {profId, horas: p.horas});
     return `✅ Aula lançada!\n*${profId}* — ${p.horas}h × ${brl(vhReal)} = ${brl(p.horas*vhReal)} — ${data}\n_Para desfazer: "remover aula ${profId}"_`;
   }
 
@@ -697,6 +713,7 @@ async function executar(intencao, p, dados) {
     const val = pags[mesD];
     delete pags[mesD];
     await sbPatch('alunos', `id=eq.${aluno.id}`, { pagamentos: pags });
+    await logOp('pagamento_desfeito', aluno.nome + ' — ' + mesD, aluno.id, val, mesD);
     return `✅ Pagamento desfeito!\n*${aluno.nome}* — ${brl(val)} — ${mesD} removido.`;
   }
 
@@ -727,6 +744,7 @@ async function executar(intencao, p, dados) {
       custo = filtro[0];
     }
     await sbDelete('custos', `id=eq.${custo.id||custo._id}`);
+    await logOp('custo_removido', (custo.descricao||custo.categoria) + ' — ' + (custo.mes||''), null, custo.valor, custo.mes);
     return `✅ Custo removido!\n*${(custo.descricao||custo.categoria).replace(' [via Bot Telegram]','')}* — ${brl(custo.valor)}`;
   }
 
@@ -739,6 +757,7 @@ async function executar(intencao, p, dados) {
     if (!filtro.length) return `❌ Nenhuma aula encontrada${profId?' para '+profId:''}.`;
     const aula = filtro[0];
     await sbDelete('aulas', `id=eq.${aula.id}`);
+    await logOp('aula_removida', aula.prof_id + ' — ' + (aula.horas||aula.vh) + 'h — ' + (aula.data_fmt||aula.data), null, null, aula.mes);
     return `✅ Aula removida!\n*${aula.prof_id}* — ${aula.horas||aula.vh}h — ${aula.data_fmt||aula.data}`;
   }
 
@@ -782,6 +801,7 @@ async function executar(intencao, p, dados) {
     const DIAS = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
     const dow2 = new Date(dataCi+'T12:00:00').getDay();
     const LABEL = { presente:'✅ Presente', falta:'❌ Falta', repos:'🔄 Reposição' };
+    await logOp('checkin', aluno.nome + ' — ' + (LABEL[status]||status) + ' — ' + horaCi + ' ' + DIAS[dow2] + ' ' + dataCi, aluno.id, null, dataCi.slice(0,7), {status, hora: horaCi, data: dataCi});
     return `${LABEL[status]} registrado!\n*${aluno.nome}* — ${DIAS[dow2]} ${dataCi.slice(8)}/${dataCi.slice(5,7)} ${horaCi}\n_Recarregue o site para ver o check-in atualizado._`;
   }
 
@@ -1281,7 +1301,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v3.6*\n\n' +
+      '👋 *LCA Studio Bot v3.22*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
@@ -1498,7 +1518,8 @@ async function main() {
                 // Notificar via Telegram
                 const chatId = TELEGRAM_CHAT_ID;
                 if (chatId) {
-                  await tgSend(chatId, `🏦 *Pagamento confirmado automaticamente!*\n\n👤 ${aluno.nome}\n💰 ${brl(valorPago)}\n📅 ${mes} — pago em ${dataPag.split('-').reverse().join('/')}\n_Boleto Inter baixado automaticamente._`);
+                  await logOp('boleto_pago_webhook', aluno.nome + ' — ' + mes, alunoId, valorPago, mes, {dataPagamento: dataPag});
+                await tgSend(chatId, `🏦 *Pagamento confirmado automaticamente!*\n\n👤 ${aluno.nome}\n💰 ${brl(valorPago)}\n📅 ${mes} — pago em ${dataPag.split('-').reverse().join('/')}\n_Boleto Inter baixado automaticamente._`);
                 }
                 console.log(`[WEBHOOK-INTER] Pagamento confirmado: aluno ${alunoId} mes ${mes} valor ${valorPago}`);
               } else {
