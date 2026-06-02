@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.9 — webhook Inter: pagamento automático ao boleto ser pago
+// Versão 3.13 — PDFs de boletos enviados via Telegram com nome correto
 
 const https = require('https');
 
@@ -147,6 +147,49 @@ async function interEmitirBoleto(dados) {
   return r.data;
 }
 
+async function interCancelarBoleto(codigoSolicitacao) {
+  if (!codigoSolicitacao) return null;
+  const token = await interGetToken();
+  const r = await interReq(`/cobranca/v3/cobrancas/${codigoSolicitacao}/cancelar`, 'POST',
+    { motivoCancelamento: 'PAGAMENTO_EM_OUTRA_FORMA' }, token);
+  return r;
+}
+
+async function gravarBoleto(alunoId, mes, codigoSolicitacao, seuNumero, valor, vencimento) {
+  try {
+    await sbPost('boletos', {
+      aluno_id: alunoId,
+      mes,
+      codigo_solicitacao: codigoSolicitacao,
+      seu_numero: seuNumero,
+      valor,
+      vencimento,
+      status: 'aberto',
+      criado_em: new Date().toISOString()
+    });
+  } catch(e) {
+    console.error('[gravarBoleto] erro:', e.message);
+  }
+}
+
+async function cancelarBoletoPorMes(alunoId, mes) {
+  try {
+    const r = await sbGet('boletos', `aluno_id=eq.${alunoId}&mes=eq.${mes}&status=eq.aberto&select=id,codigo_solicitacao`);
+    const boletos = r?.data || [];
+    for (const b of boletos) {
+      if (b.codigo_solicitacao) {
+        await interCancelarBoleto(b.codigo_solicitacao);
+        await sbPatch('boletos', `id=eq.${b.id}`, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+        console.log(`[cancelarBoleto] aluno=${alunoId} mes=${mes} cod=${b.codigo_solicitacao}`);
+      }
+    }
+    return boletos.length;
+  } catch(e) {
+    console.error('[cancelarBoletoPorMes] erro:', e.message);
+    return 0;
+  }
+}
+
 // ── HTTP ──────────────────────────────────────────────────────────
 function req(url, method, headers, body, timeoutMs) {
   return new Promise((resolve, reject) => {
@@ -174,6 +217,68 @@ function tgSend(chatId, text) {
   return req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
     'POST', { 'Content-Type': 'application/json' },
     { chat_id: chatId, text, parse_mode: 'Markdown' });
+}
+
+async function tgSendPDF(chatId, pdfUrl, filename, caption) {
+  // Baixar o PDF do Inter
+  const pdfBuffer = await new Promise((resolve, reject) => {
+    const u = new URL(pdfUrl);
+    const options = {
+      hostname: u.hostname, port: 443,
+      path: u.pathname + u.search,
+      method: 'GET',
+      headers: { 'Accept': 'application/pdf' },
+      timeout: 20000
+    };
+    // Se o link Inter requer mTLS, usar o agente com certificado
+    if (INTER_CERT && INTER_KEY && u.hostname.includes('inter')) {
+      const tls = require('tls');
+      options.agent = new (require('https').Agent)({
+        cert: INTER_CERT.includes('-----') ? INTER_CERT : Buffer.from(INTER_CERT, 'base64').toString(),
+        key:  INTER_KEY.includes('-----')  ? INTER_KEY  : Buffer.from(INTER_KEY,  'base64').toString(),
+        rejectUnauthorized: false
+      });
+    }
+    const chunks = [];
+    require('https').get(options, res => {
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    }).on('error', reject).on('timeout', () => reject(new Error('timeout baixando PDF')));
+  });
+
+  // Enviar via multipart/form-data para o Telegram
+  const boundary = '----TGBoundary' + Date.now();
+  const safeFilename = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+
+  const parts = [
+    `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption||''}`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${safeFilename}"\r\nContent-Type: application/pdf\r\n\r\n`
+  ];
+
+  const header = Buffer.from(parts.join('\r\n'));
+  const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const body = Buffer.concat([header, pdfBuffer, footer]);
+
+  return new Promise((resolve, reject) => {
+    const r = require('https').request({
+      hostname: 'api.telegram.org', port: 443,
+      path: `/bot${TELEGRAM_TOKEN}/sendDocument`,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length
+      }
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(d); } });
+    });
+    r.on('error', reject);
+    r.write(body);
+    r.end();
+  });
 }
 function tgUpdates(offset) {
   return req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${offset}&timeout=25`, 'GET', {}, null, 35000);
@@ -455,7 +560,7 @@ Retorne JSON (sem markdown):
 {
   "tipo": "consulta" ou "acao",
   "resposta": "resposta em Markdown se consulta, null se acao",
-  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_emitir_boleto,
+  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto,
   "params": {
     "aluno_nome": string ou null,
     "valor": numero (se pagamento sem valor informado, use o ultimo pagamento do aluno acima) ou null,
@@ -551,7 +656,10 @@ async function executar(intencao, p, dados) {
     const patchData = { pagamentos: pags, historico_alteracoes: hist };
     if (tinhaPend) patchData.pagamentos_pendentes = pend;
     await sbPatch('alunos', `id=eq.${aluno.id}`, patchData);
-    return `✅ Pagamento confirmado!\n*${aluno.nome}* — ${brl(p.valor)} — ${mes}${tinhaPend?'\n_(boleto que estava aguardando foi baixado)_':''}\n_Para desfazer: "desfazer pagamento ${aluno.nome.split(' ')[0]} ${mes}"_`;
+    // Cancelar boleto em aberto no Inter (se houver)
+    const nCancelados = await cancelarBoletoPorMes(aluno.id, mes);
+    const msgCancelamento = nCancelados > 0 ? '\n_Boleto Inter cancelado automaticamente._' : '';
+    return `✅ Pagamento confirmado!\n*${aluno.nome}* — ${brl(p.valor)} — ${mes}${tinhaPend?'\n_(boleto que estava aguardando foi baixado)_':''}${msgCancelamento}\n_Para desfazer: "desfazer pagamento ${aluno.nome.split(' ')[0]} ${mes}"_`;
   }
 
   if (intencao === 'desfazer_pagamento') {
@@ -759,14 +867,149 @@ async function executar(intencao, p, dados) {
       if (result?.codigoSolicitacao || result?.nossoNumero) {
         const cod = result.codigoSolicitacao || result.nossoNumero;
         const link = result.linkVisualizacaoBoleto || result.link || '';
-        return `✅ *Boleto emitido!*\n\n👤 ${aluno.nome}\n💰 ${brl(p.valor)}\n📅 Vencimento: ${venc.split('-').reverse().join('/')}\n🔑 Código: ${cod}` +
-          (link ? `\n\n[Visualizar boleto](${link})` : '') +
+        // Gravar boleto na tabela boletos
+        await gravarBoleto(aluno.id, mes, cod, 'LCA-' + aluno.id + '-' + mes, p.valor, venc);
+        const mesNomeAvulso = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt(mes.slice(5,7))-1];
+        const anoAvulso = mes.slice(0,4);
+        const nomeArq = `Boleto - ${aluno.nome.split(' ')[0]} - ${mesNomeAvulso} ${anoAvulso}.pdf`;
+        const caption = `✅ *Boleto emitido!*\n\n👤 ${aluno.nome}\n💰 ${brl(p.valor)}\n📅 Vencimento: ${venc.split('-').reverse().join('/')}\n🔑 Código: ${cod}`;
+        if (link) {
+          try {
+            await tgSendPDF(chatId, link, nomeArq, caption);
+            return null; // já enviou o arquivo
+          } catch(ePdf) {
+            console.error('[PDF avulso]', ePdf.message);
+          }
+        }
+        return caption + (link ? `\n\n[Visualizar boleto](${link})` : '') +
           `\n\n_Use "confirmar pagamento ${aluno.nome.split(' ')[0]}" quando pagar._`;
       }
       return '⚠️ Resposta: ' + JSON.stringify(result).slice(0,200);
     } catch(e) { return '❌ Erro emissão boleto: ' + e.message; }
   }
 
+
+
+
+  if (intencao === 'inter_emitir_plano') {
+    const aluno = dados.alunos.find(a =>
+      (p?.aluno_id && a.id===p.aluno_id) ||
+      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
+    );
+    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
+    const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
+    if (!cpf) return `⚠️ *${aluno.nome}* não tem CPF cadastrado. Cadastre na ficha antes de emitir boletos.`;
+
+    const DURACAO = { mensal:1, trimestral:3, semestral:6 };
+    const plano = aluno.tipo_plano || 'mensal';
+    const dur = DURACAO[plano] || 1;
+    const valor = p?.valor || aluno.valor_referencia || 0;
+    if (!valor) return '❌ Informe o valor mensal do plano.';
+
+    let anoBase, mesBase;
+    if (p?.mes) {
+      const pm = p.mes.split('-');
+      anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
+    } else {
+      const hoje = new Date();
+      anoBase = hoje.getFullYear(); mesBase = hoje.getMonth();
+    }
+
+    const diaVenc = aluno.dia_vencimento || 10;
+    const MESES_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+    const fmtData = d => `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+
+    const dtInicio = new Date(anoBase, mesBase, diaVenc);
+    const dtFim    = new Date(anoBase, mesBase + dur - 1, diaVenc);
+    const periodoPlano = `${fmtData(dtInicio)} a ${fmtData(dtFim)}`;
+    const planoLabel = plano.charAt(0).toUpperCase() + plano.slice(1);
+
+    const resultados = [];
+    let erros = 0;
+
+    for (let i = 0; i < dur; i++) {
+      const dtVenc  = new Date(anoBase, mesBase + i, diaVenc);
+      const anoVenc = dtVenc.getFullYear();
+      const mesVenc = String(dtVenc.getMonth()+1).padStart(2,'0');
+      const mesStr  = `${anoVenc}-${mesVenc}`;
+      const mesNome = MESES_PT[dtVenc.getMonth()];
+      const numBoleto = i + 1;
+
+      const descricao =
+        `Plano ${planoLabel} LCA Studio - ${periodoPlano} ` +
+        `Boleto ${numBoleto} - ${mesNome} ${anoVenc}`;
+
+      try {
+        const result = await interEmitirBoleto({
+          valor, vencimento: dtVenc.toISOString().slice(0,10),
+          nomePagador: aluno.nome, cpfCnpj: cpf,
+          email: aluno.email || undefined,
+          endereco: aluno.logradouro || aluno.endereco || 'Nao informado',
+          cidade: aluno.cidade ? aluno.cidade.split('-')[0].trim() : 'Rio de Janeiro',
+          uf: aluno.cidade ? (aluno.cidade.split('-')[1]||'RJ').trim() : 'RJ',
+          cep: aluno.cep ? aluno.cep.replace(/\D/g,'').slice(0,8) : '20000000',
+          numero: aluno.numero || 'S/N',
+          descricao,
+          referencia: `Boleto ${numBoleto} - ${mesNome} ${anoVenc}`,
+          seuNumero: `LCA-${aluno.id}-${mesStr}`
+        });
+        const cod  = result?.codigoSolicitacao || result?.nossoNumero || '?';
+        const link = result?.linkVisualizacaoBoleto || result?.link || '';
+        // Gravar boleto na tabela
+        if (result?.codigoSolicitacao) {
+          await gravarBoleto(aluno.id, mesStr, result.codigoSolicitacao, `LCA-${aluno.id}-${mesStr}`, valor, dtVenc.toISOString().slice(0,10));
+        }
+        // Enviar PDF com nome correto
+        const nomeArq = `Boleto ${numBoleto} - ${mesNome} ${anoVenc} - ${aluno.nome.split(' ')[0]}.pdf`;
+        if (link) {
+          try {
+            await tgSendPDF(chatId,link, nomeArq,
+              `📄 Boleto ${numBoleto}/${dur} — ${mesNome} ${anoVenc} | vence ${fmtData(dtVenc)} | ${brl(valor)}`);
+          } catch(ePdf) {
+            console.error(`[PDF plano ${numBoleto}]`, ePdf.message);
+            resultados.push(`${numBoleto}. *${mesNome} ${anoVenc}* — vence ${fmtData(dtVenc)} — [ver](${link})`);
+          }
+        } else {
+          resultados.push(`${numBoleto}. *${mesNome} ${anoVenc}* — vence ${fmtData(dtVenc)} — cod: ${cod}`);
+        }
+      } catch(e) {
+        resultados.push(`${numBoleto}. *${mesNome} ${anoVenc}* — ❌ ${e.message.slice(0,60)}`);
+        erros++;
+      }
+      if (i < dur - 1) await new Promise(r => setTimeout(r, 800));
+    }
+
+    const status = erros === 0 ? '✅' : erros === dur ? '❌' : '⚠️';
+    const resumo = `${status} *Plano ${planoLabel} — ${aluno.nome.split(' ')[0]}*\n` +
+      `📋 ${periodoPlano}\n💰 ${brl(valor)}/mês × ${dur} boletos` +
+      (resultados.length ? '\n\n' + resultados.join('\n') : '') +
+      (erros === 0 ? '\n\n_Baixa automática via webhook quando pagos._' : '');
+    return resumo;
+  }
+
+
+  if (intencao === 'inter_cancelar_boleto') {
+    const aluno = dados.alunos.find(a =>
+      (p?.aluno_id && a.id===p.aluno_id) ||
+      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
+    );
+    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
+    const mes = p?.mes || new Date().toISOString().slice(0,7);
+    try {
+      const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&mes=eq.${mes}&status=eq.aberto&select=id,codigo_solicitacao,valor,vencimento`);
+      const boletos = r?.data || [];
+      if (!boletos.length) return `ℹ️ Nenhum boleto em aberto para *${aluno.nome.split(' ')[0]}* em ${mes}.`;
+      let cancelados = 0;
+      for (const b of boletos) {
+        await interCancelarBoleto(b.codigo_solicitacao);
+        await sbPatch('boletos', `id=eq.${b.id}`, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+        cancelados++;
+      }
+      return `✅ *${cancelados} boleto(s) cancelado(s) no Inter!*\n\n👤 ${aluno.nome}\n📅 Mês: ${mes}\n\n_Pagamento recebido por outro meio._`;
+    } catch(e) {
+      return `❌ Erro ao cancelar boleto: ${e.message}`;
+    }
+  }
 
   if (intencao === 'calcular_rescisao') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
@@ -946,7 +1189,8 @@ async function processar(msg) {
       '• _"saldo da conta"_ — saldo Banco Inter\n' +
       '• _"extrato de hoje"_ / _"extrato do mês"_ — extrato Inter\n' +
       '• _"boletos em aberto"_ / _"boletos pagos este mês"_ — cobranças\n' +
-      '• _"emitir boleto Ana R$ 329 vence dia 10"_ — emitir cobrança\n\n' +
+      '• _"emitir boleto Ana R$ 329 vence dia 10"_ — emitir 1 boleto avulso\n' +
+      '• _"emitir plano Ana"_ — emitir todos os boletos do plano de uma vez (trimestral=3, semestral=6)\n\n' +
       '*📋 Rescisão:*\n' +
       '• _"Mara quer rescindir, semestral, pagou 3 meses"_'
     );
@@ -1058,7 +1302,9 @@ async function processar(msg) {
   const resultado = await executar(intencao, params, dados);
   clearTimeout(_timer);
   if (_timedOut) return;
-  _respondeu=true; return tgSend(chatId, resultado || '❌ Não consegui executar a ação.');
+  _respondeu=true;
+  if (resultado === null) return; // PDF já enviado diretamente
+  return tgSend(chatId, resultado || '❌ Não consegui executar a ação.');
 }
 
 // ── Loop principal ────────────────────────────────────────────────
@@ -1125,9 +1371,14 @@ async function main() {
                 const patch = { pagamentos: pags, historico_alteracoes: hist };
                 if (tinhaPend) patch.pagamentos_pendentes = pend;
                 await sbPatch('alunos', `id=eq.${alunoId}`, patch);
+                // Marcar boleto como pago na tabela
+                try {
+                  await sbPatch('boletos', `aluno_id=eq.${alunoId}&mes=eq.${mes}&status=eq.aberto`,
+                    { status: 'pago', pago_em: new Date().toISOString() });
+                } catch(e) { console.error('[webhook] erro ao marcar boleto pago:', e.message); }
 
                 // Notificar via Telegram
-                const chatId = process.env.TELEGRAM_CHAT_ID;
+                const chatId = TELEGRAM_CHAT_ID;
                 if (chatId) {
                   await tgSend(chatId, `🏦 *Pagamento confirmado automaticamente!*\n\n👤 ${aluno.nome}\n💰 ${brl(valorPago)}\n📅 ${mes} — pago em ${dataPag.split('-').reverse().join('/')}\n_Boleto Inter baixado automaticamente._`);
                 }
