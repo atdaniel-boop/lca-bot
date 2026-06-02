@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.16 — detecção direta de comandos Inter por palavra-chave, prompt clarificado
+// Versão 3.17 — extrato: testa múltiplas variações de parâmetros com log diagnóstico
 
 const https = require('https');
 
@@ -94,11 +94,20 @@ async function interSaldo() {
 // Consultar extrato por período
 async function interExtrato(dataInicio, dataFim) {
   const token = await interGetToken('extrato.read');
-  const r = await interReq(
+  // Tentar variações de nomes de parâmetros
+  const urls = [
+    '/banking/v2/extrato?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
     '/banking/v2/extrato?dataInicial=' + dataInicio + '&dataFinal=' + dataFim,
-    'GET', null, token
-  );
-  return r.data;
+    '/banking/v2/extrato?de=' + dataInicio + '&ate=' + dataFim,
+  ];
+  for (const url of urls) {
+    const r = await interReq(url, 'GET', null, token);
+    console.log('[EXTRATO] url=' + url + ' status=' + r.status + ' data=' + JSON.stringify(r.data).slice(0,150));
+    if (r.status >= 200 && r.status < 300) return r.data;
+  }
+  // Retornar o erro da última tentativa para diagnóstico
+  const last = await interReq(urls[0], 'GET', null, token);
+  return last.data;
 }
 
 // Listar cobranças (boletos) por período
