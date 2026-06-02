@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.5 — inadimplentes consideram dia de vencimento, URL saldo Inter corrigida
+// Versão 3.6 — Inter: banking v2, header x-conta-corrente, parâmetros corretos
 
 const https = require('https');
 
@@ -17,6 +17,7 @@ const INTER_CLIENT_SECRET = process.env.INTER_CLIENT_SECRET || '61897158-54b2-47
 const INTER_BASE          = 'cdpj.partners.bancointer.com.br';
 const INTER_CERT          = process.env.INTER_CERT || ''; // conteúdo do .crt
 const INTER_KEY           = process.env.INTER_KEY  || ''; // conteúdo do .key
+const INTER_CONTA         = process.env.INTER_CONTA || ''; // número da conta corrente PJ
 
 let interToken = null;
 let interTokenExp = 0;
@@ -37,6 +38,7 @@ function interReq(path, method, body, token, extraHeaders) {
       headers: {
         'Content-Type': body ? (path.includes('token') ? 'application/x-www-form-urlencoded' : 'application/json') : undefined,
         ...(token ? { Authorization: 'Bearer ' + token } : {}),
+        ...(INTER_CONTA && !path.includes('token') ? { 'x-conta-corrente': INTER_CONTA } : {}),
         ...(extraHeaders || {})
       },
       timeout: 20000
@@ -82,7 +84,7 @@ async function interSaldo() {
   const token = await interGetToken('extrato.read');
   const hoje = new Date().toISOString().slice(0,10);
   const r = await interReq(
-    '/banking/v3/saldo',
+    '/banking/v2/saldo',
     'GET', null, token
   );
   return r.data;
@@ -92,7 +94,7 @@ async function interSaldo() {
 async function interExtrato(dataInicio, dataFim) {
   const token = await interGetToken('extrato.read');
   const r = await interReq(
-    '/banking/v3/extrato?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
+    '/banking/v2/extrato?dataInicial=' + dataInicio + '&dataFinal=' + dataFim,
     'GET', null, token
   );
   return r.data;
@@ -910,7 +912,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v3.5*\n\n' +
+      '👋 *LCA Studio Bot v3.6*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
@@ -1049,7 +1051,7 @@ async function processar(msg) {
 
 // ── Loop principal ────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v3.5 iniciado ✓');
+  console.log('LCA Bot v3.6 iniciado ✓');
   let offset = 0;
   try {
     const init = await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=-1&limit=1&timeout=0`, 'GET', {}, null);
@@ -1067,7 +1069,7 @@ async function main() {
       res.end('pong');
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v3.5 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v3.6 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
