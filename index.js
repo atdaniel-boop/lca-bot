@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.19 — extrato: nome do aluno identificado pelo valor da transação
+// Versão 3.21 — extrato enriquecido Inter para capturar nome pagador Pix
 
 const https = require('https');
 
@@ -94,11 +94,18 @@ async function interSaldo() {
 // Consultar extrato por período
 async function interExtrato(dataInicio, dataFim) {
   const token = await interGetToken('extrato.read');
+  // Tentar extrato enriquecido primeiro (mais campos, incluindo nome pagador quando disponível)
   const r = await interReq(
+    '/banking/v2/extrato/enriquecido?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
+    'GET', null, token
+  );
+  if (r.status >= 200 && r.status < 300) return r.data;
+  // Fallback: extrato simples
+  const r2 = await interReq(
     '/banking/v2/extrato?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
     'GET', null, token
   );
-  return r.data;
+  return r2.data;
 }
 
 // Listar cobranças (boletos) por período
@@ -828,18 +835,19 @@ async function executar(intencao, p, dados) {
       const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
       if (!transacoes.length) return `📄 *Extrato Inter* (${dataInicio} a ${dataFim})\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ${JSON.stringify(ext).slice(0,200)}`;
 
-      // Índice de alunos por valor pago no período para cruzamento
-      const valorParaAlunos = {};
+      // Índice de alunos por valor+mês para cruzamento mais preciso
+      const valorMesParaAlunos = {};
       dados.alunos.forEach(a => {
         const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
         const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
         [pags, pend].forEach(obj => {
           Object.entries(obj).forEach(([m, v]) => {
-            if (v > 0 && m >= dataInicio.slice(0,7) && m <= dataFim.slice(0,7)) {
-              const key = parseFloat(v).toFixed(0);
-              if (!valorParaAlunos[key]) valorParaAlunos[key] = [];
-              if (!valorParaAlunos[key].includes(a.nome.split(' ')[0]))
-                valorParaAlunos[key].push(a.nome.split(' ')[0]);
+            if (v > 0) {
+              const key = Math.round(parseFloat(v)) + '-' + m;
+              if (!valorMesParaAlunos[key]) valorMesParaAlunos[key] = [];
+              const primeiroNome = a.nome.split(' ')[0];
+              if (!valorMesParaAlunos[key].includes(primeiroNome))
+                valorMesParaAlunos[key].push(primeiroNome);
             }
           });
         });
@@ -850,18 +858,27 @@ async function executar(intencao, p, dados) {
         const valNum = parseFloat(t.valor || t.valorOperacao || 0);
         const val = brl(Math.abs(valNum));
         const desc = (t.titulo || t.descricao || t.tipoTransacao || '').slice(0,35);
-        const data = (t.dataEntrada || t.dataTransacao || t.dataOperacao || '').slice(0,10).split('-').reverse().join('/');
-        // Tentar identificar o aluno pelo valor (só para créditos)
+        const dataStr = (t.dataEntrada || t.dataTransacao || t.dataOperacao || '').slice(0,10);
+        const data = dataStr.split('-').reverse().join('/');
+        const mes = dataStr.slice(0,7); // YYYY-MM da transação
+
         let nomeAluno = '';
         if (t.tipoOperacao === 'C') {
-          // Nome do pagador via campo direto (Pix costuma ter)
-          const nomePag = t.nomePagador || t.pagador?.nome || t.remetente?.nome || '';
+          // 1. Nome direto do payload (extrato enriquecido e Pix cobrança trazem)
+          const nomePag = t.nomePagador || t.pagador?.nome || t.remetente?.nome ||
+            t.detalhes?.nomePagador || t.origem?.nome || t.counterpart?.name || '';
           if (nomePag) {
             nomeAluno = ' _(' + nomePag.split(' ')[0] + ')_';
           } else {
-            const candidatos = valorParaAlunos[Math.round(valNum).toString()] || [];
-            if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ')_';
-            else if (candidatos.length > 1) nomeAluno = ' _(' + candidatos.slice(0,2).join('/') + ')_';
+            // 2. Cruzar valor + mês exato da transação
+            const key = Math.round(valNum) + '-' + mes;
+            const candidatos = valorMesParaAlunos[key] || [];
+            if (candidatos.length === 1) {
+              nomeAluno = ' _(' + candidatos[0] + ')_';
+            } else if (candidatos.length > 1) {
+              // 3. Se ainda ambíguo, mostrar todos (até 3)
+              nomeAluno = ' _(' + candidatos.slice(0,3).join('/') + '?)_';
+            }
           }
         }
         return `${sinal} ${data} ${val}${nomeAluno} — ${desc}`;
