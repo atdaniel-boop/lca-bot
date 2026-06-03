@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.26 — log completo de transação Pix para diagnóstico de campos
+// Versão 3.27 — extrato: nome do pagador extraído do campo descricao do Pix
 
 const https = require('https');
 
@@ -871,8 +871,6 @@ async function executar(intencao, p, dados) {
       const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
       if (!transacoes.length) return `📄 *Extrato Inter* (${dataInicio} a ${dataFim})\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ${JSON.stringify(ext).slice(0,200)}`;
       // Log completo de uma transação Pix para ver todos os campos disponíveis
-      const primeiroPix = transacoes.find(t => t.tipoTransacao === 'PIX' && t.tipoOperacao === 'C');
-      if (primeiroPix) console.log('[PIX CAMPOS COMPLETOS]', JSON.stringify(primeiroPix));
 
       // Índice de alunos por valor+mês para cruzamento mais preciso
       const valorMesParaAlunos = {};
@@ -903,21 +901,35 @@ async function executar(intencao, p, dados) {
 
         let nomeAluno = '';
         if (t.tipoOperacao === 'C') {
-          // 1. Nome direto do payload (extrato enriquecido e Pix cobrança trazem)
+          // 1. Nome direto do payload (extrato enriquecido)
           const nomePag = t.nomePagador || t.pagador?.nome || t.remetente?.nome ||
             t.detalhes?.nomePagador || t.origem?.nome || t.counterpart?.name || '';
           if (nomePag) {
             nomeAluno = ' _(' + nomePag.split(' ')[0] + ')_';
+          } else if (t.descricao) {
+            // 2. Extrair nome do campo descricao: "PIX RECEBIDO - Cp:XXX-NOME DO PAGADOR"
+            const mDesc = t.descricao.match(/(?:PIX RECEBIDO|RECEBIMENTO)\s*-\s*(?:Cp:[^\s-]+-)?(.+)/i);
+            if (mDesc && mDesc[1]) {
+              const nomeBruto = mDesc[1].trim();
+              // Converter NOME COMPLETO EM MAIÚSCULO para Nome Próprio
+              const nomeFormatado = nomeBruto.split(' ')
+                .filter(p => p.length > 0)
+                .map(p => p.length <= 2 ? p.toLowerCase() : p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
+                .join(' ');
+              nomeAluno = ' _(' + nomeFormatado.split(' ').slice(0,2).join(' ') + ')_';
+            } else {
+              // 3. Fallback: cruzar valor + mês
+              const key = Math.round(valNum) + '-' + mes;
+              const candidatos = valorMesParaAlunos[key] || [];
+              if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ')_';
+              else if (candidatos.length > 1) nomeAluno = ' _(' + candidatos.slice(0,3).join('/') + '?)_';
+            }
           } else {
-            // 2. Cruzar valor + mês exato da transação
+            // 3. Fallback: cruzar valor + mês
             const key = Math.round(valNum) + '-' + mes;
             const candidatos = valorMesParaAlunos[key] || [];
-            if (candidatos.length === 1) {
-              nomeAluno = ' _(' + candidatos[0] + ')_';
-            } else if (candidatos.length > 1) {
-              // 3. Se ainda ambíguo, mostrar todos (até 3)
-              nomeAluno = ' _(' + candidatos.slice(0,3).join('/') + '?)_';
-            }
+            if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ')_';
+            else if (candidatos.length > 1) nomeAluno = ' _(' + candidatos.slice(0,3).join('/') + '?)_';
           }
         }
         return `${sinal} ${data} ${val}${nomeAluno} — ${desc}`;
