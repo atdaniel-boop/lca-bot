@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.32 — inter_boletos_vencidos: boletos em aberto/vencidos nos últimos 15 dias
+// Versão 3.33 — token Inter cacheado por scope — resolve conflito extrato vs boleto
 
 const https = require('https');
 
@@ -20,8 +20,7 @@ const INTER_CERT          = process.env.INTER_CERT || ''; // conteúdo do .crt
 const INTER_KEY           = process.env.INTER_KEY  || ''; // conteúdo do .key
 const INTER_CONTA         = process.env.INTER_CONTA || ''; // número da conta corrente PJ
 
-let interToken = null;
-let interTokenExp = 0;
+// Token cacheado por scope — ver interTokenCache em interGetToken
 
 // Requisição mTLS para a API do Inter
 function interReq(path, method, body, token, extraHeaders) {
@@ -62,20 +61,27 @@ function interReq(path, method, body, token, extraHeaders) {
 }
 
 // Obter token OAuth2 (com cache de 50 minutos)
+const interTokenCache = {}; // cache por scope
+
 async function interGetToken(scope) {
+  const scopeKey = scope || 'extrato.read boleto-cobranca.read boleto-cobranca.write';
   const agora = Date.now();
-  if (interToken && agora < interTokenExp) return interToken;
+  if (interTokenCache[scopeKey] && agora < interTokenCache[scopeKey].exp) {
+    return interTokenCache[scopeKey].token;
+  }
   const body = new URLSearchParams({
     client_id:     INTER_CLIENT_ID,
     client_secret: INTER_CLIENT_SECRET,
     grant_type:    'client_credentials',
-    scope:         scope || 'extrato.read boleto-cobranca.read boleto-cobranca.write'
+    scope:         scopeKey
   }).toString();
   const r = await interReq('/oauth/v2/token', 'POST', body, null);
   if (r.data && r.data.access_token) {
-    interToken    = r.data.access_token;
-    interTokenExp = agora + (r.data.expires_in - 60) * 1000;
-    return interToken;
+    interTokenCache[scopeKey] = {
+      token: r.data.access_token,
+      exp:   agora + (r.data.expires_in - 60) * 1000
+    };
+    return interTokenCache[scopeKey].token;
   }
   throw new Error('Inter auth falhou: ' + JSON.stringify(r.data));
 }
