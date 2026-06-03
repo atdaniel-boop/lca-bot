@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.33 — token Inter cacheado por scope — resolve conflito extrato vs boleto
+// Versão 4.1 — reenviar boletos por aluno, data vencimento ajustada para hoje+1 se já passou
 
 const https = require('https');
 
@@ -566,7 +566,11 @@ async function processarComIA(texto, dados, mes) {
   if (temInter && (tL.includes('extrato') || tL.includes('transaç') || tL.includes('moviment'))) {
     return { tipo: 'acao', intencao: 'inter_extrato', params: {} };
   }
-  // Emitir plano completo — detecção direta (antes do inter_emitir_boleto)
+  // Reenviar PDFs de boletos já emitidos
+  if ((tL.includes('reenviar') || tL.includes('enviar') || tL.includes('mandar')) &&
+      tL.includes('boleto')) {
+    return { tipo: 'acao', intencao: 'inter_reenviar_boletos', params: {} };
+  }
   if ((tL.includes('emitir') || tL.includes('gerar')) && tL.includes('plano') &&
       !tL.includes('mensal')) {
     // Extrair nome do aluno do texto
@@ -626,7 +630,7 @@ Retorne JSON (sem markdown):
 {
   "tipo": "consulta" ou "acao",
   "resposta": "resposta em Markdown se consulta, null se acao",
-  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto,
+  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos,
   "params": {
     "aluno_nome": string ou null,
     "valor": numero (se pagamento sem valor informado, use o ultimo pagamento do aluno acima) ou null,
@@ -680,7 +684,7 @@ Retorne JSON com os campos relevantes (use null para campos não mencionados):
 }
 
 // ── Executar ação ─────────────────────────────────────────────────
-async function executar(intencao, p, dados) {
+async function executar(intencao, p, dados, chatId) {
   const mes = p?.mes || new Date().toISOString().slice(0,7);
 
   if (intencao === 'lancar_custo') {
@@ -911,7 +915,7 @@ async function executar(intencao, p, dados) {
         });
       });
 
-      const linhas = transacoes.slice(0,15).map(t => {
+      const linhas = transacoes.slice().reverse().slice(0,15).map(t => {
         const sinal = (t.tipoOperacao === 'C') ? '🟢' : '🔴';
         const valNum = parseFloat(t.valor || t.valorOperacao || 0);
         const val = brl(Math.abs(valNum));
@@ -1137,7 +1141,13 @@ async function executar(intencao, p, dados) {
     let erros = 0;
 
     for (let i = 0; i < dur; i++) {
-      const dtVenc  = new Date(anoBase, mesBase + i, diaVenc);
+      let dtVenc  = new Date(anoBase, mesBase + i, diaVenc);
+      // Se a data de vencimento já passou, usar hoje + 1 dia
+      const hojeDate = new Date(); hojeDate.setHours(0,0,0,0);
+      if (dtVenc < hojeDate) {
+        dtVenc = new Date(hojeDate.getTime() + 24*60*60*1000);
+        console.log(`[PLANO] Boleto ${i+1}: data ${new Date(anoBase, mesBase + i, diaVenc).toISOString().slice(0,10)} já passou — usando ${dtVenc.toISOString().slice(0,10)}`);
+      }
       const anoVenc = dtVenc.getFullYear();
       const mesVenc = String(dtVenc.getMonth()+1).padStart(2,'0');
       const mesStr  = `${anoVenc}-${mesVenc}`;
@@ -1196,6 +1206,45 @@ async function executar(intencao, p, dados) {
     return resumo;
   }
 
+
+  if (intencao === 'inter_reenviar_boletos') {
+    const aluno = dados.alunos.find(a =>
+      (p?.aluno_id && a.id===p.aluno_id) ||
+      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
+    );
+    if (!aluno) return `❌ Informe o nome do aluno.\nEx: _"reenviar boletos Thalita"_`;
+    try {
+      const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&status=eq.aberto&select=id,mes,valor,codigo_solicitacao,vencimento&order=mes.asc`);
+      const boletos = r?.data || [];
+      if (!boletos.length) return `ℹ️ Nenhum boleto em aberto encontrado para *${aluno.nome.split(' ')[0]}*.`;
+      await tgSend(chatId, `📤 Reenviando ${boletos.length} boleto(s) de *${aluno.nome.split(' ')[0]}*...`);
+      const MESES_PT2 = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+      let enviados = 0;
+      for (const b of boletos) {
+        if (!b.codigo_solicitacao) continue;
+        try {
+          // Buscar link do boleto na API Inter
+          const token = await interGetToken('boleto-cobranca.read');
+          const det = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}`, 'GET', null, token);
+          const link = det?.data?.linkVisualizacaoBoleto || det?.data?.link || '';
+          const mesNome = MESES_PT2[parseInt((b.mes||'').slice(5,7))-1] || b.mes;
+          const vencFmt = (b.vencimento||'').split('-').reverse().join('/');
+          const nomeArq = `Boleto - ${mesNome} - ${aluno.nome.split(' ')[0]}.pdf`;
+          if (link) {
+            await tgSendPDF(chatId, link, nomeArq,
+              `📄 *${mesNome}* | vence ${vencFmt} | ${brl(b.valor||0)}`);
+            enviados++;
+          } else {
+            await tgSend(chatId, `⚠️ ${mesNome}: link não disponível (cod: ${b.codigo_solicitacao.slice(0,8)}...)`);
+          }
+          if (boletos.length > 1) await new Promise(r => setTimeout(r, 500));
+        } catch(eBol) {
+          await tgSend(chatId, `❌ Erro ao buscar ${b.mes}: ${eBol.message.slice(0,60)}`);
+        }
+      }
+      return enviados > 0 ? null : `⚠️ Não foi possível reenviar os boletos. Tente emitir novamente.`;
+    } catch(e) { return `❌ Erro: ${e.message}`; }
+  }
 
   if (intencao === 'inter_cancelar_boleto') {
     const aluno = dados.alunos.find(a =>
@@ -1376,7 +1425,7 @@ async function processar(msg) {
         clearTimeout(_timer);
         delete ctx[chatId];
         _respondeu = true;
-        const resultado = await executar(c.intencao, { aluno_id: c.aluno_id, aluno_nome: c.aluno_nome, valor: valorInformado, mes: c.mes }, dados);
+        const resultado = await executar(c.intencao, { aluno_id: c.aluno_id, aluno_nome: c.aluno_nome, valor: valorInformado, mes: c.mes }, dados, chatId);
         if (resultado === null) return;
         return tgSend(chatId, resultado || '❌ Erro ao executar.');
       }
@@ -1393,7 +1442,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v3.22*\n\n' +
+      '👋 *LCA Studio Bot v4.1*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
@@ -1504,7 +1553,7 @@ async function processar(msg) {
 
   // Rescisão: mostrar cálculo e aguardar confirmação
   if (intencao === 'calcular_rescisao') {
-    const preview = await executar(intencao, params, dados);
+    const preview = await executar(intencao, params, dados, chatId);
     clearTimeout(_timer);
     if (preview) {
       // Recalcular os dados estruturados para o lançamento (mesma fórmula do preview)
@@ -1528,7 +1577,7 @@ async function processar(msg) {
     }
   }
 
-  const resultado = await executar(intencao, params, dados);
+  const resultado = await executar(intencao, params, dados, chatId);
   clearTimeout(_timer);
   if (_timedOut) return;
   _respondeu=true;
