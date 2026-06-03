@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.9 — boleto: descricao com "Validade do Plano", data fim correta, endereço com complemento
+// Versão 4.11 — mensagem WhatsApp separada da orientação
 
 const https = require('https');
 
@@ -1123,6 +1123,24 @@ async function executar(intencao, p, dados, chatId) {
 
 
 
+
+function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
+  const primeiroNome = aluno.nome.split(' ')[0];
+  const vezes = aluno.vezes_semana || 2;
+  return `Olá, ${primeiroNome}! 😊
+
+Seguem os boletos referentes ao seu plano semestral no LCA Studio de Pilates.
+
+📋 *Plano ${planoLabel} — ${vezes}x por semana*
+📅 *Validade: ${periodoPlano}*
+💰 *${brl(valor)}/mês*
+
+Os boletos vencem todo dia ${diaVenc} de cada mês. Você também pode pagar via Pix utilizando o QR Code impresso em cada boleto.
+
+Qualquer dúvida, estamos à disposição! 🌿
+LCA Studio de Pilates`;
+}
+
   if (intencao === 'inter_emitir_plano') {
     const aluno = dados.alunos.find(a =>
       (p?.aluno_id && a.id===p.aluno_id) ||
@@ -1246,6 +1264,11 @@ async function executar(intencao, p, dados, chatId) {
       `📋 ${periodoPlano}\n💰 ${brl(valor)}/mês × ${dur} boletos` +
       (resultados.length ? '\n\n' + resultados.join('\n') : '') +
       (erros === 0 ? '\n\n_Baixa automática via webhook quando pagos._' : '');
+    // Enviar mensagem para copiar no WhatsApp
+    if (erros === 0) {
+      await tgSend(chatId, '✂️ *Copie a mensagem abaixo e envie no WhatsApp da aluna:*');
+      await tgSend(chatId, msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc));
+    }
     return resumo;
   }
 
@@ -1329,6 +1352,19 @@ async function executar(intencao, p, dados, chatId) {
         } catch(eBol) {
           await tgSend(chatId, `❌ Erro ${b.mes}: ${eBol.message.slice(0,60)}`);
         }
+      }
+      // Enviar mensagem para copiar no WhatsApp
+      if (enviados > 0) {
+        const planoLabelR = (aluno.tipo_plano||'mensal').charAt(0).toUpperCase()+(aluno.tipo_plano||'mensal').slice(1);
+        const hoje = new Date();
+        const dtIniR = new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10);
+        const DURACAO = {mensal:1,trimestral:3,semestral:6};
+        const durR = DURACAO[aluno.tipo_plano]||1;
+        const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR-1, (aluno.dia_vencimento||10)-1);
+        const fmtR = d => String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();
+        const periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
+        await tgSend(chatId, '✂️ *Copie a mensagem abaixo e envie no WhatsApp da aluna:*');
+        await tgSend(chatId, msgWhatsApp(aluno, planoLabelR, periodoR, boletos[0]?.valor||0, aluno.dia_vencimento||10));
       }
       return enviados > 0 ? null : `⚠️ Não foi possível reenviar. Tente emitir novamente.`;
     } catch(e) { return `❌ Erro: ${e.message}`; }
@@ -1783,7 +1819,7 @@ async function main() {
 
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.9 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.10 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
