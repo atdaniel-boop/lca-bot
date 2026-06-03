@@ -1287,9 +1287,13 @@ async function executar(intencao, p, dados, chatId) {
             const token = await interGetToken('boleto-cobranca.read');
             // Tentar buscar PDF diretamente
             const pdfResp = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}/pdf`, 'GET', null, token);
-            if (pdfResp?.data && typeof pdfResp.data === 'string' && pdfResp.data.length > 100) {
-              // Resposta é base64 do PDF
-              link = `data:application/pdf;base64,${pdfResp.data}`;
+            console.log('[PDF RESP] status:', pdfResp?.status, 'keys:', Object.keys(pdfResp?.data||pdfResp||{}).join(','), 'tipo:', typeof pdfResp?.data);
+            // O Inter retorna o PDF em base64 no campo 'pdf' ou diretamente como string
+            const pdfBase64 = pdfResp?.data?.pdf || pdfResp?.pdf ||
+              (typeof pdfResp?.data === 'string' && pdfResp.data.length > 500 ? pdfResp.data : null) ||
+              (typeof pdfResp === 'string' && pdfResp.length > 500 ? pdfResp : null);
+            if (pdfBase64) {
+              link = `data:application/pdf;base64,${pdfBase64}`;
             } else {
               const det = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}`, 'GET', null, token);
               const cob = det?.cobranca || det?.data?.cobranca || det?.data || det;
