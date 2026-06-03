@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.25 — scopes Inter restaurados (boleto-cobranca.read/write)
+// Versão 3.26 — log completo de transação Pix para diagnóstico de campos
 
 const https = require('https');
 
@@ -870,6 +870,9 @@ async function executar(intencao, p, dados) {
       const ext = await interExtrato(dataInicio, dataFim);
       const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
       if (!transacoes.length) return `📄 *Extrato Inter* (${dataInicio} a ${dataFim})\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ${JSON.stringify(ext).slice(0,200)}`;
+      // Log completo de uma transação Pix para ver todos os campos disponíveis
+      const primeiroPix = transacoes.find(t => t.tipoTransacao === 'PIX' && t.tipoOperacao === 'C');
+      if (primeiroPix) console.log('[PIX CAMPOS COMPLETOS]', JSON.stringify(primeiroPix));
 
       // Índice de alunos por valor+mês para cruzamento mais preciso
       const valorMesParaAlunos = {};
