@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.8 — reenviar boletos: PDF base64 e log de campos do link
+// Versão 4.9 — boleto: descricao com "Validade do Plano", data fim correta, endereço com complemento
 
 const https = require('https');
 
@@ -143,11 +143,12 @@ async function interEmitirBoleto(dados) {
       tipoPessoa: dados.cpfCnpj.replace(/\D/g,'').length === 11 ? 'FISICA' : 'JURIDICA',
       nome:       dados.nomePagador,
       email:      dados.email || undefined,
-      endereco:   dados.endereco || 'Não informado',
+      endereco:   dados.endereco || 'Nao informado',
       cidade:     dados.cidade || 'Rio de Janeiro',
       uf:         dados.uf || 'RJ',
-      cep:        dados.cep || '20000-000',
-      numero:     dados.numero || 'S/N'
+      cep:        dados.cep || '20000000',
+      numero:     dados.numero || 'S/N',
+      complemento: dados.complemento || undefined
     },
     mensagem: {
       linha1: dados.descricao || 'Mensalidade Pilates LCA Studio',
@@ -1085,11 +1086,12 @@ async function executar(intencao, p, dados, chatId) {
         valor: valorBoleto, vencimento: venc,
         nomePagador: aluno.nome, cpfCnpj: cpf,
         email: aluno.email || undefined,
-        endereco: aluno.logradouro || aluno.endereco || 'Não informado',
+        endereco: aluno.logradouro || aluno.endereco || 'Nao informado',
         cidade: aluno.cidade ? aluno.cidade.split('-')[0].trim() : 'Rio de Janeiro',
         uf: aluno.cidade ? (aluno.cidade.split('-')[1]||'RJ').trim() : 'RJ',
         cep: aluno.cep ? aluno.cep.replace(/\D/g,'').slice(0,8) : '20000000',
         numero: aluno.numero || 'S/N',
+        complemento: (aluno.complemento && aluno.complemento !== 'null') ? aluno.complemento : undefined,
         descricao: 'Mensalidade Pilates LCA Studio — ' + aluno.nome.split(' ')[0],
         referencia: new Date().toLocaleDateString('pt-BR'),
         seuNumero: 'LCA-' + aluno.id + '-' + mes
@@ -1165,9 +1167,17 @@ async function executar(intencao, p, dados, chatId) {
     const fmtData = d => `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
 
     const dtInicio = new Date(anoBase, mesBase, diaVenc);
-    const dtFim    = new Date(anoBase, mesBase + dur - 1, diaVenc);
-    const periodoPlano = `${fmtData(dtInicio)} a ${fmtData(dtFim)}`;
+    const dtFimReal = new Date(anoBase, mesBase + dur - 1, diaVenc - 1); // dia anterior ao vencimento do último boleto
+    const periodoPlano = `${fmtData(dtInicio)} a ${fmtData(dtFimReal)}`;
     const planoLabel = plano.charAt(0).toUpperCase() + plano.slice(1);
+
+    // Montar endereço sem null
+    const endLogradouro = aluno.logradouro || aluno.endereco || 'Nao informado';
+    const endNumero = aluno.numero || 'S/N';
+    const endComplemento = aluno.complemento && aluno.complemento !== 'null' ? aluno.complemento : '';
+    const endCidade = aluno.cidade ? aluno.cidade.split('-')[0].trim() : 'Rio de Janeiro';
+    const endUF = aluno.cidade ? (aluno.cidade.split('-')[1]||'RJ').trim() : 'RJ';
+    const endCEP = aluno.cep ? aluno.cep.replace(/\D/g,'').slice(0,8) : '20000000';
 
     const resultados = [];
     let erros = 0;
@@ -1187,7 +1197,7 @@ async function executar(intencao, p, dados, chatId) {
       const numBoleto = i + 1;
 
       const descricao =
-        `Plano ${planoLabel} LCA Studio - ${periodoPlano} ` +
+        `Validade do Plano: ${periodoPlano} ` +
         `Boleto ${numBoleto} - ${mesNome} ${anoVenc}`;
 
       try {
@@ -1195,11 +1205,12 @@ async function executar(intencao, p, dados, chatId) {
           valor, vencimento: dtVenc.toISOString().slice(0,10),
           nomePagador: aluno.nome, cpfCnpj: cpf,
           email: aluno.email || undefined,
-          endereco: aluno.logradouro || aluno.endereco || 'Nao informado',
-          cidade: aluno.cidade ? aluno.cidade.split('-')[0].trim() : 'Rio de Janeiro',
-          uf: aluno.cidade ? (aluno.cidade.split('-')[1]||'RJ').trim() : 'RJ',
-          cep: aluno.cep ? aluno.cep.replace(/\D/g,'').slice(0,8) : '20000000',
-          numero: aluno.numero || 'S/N',
+          endereco: endLogradouro,
+          cidade: endCidade,
+          uf: endUF,
+          cep: endCEP,
+          numero: endNumero,
+          complemento: endComplemento || undefined,
           descricao,
           referencia: `Boleto ${numBoleto} - ${mesNome} ${anoVenc}`,
           seuNumero: `LCA-${aluno.id}-${mesStr}`
@@ -1249,7 +1260,6 @@ async function executar(intencao, p, dados, chatId) {
       // Buscar na tabela boletos local
       const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&select=id,mes,valor,codigo_solicitacao,vencimento,status&order=mes.asc`);
       const rArr = Array.isArray(r) ? r : (r?.data || []);
-      console.log('[REENVIAR] aluno_id:', aluno.id, 'registros:', rArr.length);
       let boletos = rArr.filter(b => b.status === 'aberto');
 
       if (!boletos.length) {
@@ -1287,7 +1297,6 @@ async function executar(intencao, p, dados, chatId) {
             const token = await interGetToken('boleto-cobranca.read');
             // Tentar buscar PDF diretamente
             const pdfResp = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}/pdf`, 'GET', null, token);
-            console.log('[PDF RESP] status:', pdfResp?.status, 'keys:', Object.keys(pdfResp?.data||pdfResp||{}).join(','), 'tipo:', typeof pdfResp?.data);
             // O Inter retorna o PDF em base64 no campo 'pdf' ou diretamente como string
             const pdfBase64 = pdfResp?.data?.pdf || pdfResp?.pdf ||
               (typeof pdfResp?.data === 'string' && pdfResp.data.length > 500 ? pdfResp.data : null) ||
@@ -1297,7 +1306,6 @@ async function executar(intencao, p, dados, chatId) {
             } else {
               const det = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}`, 'GET', null, token);
               const cob = det?.cobranca || det?.data?.cobranca || det?.data || det;
-              console.log('[BOLETO LINK]', Object.keys(cob||{}).join(','), '| link:', cob?.linkVisualizacaoBoleto||cob?.link||'vazio');
               link = cob?.linkVisualizacaoBoleto || cob?.link || cob?.linkBoleto ||
                      det?.linkVisualizacaoBoleto || det?.link || '';
             }
@@ -1518,7 +1526,6 @@ async function processar(msg) {
   catch(e) { console.error('processarComIA erro:', e.message); aiResult = { tipo: 'consulta', resposta: null }; }
 
   console.log('IA result:', aiResult.tipo, aiResult.intencao||'', '|', texto.slice(0,40));
-  console.log('IA params:', JSON.stringify(aiResult.params));
 
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
@@ -1776,7 +1783,7 @@ async function main() {
 
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.8 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.9 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
