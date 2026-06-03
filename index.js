@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.2 — reenviar boletos: extrai nome do aluno do texto
+// Versão 4.3 — reenviar boletos: busca na API Inter quando não há na tabela local
 
 const https = require('https');
 
@@ -1222,19 +1222,44 @@ async function executar(intencao, p, dados, chatId) {
     );
     if (!aluno) return `❌ Informe o nome do aluno.\nEx: _"reenviar boletos Thalita"_`;
     try {
+      // Buscar na tabela boletos local
       const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&status=eq.aberto&select=id,mes,valor,codigo_solicitacao,vencimento&order=mes.asc`);
-      const boletos = r?.data || [];
-      if (!boletos.length) return `ℹ️ Nenhum boleto em aberto encontrado para *${aluno.nome.split(' ')[0]}*.`;
+      let boletos = r?.data || [];
+
+      // Se não há na tabela local, buscar diretamente na API Inter pelo seuNumero
+      if (!boletos.length) {
+        await tgSend(chatId, `🔍 Buscando boletos na API Inter para *${aluno.nome.split(' ')[0]}*...`);
+        const hoje = new Date();
+        const dataFim = new Date(hoje.getFullYear(), hoje.getMonth() + 6, 30).toISOString().slice(0,10);
+        const dataInicio = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1).toISOString().slice(0,10);
+        const rInter = await interCobranças('A_VENCER', dataInicio, dataFim);
+        const cobrancas = rInter?.content || rInter?.cobrancas || [];
+        // Filtrar pelo seuNumero que começa com LCA-{id}-
+        const prefixo = `LCA-${aluno.id}-`;
+        boletos = cobrancas
+          .filter(c => (c.seuNumero||'').startsWith(prefixo))
+          .map(c => ({
+            codigo_solicitacao: c.codigoSolicitacao,
+            mes: c.seuNumero.replace(prefixo, ''),
+            valor: c.valorNominal,
+            vencimento: c.dataVencimento,
+            linkVisualizacaoBoleto: c.linkVisualizacaoBoleto || c.link || ''
+          }));
+      }
+
+      if (!boletos.length) return `ℹ️ Nenhum boleto encontrado para *${aluno.nome.split(' ')[0]}* na tabela local nem na API Inter.`;
+
       await tgSend(chatId, `📤 Reenviando ${boletos.length} boleto(s) de *${aluno.nome.split(' ')[0]}*...`);
       const MESES_PT2 = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
       let enviados = 0;
       for (const b of boletos) {
-        if (!b.codigo_solicitacao) continue;
         try {
-          // Buscar link do boleto na API Inter
-          const token = await interGetToken('boleto-cobranca.read');
-          const det = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}`, 'GET', null, token);
-          const link = det?.data?.linkVisualizacaoBoleto || det?.data?.link || '';
+          let link = b.linkVisualizacaoBoleto || '';
+          if (!link && b.codigo_solicitacao) {
+            const token = await interGetToken('boleto-cobranca.read');
+            const det = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}`, 'GET', null, token);
+            link = det?.data?.linkVisualizacaoBoleto || det?.data?.link || '';
+          }
           const mesNome = MESES_PT2[parseInt((b.mes||'').slice(5,7))-1] || b.mes;
           const vencFmt = (b.vencimento||'').split('-').reverse().join('/');
           const nomeArq = `Boleto - ${mesNome} - ${aluno.nome.split(' ')[0]}.pdf`;
@@ -1243,14 +1268,14 @@ async function executar(intencao, p, dados, chatId) {
               `📄 *${mesNome}* | vence ${vencFmt} | ${brl(b.valor||0)}`);
             enviados++;
           } else {
-            await tgSend(chatId, `⚠️ ${mesNome}: link não disponível (cod: ${b.codigo_solicitacao.slice(0,8)}...)`);
+            await tgSend(chatId, `⚠️ ${mesNome}: link não disponível`);
           }
-          if (boletos.length > 1) await new Promise(r => setTimeout(r, 500));
+          if (boletos.length > 1) await new Promise(r => setTimeout(r, 600));
         } catch(eBol) {
-          await tgSend(chatId, `❌ Erro ao buscar ${b.mes}: ${eBol.message.slice(0,60)}`);
+          await tgSend(chatId, `❌ Erro ${b.mes}: ${eBol.message.slice(0,60)}`);
         }
       }
-      return enviados > 0 ? null : `⚠️ Não foi possível reenviar os boletos. Tente emitir novamente.`;
+      return enviados > 0 ? null : `⚠️ Não foi possível reenviar. Tente emitir novamente.`;
     } catch(e) { return `❌ Erro: ${e.message}`; }
   }
 
@@ -1450,7 +1475,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.2*\n\n' +
+      '👋 *LCA Studio Bot v4.3*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
