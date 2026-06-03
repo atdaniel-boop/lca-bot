@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.1 — reenviar boletos por aluno, data vencimento ajustada para hoje+1 se já passou
+// Versão 4.2 — reenviar boletos: extrai nome do aluno do texto
 
 const https = require('https');
 
@@ -569,7 +569,15 @@ async function processarComIA(texto, dados, mes) {
   // Reenviar PDFs de boletos já emitidos
   if ((tL.includes('reenviar') || tL.includes('enviar') || tL.includes('mandar')) &&
       tL.includes('boleto')) {
-    return { tipo: 'acao', intencao: 'inter_reenviar_boletos', params: {} };
+    const palavrasIgnorar = ['reenviar','enviar','mandar','boleto','boletos','do','da','de','para','os','inter'];
+    const palavras = tL.split(/\s+/).filter(p => p.length > 2 && !palavrasIgnorar.includes(p));
+    let alunoReenv = null;
+    for (const palavra of palavras) {
+      const al = dados.alunos.find(a => a.nome.toLowerCase().includes(palavra));
+      if (al) { alunoReenv = al; break; }
+    }
+    return { tipo: 'acao', intencao: 'inter_reenviar_boletos',
+      params: alunoReenv ? { aluno_id: alunoReenv.id, aluno_nome: alunoReenv.nome } : {} };
   }
   if ((tL.includes('emitir') || tL.includes('gerar')) && tL.includes('plano') &&
       !tL.includes('mensal')) {
@@ -1442,7 +1450,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.1*\n\n' +
+      '👋 *LCA Studio Bot v4.2*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
