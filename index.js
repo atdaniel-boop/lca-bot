@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.7 — sbGet volta a retornar array direto, .data corrigido nos lugares certos
+// Versão 4.8 — reenviar boletos: PDF base64 e log de campos do link
 
 const https = require('https');
 
@@ -227,6 +227,29 @@ function tgSend(chatId, text) {
   return req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
     'POST', { 'Content-Type': 'application/json' },
     { chat_id: chatId, text, parse_mode: 'Markdown' });
+}
+
+async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption) {
+  const boundary = '----TGBoundary' + Date.now();
+  const safeFilename = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+  const parts = [
+    `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption||''}`,
+    `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${safeFilename}"\r\nContent-Type: application/pdf\r\n\r\n`
+  ];
+  const header = Buffer.from(parts.join('\r\n'));
+  const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const body = Buffer.concat([header, pdfBuffer, footer]);
+  return new Promise((resolve, reject) => {
+    const r = require('https').request({
+      hostname: 'api.telegram.org', port: 443,
+      path: `/bot${TELEGRAM_TOKEN}/sendDocument`,
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
+    }, res => { let d=''; res.on('data',c=>d+=c); res.on('end',()=>{ try{resolve(JSON.parse(d));}catch{resolve(d);} }); });
+    r.on('error', reject); r.write(body); r.end();
+  });
 }
 
 async function tgSendPDF(chatId, pdfUrl, filename, caption) {
@@ -1262,17 +1285,30 @@ async function executar(intencao, p, dados, chatId) {
           let link = b.linkVisualizacaoBoleto || '';
           if (!link && b.codigo_solicitacao) {
             const token = await interGetToken('boleto-cobranca.read');
-            const det = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}`, 'GET', null, token);
-            console.log('[BOLETO DET]', JSON.stringify(det?.data || det).slice(0,400));
-            link = det?.data?.linkVisualizacaoBoleto || det?.data?.link || 
-                   det?.linkVisualizacaoBoleto || det?.link || '';
+            // Tentar buscar PDF diretamente
+            const pdfResp = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}/pdf`, 'GET', null, token);
+            if (pdfResp?.data && typeof pdfResp.data === 'string' && pdfResp.data.length > 100) {
+              // Resposta é base64 do PDF
+              link = `data:application/pdf;base64,${pdfResp.data}`;
+            } else {
+              const det = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}`, 'GET', null, token);
+              const cob = det?.cobranca || det?.data?.cobranca || det?.data || det;
+              console.log('[BOLETO LINK]', Object.keys(cob||{}).join(','), '| link:', cob?.linkVisualizacaoBoleto||cob?.link||'vazio');
+              link = cob?.linkVisualizacaoBoleto || cob?.link || cob?.linkBoleto ||
+                     det?.linkVisualizacaoBoleto || det?.link || '';
+            }
           }
           const mesNome = MESES_PT2[parseInt((b.mes||'').slice(5,7))-1] || b.mes;
           const vencFmt = (b.vencimento||'').split('-').reverse().join('/');
           const nomeArq = `Boleto - ${mesNome} - ${aluno.nome.split(' ')[0]}.pdf`;
+          const caption = `📄 *${mesNome}* | vence ${vencFmt} | ${brl(b.valor||0)}`;
           if (link) {
-            await tgSendPDF(chatId, link, nomeArq,
-              `📄 *${mesNome}* | vence ${vencFmt} | ${brl(b.valor||0)}`);
+            if (link.startsWith('data:application/pdf;base64,')) {
+              const pdfBuffer = Buffer.from(link.replace('data:application/pdf;base64,', ''), 'base64');
+              await tgSendPDFBuffer(chatId, pdfBuffer, nomeArq, caption);
+            } else {
+              await tgSendPDF(chatId, link, nomeArq, caption);
+            }
             enviados++;
           } else {
             await tgSend(chatId, `⚠️ ${mesNome}: link não disponível`);
@@ -1736,7 +1772,7 @@ async function main() {
 
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.5 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.8 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
