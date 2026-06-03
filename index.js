@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.29 — diagnóstico extrato enriquecido e Pix sem Cp
+// Versão 3.30 — extrato: regex Pix corrigida (Cp :), boleto cruzado com tabela boletos
 
 const https = require('https');
 
@@ -99,14 +99,12 @@ async function interExtrato(dataInicio, dataFim) {
     '/banking/v2/extrato/enriquecido?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
     'GET', null, token
   );
-  console.log('[EXTRATO] enriquecido status:', r.status);
   if (r.status >= 200 && r.status < 300) return r.data;
   // Fallback: extrato simples
   const r2 = await interReq(
     '/banking/v2/extrato?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
     'GET', null, token
   );
-  console.log('[EXTRATO] simples status:', r2.status);
   return r2.data;
 }
 
@@ -873,13 +871,17 @@ async function executar(intencao, p, dados) {
       const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
       // Log diagnóstico: Pix sem padrão Cp:
       transacoes.filter(t => t.tipoTransacao==='PIX' && t.tipoOperacao==='C' && !(t.descricao||'').includes('Cp:')).slice(0,3).forEach(t => {
-        console.log('[PIX SEM CP] desc:', t.descricao, '| titulo:', t.titulo);
       });
       // Log de um boleto para ver campos
-      const primeiroBoleto = transacoes.find(t => t.tipoTransacao === 'BOLETO_COBRANCA' && t.tipoOperacao === 'C');
-      if (primeiroBoleto) console.log('[BOLETO CAMPOS]', JSON.stringify(primeiroBoleto));
       if (!transacoes.length) return `📄 *Extrato Inter* (${dataInicio} a ${dataFim})\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ${JSON.stringify(ext).slice(0,200)}`;
       // Log completo de uma transação Pix para ver todos os campos disponíveis
+
+      // Índice de boletos emitidos por valor para cruzamento
+      let boletosEmitidos = [];
+      try {
+        const rb = await sbGet('boletos', 'select=aluno_id,valor,vencimento,mes&status=in.(aberto,pago,cancelado,cancelado_manual)');
+        boletosEmitidos = rb?.data || [];
+      } catch(e) {}
 
       // Índice de alunos por valor+mês para cruzamento mais preciso
       const valorMesParaAlunos = {};
@@ -910,51 +912,38 @@ async function executar(intencao, p, dados) {
 
         let nomeAluno = '';
         if (t.tipoOperacao === 'C') {
-          // 1. Nome direto do payload (extrato enriquecido)
-          const nomePag = t.nomePagador || t.pagador?.nome || t.remetente?.nome ||
-            t.detalhes?.nomePagador || t.origem?.nome || t.counterpart?.name || '';
+          const nomePag = t.nomePagador || t.pagador?.nome || t.remetente?.nome || '';
           if (nomePag) {
             nomeAluno = ' _(' + nomePag.split(' ')[0] + ')_';
-          } else if (t.descricao) {
-            // Extrair nome do campo descricao
-            // Formatos conhecidos:
-            // "PIX RECEBIDO - Cp:00000000-NOME COMPLETO"
-            // "RECEBIMENTO TITULO - 112/90494897500" (boleto — sem nome útil)
-            let nomeBruto = '';
-            // Pix: pegar tudo após "Cp:XXXXXXXX-"
-            const mPix = t.descricao.match(/Cp:\d+-(.+)/i);
+          } else if (t.tipoTransacao === 'PIX' && t.descricao) {
+            // Pix: extrair nome do campo "PIX RECEBIDO - Cp :XXXXXXXX-NOME COMPLETO"
+            const mPix = t.descricao.match(/Cp\s*:\s*\d+-(.+)/i);
             if (mPix && mPix[1] && mPix[1].trim().length > 2) {
-              nomeBruto = mPix[1].trim();
-            }
-            if (nomeBruto) {
-              // Converter MAIÚSCULO para Nome Próprio
               const preposicoes = ['de','da','do','das','dos','e'];
-              const nomeFormatado = nomeBruto.split(' ')
+              const nomeFormatado = mPix[1].trim().split(' ')
                 .filter(p => p.length > 0)
-                .map(p => preposicoes.includes(p.toLowerCase())
-                  ? p.toLowerCase()
-                  : p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
+                .map(p => preposicoes.includes(p.toLowerCase()) ? p.toLowerCase() : p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
                 .join(' ');
-              // Nome completo para verificar se há homônimos
-              const nomeCompleto = nomeFormatado;
               const primeiroNome = nomeFormatado.split(' ')[0].toLowerCase();
-              // Verificar homônimos nos alunos cadastrados
-              const homonimos = dados.alunos.filter(a =>
-                a.nome.toLowerCase().split(' ')[0] === primeiroNome
-              );
-              if (homonimos.length > 1) {
-                // Há homônimos — usar nome composto (2 nomes)
-                nomeAluno = ' _(' + nomeFormatado.split(' ').slice(0,2).join(' ') + ')_';
-              } else {
-                nomeAluno = ' _(' + nomeFormatado.split(' ')[0] + ')_';
-              }
-            } else {
-              // Fallback: cruzar valor + mês
-              const key = Math.round(valNum) + '-' + mes;
-              const candidatos = valorMesParaAlunos[key] || [];
-              if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ')_';
-              else if (candidatos.length > 1) nomeAluno = ' _(' + candidatos.slice(0,3).join('/') + '?)_';
+              const homonimos = dados.alunos.filter(a => a.nome.toLowerCase().split(' ')[0] === primeiroNome);
+              nomeAluno = homonimos.length > 1
+                ? ' _(' + nomeFormatado.split(' ').slice(0,2).join(' ') + ')_'
+                : ' _(' + nomeFormatado.split(' ')[0] + ')_';
             }
+          } else if (t.tipoTransacao === 'BOLETO_COBRANCA') {
+            // Boleto: cruzar com tabela boletos pelo valor e mês
+            const boleto = boletosEmitidos.find(b => Math.round(parseFloat(b.valor)) === Math.round(valNum) && b.mes === mes);
+            if (boleto) {
+              const alunoB = dados.alunos.find(a => a.id === boleto.aluno_id);
+              if (alunoB) nomeAluno = ' _(' + alunoB.nome.split(' ')[0] + ')_';
+            }
+          }
+          // Fallback para qualquer tipo sem nome: valor+mês
+          if (!nomeAluno) {
+            const key = Math.round(valNum) + '-' + mes;
+            const candidatos = valorMesParaAlunos[key] || [];
+            if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ')_';
+            else if (candidatos.length > 1) nomeAluno = ' _(' + candidatos.slice(0,3).join('/') + '?)_';
           }
         }
         return `${sinal} ${data} ${val}${nomeAluno} — ${desc}`;
