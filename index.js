@@ -765,6 +765,7 @@ async function executar(intencao, p, dados, chatId) {
     const patchData = { pagamentos: pags, historico_alteracoes: hist };
     if (tinhaPend) patchData.pagamentos_pendentes = pend;
     await sbPatch('alunos', `id=eq.${aluno.id}`, patchData);
+    await logOp('pagamento_confirmado', aluno.nome + ' — ' + mes, aluno.id, p.valor, mes);
     // Cancelar boleto em aberto no Inter (se houver)
     const nCancelados = await cancelarBoletoPorMes(aluno.id, mes);
     const msgCancelamento = nCancelados > 0 ? '\n_Boleto Inter cancelado automaticamente._' : '';
