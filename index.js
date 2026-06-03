@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.3 — reenviar boletos: busca na API Inter quando não há na tabela local
+// Versão 4.4 — reenviar boletos: busca sem filtro de status, mostra diagnóstico
 
 const https = require('https');
 
@@ -1223,11 +1223,13 @@ async function executar(intencao, p, dados, chatId) {
     if (!aluno) return `❌ Informe o nome do aluno.\nEx: _"reenviar boletos Thalita"_`;
     try {
       // Buscar na tabela boletos local
-      const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&status=eq.aberto&select=id,mes,valor,codigo_solicitacao,vencimento&order=mes.asc`);
-      let boletos = r?.data || [];
+      const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&select=id,mes,valor,codigo_solicitacao,vencimento,status&order=mes.asc`);
+      let boletos = (r?.data || []).filter(b => b.status === 'aberto' || b.status === 'aberto ');
 
-      // Se não há na tabela local, buscar diretamente na API Inter pelo seuNumero
       if (!boletos.length) {
+        const total = r?.data?.length || 0;
+        if (total > 0) return `ℹ️ *${aluno.nome.split(' ')[0]}* tem ${total} boleto(s) na tabela mas nenhum com status "aberto".\nStatus encontrados: ${[...new Set((r?.data||[]).map(b=>b.status))].join(', ')}`;
+        // Sem nenhum registro — buscar na API Inter
         await tgSend(chatId, `🔍 Buscando boletos na API Inter para *${aluno.nome.split(' ')[0]}*...`);
         const hoje = new Date();
         const dataFim = new Date(hoje.getFullYear(), hoje.getMonth() + 6, 30).toISOString().slice(0,10);
@@ -1475,7 +1477,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.3*\n\n' +
+      '👋 *LCA Studio Bot v4.4*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
