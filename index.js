@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.5 — sbGet: retorna {data} correto, resolve reenviar boletos e outras queries
+// Versão 4.7 — sbGet volta a retornar array direto, .data corrigido nos lugares certos
 
 const https = require('https');
 
@@ -185,7 +185,7 @@ async function gravarBoleto(alunoId, mes, codigoSolicitacao, seuNumero, valor, v
 async function cancelarBoletoPorMes(alunoId, mes) {
   try {
     const r = await sbGet('boletos', `aluno_id=eq.${alunoId}&mes=eq.${mes}&status=eq.aberto&select=id,codigo_solicitacao`);
-    const boletos = r?.data || [];
+    const boletos = Array.isArray(r) ? r : (r?.data || []);
     for (const b of boletos) {
       if (b.codigo_solicitacao) {
         await interCancelarBoleto(b.codigo_solicitacao);
@@ -299,7 +299,7 @@ function sbHeaders() {
   return { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY,
     'Content-Type': 'application/json', Prefer: 'return=representation' };
 }
-const sbGet   = async (t, q) => { const r = await req(SUPABASE_URL+'/rest/v1/'+t+'?'+(q||''), 'GET', sbHeaders(), null); return Array.isArray(r) ? { data: r, error: null } : r; };
+const sbGet   = (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+(q||''), 'GET', sbHeaders(), null);
 const sbPost  = (t, b) => req(SUPABASE_URL+'/rest/v1/'+t, 'POST', sbHeaders(), b);
 const sbPatch = (t, q, b) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'PATCH', sbHeaders(), b);
 const sbDelete= (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'DELETE', sbHeaders(), null);
@@ -560,12 +560,13 @@ async function processarComIA(texto, dados, mes) {
 
   // Comandos Inter — detecção direta por palavra-chave (sem IA)
   const temInter = tL.includes('inter') || tL.includes('banco') || tL.includes('conta');
+  if (tL.includes('extrato') || tL.includes('movimentação') || tL.includes('transaç')) {
+    return { tipo: 'acao', intencao: 'inter_extrato', params: {} };
+  }
   if (temInter && (tL.includes('saldo') || tL.includes('quanto tem'))) {
     return { tipo: 'acao', intencao: 'inter_saldo', params: {} };
   }
-  if (temInter && (tL.includes('extrato') || tL.includes('transaç') || tL.includes('moviment'))) {
-    return { tipo: 'acao', intencao: 'inter_extrato', params: {} };
-  }
+
   // Reenviar PDFs de boletos já emitidos
   if ((tL.includes('reenviar') || tL.includes('enviar') || tL.includes('mandar')) &&
       tL.includes('boleto')) {
@@ -902,7 +903,7 @@ async function executar(intencao, p, dados, chatId) {
       let boletosEmitidos = [];
       try {
         const rb = await sbGet('boletos', 'select=aluno_id,valor,vencimento,mes&status=in.(aberto,pago,cancelado,cancelado_manual)');
-        boletosEmitidos = rb?.data || [];
+        boletosEmitidos = Array.isArray(rb) ? rb : (rb?.data || []);
       } catch(e) {}
 
       // Índice de alunos por valor+mês para cruzamento mais preciso
@@ -1224,8 +1225,9 @@ async function executar(intencao, p, dados, chatId) {
     try {
       // Buscar na tabela boletos local
       const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&select=id,mes,valor,codigo_solicitacao,vencimento,status&order=mes.asc`);
-      console.log('[REENVIAR] aluno_id:', aluno.id, 'r.data:', JSON.stringify(r?.data).slice(0,200), 'error:', r?.error);
-      let boletos = (r?.data || []).filter(b => b.status === 'aberto' || b.status === 'aberto ');
+      const rArr = Array.isArray(r) ? r : (r?.data || []);
+      console.log('[REENVIAR] aluno_id:', aluno.id, 'registros:', rArr.length);
+      let boletos = rArr.filter(b => b.status === 'aberto');
 
       if (!boletos.length) {
         const total = r?.data?.length || 0;
@@ -1291,7 +1293,7 @@ async function executar(intencao, p, dados, chatId) {
     const mes = p?.mes || new Date().toISOString().slice(0,7);
     try {
       const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&mes=eq.${mes}&status=eq.aberto&select=id,codigo_solicitacao,valor,vencimento`);
-      const boletos = r?.data || [];
+      const boletos = Array.isArray(r) ? r : (r?.data || []);
       if (!boletos.length) return `ℹ️ Nenhum boleto em aberto para *${aluno.nome.split(' ')[0]}* em ${mes}.`;
       let cancelados = 0;
       for (const b of boletos) {
@@ -1474,11 +1476,12 @@ async function processar(msg) {
   catch(e) { console.error('processarComIA erro:', e.message); aiResult = { tipo: 'consulta', resposta: null }; }
 
   console.log('IA result:', aiResult.tipo, aiResult.intencao||'', '|', texto.slice(0,40));
+  console.log('IA params:', JSON.stringify(aiResult.params));
 
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.5*\n\n' +
+      '👋 *LCA Studio Bot v4.7*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
