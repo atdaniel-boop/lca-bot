@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.23 — getDados inclui cpf, email e endereço para emissão de boletos
+// Versão 3.25 — scopes Inter restaurados (boleto-cobranca.read/write)
 
 const https = require('https');
 
@@ -560,6 +560,22 @@ async function processarComIA(texto, dados, mes) {
   if (temInter && (tL.includes('extrato') || tL.includes('transaç') || tL.includes('moviment'))) {
     return { tipo: 'acao', intencao: 'inter_extrato', params: {} };
   }
+  // Emitir plano completo — detecção direta (antes do inter_emitir_boleto)
+  if ((tL.includes('emitir') || tL.includes('gerar')) && tL.includes('plano') &&
+      !tL.includes('mensal')) {
+    // Extrair nome do aluno do texto
+    const palavrasIgnorar = ['emitir','gerar','boleto','boletos','plano','planos','do','da','de','para','inter'];
+    const palavras = tL.split(/\s+/).filter(p => p.length > 2 && !palavrasIgnorar.includes(p));
+    let alunoEncontrado = null;
+    for (const palavra of palavras) {
+      const al = dados.alunos.find(a => a.nome.toLowerCase().includes(palavra));
+      if (al) { alunoEncontrado = al; break; }
+    }
+    const paramsPlano = alunoEncontrado
+      ? { aluno_id: alunoEncontrado.id, aluno_nome: alunoEncontrado.nome }
+      : {};
+    return { tipo: 'acao', intencao: 'inter_emitir_plano', params: paramsPlano };
+  }
   if (temInter && (tL.includes('boleto') || tL.includes('cobrança') || tL.includes('cobranca')) && !tL.includes('emitir') && !tL.includes('gerar') && !tL.includes('criar')) {
     return { tipo: 'acao', intencao: 'inter_boletos', params: {} };
   }
@@ -841,7 +857,7 @@ async function executar(intencao, p, dados) {
           (s.bloqueadoJudicial ? `⚖️ Bloqueado Judicial: ${brl(s.bloqueadoJudicial)}\n` : '') +
           `\n_Consultado em ${horaStr}_`;
       }
-      return '⚠️ Resposta inesperada do Inter: ' + JSON.stringify(s);
+      return `⚠️ Resposta inesperada do Inter: ${JSON.stringify(s)}\n\n_Se o erro for "requested scope is not registered", acesse o Portal Inter → sua aplicação → habilite o escopo "Banking" (extrato e saldo)._`;
     } catch(e) { return '❌ Erro Inter: ' + e.message; }
   }
 
