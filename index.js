@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.27 — extrato: nome do pagador extraído do campo descricao do Pix
+// Versão 3.28 — extrato: regex corrigida para nome Pix, nome composto para homônimos, log boleto
 
 const https = require('https');
 
@@ -869,6 +869,9 @@ async function executar(intencao, p, dados) {
       const dataInicio = p?.data_inicio || new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
       const ext = await interExtrato(dataInicio, dataFim);
       const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
+      // Log de um boleto para ver campos
+      const primeiroBoleto = transacoes.find(t => t.tipoTransacao === 'BOLETO_COBRANCA' && t.tipoOperacao === 'C');
+      if (primeiroBoleto) console.log('[BOLETO CAMPOS]', JSON.stringify(primeiroBoleto));
       if (!transacoes.length) return `📄 *Extrato Inter* (${dataInicio} a ${dataFim})\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ${JSON.stringify(ext).slice(0,200)}`;
       // Log completo de uma transação Pix para ver todos os campos disponíveis
 
@@ -907,29 +910,45 @@ async function executar(intencao, p, dados) {
           if (nomePag) {
             nomeAluno = ' _(' + nomePag.split(' ')[0] + ')_';
           } else if (t.descricao) {
-            // 2. Extrair nome do campo descricao: "PIX RECEBIDO - Cp:XXX-NOME DO PAGADOR"
-            const mDesc = t.descricao.match(/(?:PIX RECEBIDO|RECEBIMENTO)\s*-\s*(?:Cp:[^\s-]+-)?(.+)/i);
-            if (mDesc && mDesc[1]) {
-              const nomeBruto = mDesc[1].trim();
-              // Converter NOME COMPLETO EM MAIÚSCULO para Nome Próprio
+            // Extrair nome do campo descricao
+            // Formatos conhecidos:
+            // "PIX RECEBIDO - Cp:00000000-NOME COMPLETO"
+            // "RECEBIMENTO TITULO - 112/90494897500" (boleto — sem nome útil)
+            let nomeBruto = '';
+            // Pix: pegar tudo após "Cp:XXXXXXXX-"
+            const mPix = t.descricao.match(/Cp:\d+-(.+)/i);
+            if (mPix && mPix[1] && mPix[1].trim().length > 2) {
+              nomeBruto = mPix[1].trim();
+            }
+            if (nomeBruto) {
+              // Converter MAIÚSCULO para Nome Próprio
+              const preposicoes = ['de','da','do','das','dos','e'];
               const nomeFormatado = nomeBruto.split(' ')
                 .filter(p => p.length > 0)
-                .map(p => p.length <= 2 ? p.toLowerCase() : p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
+                .map(p => preposicoes.includes(p.toLowerCase())
+                  ? p.toLowerCase()
+                  : p.charAt(0).toUpperCase() + p.slice(1).toLowerCase())
                 .join(' ');
-              nomeAluno = ' _(' + nomeFormatado.split(' ').slice(0,2).join(' ') + ')_';
+              // Nome completo para verificar se há homônimos
+              const nomeCompleto = nomeFormatado;
+              const primeiroNome = nomeFormatado.split(' ')[0].toLowerCase();
+              // Verificar homônimos nos alunos cadastrados
+              const homonimos = dados.alunos.filter(a =>
+                a.nome.toLowerCase().split(' ')[0] === primeiroNome
+              );
+              if (homonimos.length > 1) {
+                // Há homônimos — usar nome composto (2 nomes)
+                nomeAluno = ' _(' + nomeFormatado.split(' ').slice(0,2).join(' ') + ')_';
+              } else {
+                nomeAluno = ' _(' + nomeFormatado.split(' ')[0] + ')_';
+              }
             } else {
-              // 3. Fallback: cruzar valor + mês
+              // Fallback: cruzar valor + mês
               const key = Math.round(valNum) + '-' + mes;
               const candidatos = valorMesParaAlunos[key] || [];
               if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ')_';
               else if (candidatos.length > 1) nomeAluno = ' _(' + candidatos.slice(0,3).join('/') + '?)_';
             }
-          } else {
-            // 3. Fallback: cruzar valor + mês
-            const key = Math.round(valNum) + '-' + mes;
-            const candidatos = valorMesParaAlunos[key] || [];
-            if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ')_';
-            else if (candidatos.length > 1) nomeAluno = ' _(' + candidatos.slice(0,3).join('/') + '?)_';
           }
         }
         return `${sinal} ${data} ${val}${nomeAluno} — ${desc}`;
