@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.30 — extrato: regex Pix corrigida (Cp :), boleto cruzado com tabela boletos
+// Versão 3.32 — inter_boletos_vencidos: boletos em aberto/vencidos nos últimos 15 dias
 
 const https = require('https');
 
@@ -577,6 +577,10 @@ async function processarComIA(texto, dados, mes) {
     return { tipo: 'acao', intencao: 'inter_emitir_plano', params: paramsPlano };
   }
   if (temInter && (tL.includes('boleto') || tL.includes('cobrança') || tL.includes('cobranca')) && !tL.includes('emitir') && !tL.includes('gerar') && !tL.includes('criar')) {
+    // Vencidos/inadimplentes
+    if (tL.includes('vencido') || tL.includes('inadim') || tL.includes('atrasado') || tL.includes('em aberto') || tL.includes('nao pago') || tL.includes('não pago') || tL.includes('pendente')) {
+      return { tipo: 'acao', intencao: 'inter_boletos_vencidos', params: {} };
+    }
     return { tipo: 'acao', intencao: 'inter_boletos', params: {} };
   }
   // Despedidas e respostas curtas não-acionáveis
@@ -616,7 +620,7 @@ Retorne JSON (sem markdown):
 {
   "tipo": "consulta" ou "acao",
   "resposta": "resposta em Markdown se consulta, null se acao",
-  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto,
+  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto,
   "params": {
     "aluno_nome": string ou null,
     "valor": numero (se pagamento sem valor informado, use o ultimo pagamento do aluno acima) ou null,
@@ -943,7 +947,7 @@ async function executar(intencao, p, dados) {
             const key = Math.round(valNum) + '-' + mes;
             const candidatos = valorMesParaAlunos[key] || [];
             if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ')_';
-            else if (candidatos.length > 1) nomeAluno = ' _(' + candidatos.slice(0,3).join('/') + '?)_';
+            else if (candidatos.length > 1) nomeAluno = ' _(~' + candidatos.slice(0,2).join(' ou ') + ')_';
           }
         }
         return `${sinal} ${data} ${val}${nomeAluno} — ${desc}`;
@@ -951,6 +955,43 @@ async function executar(intencao, p, dados) {
       return `📄 *Extrato Inter* (${dataInicio.split('-').reverse().join('/')} a ${dataFim.split('-').reverse().join('/')})\n\n${linhas}` +
         (transacoes.length > 15 ? `\n\n_...e mais ${transacoes.length - 15} transações._` : '');
     } catch(e) { return '❌ Erro extrato Inter: ' + e.message; }
+  }
+
+  if (intencao === 'inter_boletos_vencidos') {
+    try {
+      const hoje = new Date();
+      const dataFim = hoje.toISOString().slice(0,10);
+      const dataInicio = new Date(hoje.getTime() - 15*24*60*60*1000).toISOString().slice(0,10);
+      // Buscar boletos vencidos (EXPIRADO) e em aberto (A_VENCER que já passaram)
+      const [rExp, rAberto] = await Promise.all([
+        interCobranças('EXPIRADO', dataInicio, dataFim),
+        interCobranças('A_VENCER', dataInicio, dataFim)
+      ]);
+      const expirados = rExp?.content || rExp?.cobrancas || [];
+      const emAberto  = (rAberto?.content || rAberto?.cobrancas || [])
+        .filter(b => b.dataVencimento && b.dataVencimento < dataFim);
+      const lista = [...expirados, ...emAberto];
+      if (!lista.length) return `✅ *Boletos vencidos/em aberto (últimos 15 dias)*\n\n_Nenhum boleto vencido ou em aberto no período._`;
+
+      // Cruzar com alunos pelo nome do pagador ou valor
+      const linhas = lista.map(b => {
+        const venc = (b.dataVencimento||'').split('-').reverse().join('/');
+        const val = brl(b.valorNominal || 0);
+        const nomePagador = b.pagador?.nome || b.nomePagador || '';
+        // Tentar identificar o aluno
+        let nomeAluno = nomePagador.split(' ').slice(0,2).join(' ');
+        if (!nomeAluno) {
+          const al = dados.alunos.find(a =>
+            a.pagamentos_pendentes && Object.values(typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes):a.pagamentos_pendentes).some(v => Math.round(v) === Math.round(b.valorNominal||0))
+          );
+          if (al) nomeAluno = al.nome.split(' ').slice(0,2).join(' ');
+        }
+        const diasAtraso = Math.round((new Date() - new Date(b.dataVencimento)) / 86400000);
+        return `🔴 ${venc} ${val} — *${nomeAluno||'?'}*${diasAtraso > 0 ? ` _(${diasAtraso}d atraso)_` : ''}`;
+      }).join('\n');
+
+      return `🔴 *Boletos vencidos/em aberto (últimos 15 dias)*\n\n${linhas}\n\n_Total: ${lista.length} boleto(s) — R$ ${brl(lista.reduce((s,b)=>s+(b.valorNominal||0),0))}_`;
+    } catch(e) { return '❌ Erro boletos Inter: ' + e.message; }
   }
 
   if (intencao === 'inter_boletos') {
