@@ -1263,7 +1263,9 @@ async function executar(intencao, p, dados, chatId) {
           if (!link && b.codigo_solicitacao) {
             const token = await interGetToken('boleto-cobranca.read');
             const det = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}`, 'GET', null, token);
-            link = det?.data?.linkVisualizacaoBoleto || det?.data?.link || '';
+            console.log('[BOLETO DET]', JSON.stringify(det?.data || det).slice(0,400));
+            link = det?.data?.linkVisualizacaoBoleto || det?.data?.link || 
+                   det?.linkVisualizacaoBoleto || det?.link || '';
           }
           const mesNome = MESES_PT2[parseInt((b.mes||'').slice(5,7))-1] || b.mes;
           const vencFmt = (b.vencimento||'').split('-').reverse().join('/');
