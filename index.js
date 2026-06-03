@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.12 — endpoint /comando para site acionar o bot
+// Versão 4.13 — cheque: receber, confirmar compensação pelo site e bot, detectar devolvido no extrato
 
 const https = require('https');
 
@@ -591,6 +591,11 @@ async function processarComIA(texto, dados, mes) {
     return { tipo: 'acao', intencao: 'inter_saldo', params: {} };
   }
 
+  // Confirmar compensação de cheque
+  if (tL.includes('cheque') && (tL.includes('compensou') || tL.includes('compensado') || tL.includes('confirmar') || tL.includes('ok'))) {
+    return { tipo: 'acao', intencao: 'confirmar_cheque', params: {} };
+  }
+
   // Reenviar PDFs de boletos já emitidos
   if ((tL.includes('reenviar') || tL.includes('enviar') || tL.includes('mandar')) &&
       tL.includes('boleto')) {
@@ -663,7 +668,7 @@ Retorne JSON (sem markdown):
 {
   "tipo": "consulta" ou "acao",
   "resposta": "resposta em Markdown se consulta, null se acao",
-  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos,
+  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos/confirmar_cheque,
   "params": {
     "aluno_nome": string ou null,
     "valor": numero (se pagamento sem valor informado, use o ultimo pagamento do aluno acima) ou null,
@@ -993,7 +998,12 @@ async function executar(intencao, p, dados, chatId) {
             else if (candidatos.length > 1) nomeAluno = ' _(~' + candidatos.slice(0,2).join(' ou ') + ')_';
           }
         }
-        return `${sinal} ${data} ${val}${nomeAluno} — ${desc}`;
+        // Detectar cheque devolvido
+        const descUp = (t.descricao||t.titulo||'').toUpperCase();
+        const chequeDevolvido = t.tipoOperacao === 'D' && 
+          (descUp.includes('CHEQUE') || descUp.includes('CHQ') || descUp.includes('DEVOLUCAO') || descUp.includes('DEVOLVIDO'));
+        const alertCheque = chequeDevolvido ? ' 🚨 *CHEQUE DEVOLVIDO*' : '';
+        return `${sinal} ${data} ${val}${nomeAluno} — ${desc}${alertCheque}`;
       }).join('\n');
       return `📄 *Extrato Inter* (${dataInicio.split('-').reverse().join('/')} a ${dataFim.split('-').reverse().join('/')})\n\n${linhas}` +
         (transacoes.length > 15 ? `\n\n_...e mais ${transacoes.length - 15} transações._` : '');
@@ -1272,6 +1282,30 @@ LCA Studio de Pilates`;
     return resumo;
   }
 
+
+  if (intencao === 'confirmar_cheque') {
+    const aluno = dados.alunos.find(a =>
+      (p?.aluno_id && a.id===p.aluno_id) ||
+      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
+    );
+    if (!aluno) return `❌ Informe o nome do aluno.
+Ex: _"cheque compensou Ana"_`;
+    const mes = p?.mes || new Date().toISOString().slice(0,7);
+    const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
+    // Verificar se há cheque pendente
+    const hist = aluno.historico_alteracoes || [];
+    const eCheque = hist.some(h => h.tipo==='cheque_recebido' && h.desc && h.desc.includes(mes));
+    if (!pend[mes] || !eCheque) return `ℹ️ Nenhum cheque aguardando para *${aluno.nome.split(' ')[0]}* em ${mes}.`;
+    const val = pend[mes];
+    // Confirmar pagamento
+    const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
+    pags[mes] = val;
+    delete pend[mes];
+    const histNovo = [...hist, { data: new Date().toLocaleDateString('pt-BR'), tipo: 'cheque_compensado', desc: 'Cheque compensado — ' + mes + ' — ' + brl(val) }];
+    await sbPatch('alunos', `id=eq.${aluno.id}`, { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: histNovo });
+    await logOp('cheque_compensado', aluno.nome + ' — ' + mes, aluno.id, val, mes);
+    return `✅ *Cheque compensado!*\n\n👤 ${aluno.nome.split(' ')[0]}\n💰 ${brl(val)}\n📅 ${mes}\n\n_Pagamento confirmado no sistema._`;
+  }
 
   if (intencao === 'inter_reenviar_boletos') {
     const aluno = dados.alunos.find(a =>
