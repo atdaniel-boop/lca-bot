@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.4 — reenviar boletos: busca sem filtro de status, mostra diagnóstico
+// Versão 4.5 — sbGet: retorna {data} correto, resolve reenviar boletos e outras queries
 
 const https = require('https');
 
@@ -299,7 +299,7 @@ function sbHeaders() {
   return { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY,
     'Content-Type': 'application/json', Prefer: 'return=representation' };
 }
-const sbGet   = (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+(q||''), 'GET', sbHeaders(), null);
+const sbGet   = async (t, q) => { const r = await req(SUPABASE_URL+'/rest/v1/'+t+'?'+(q||''), 'GET', sbHeaders(), null); return Array.isArray(r) ? { data: r, error: null } : r; };
 const sbPost  = (t, b) => req(SUPABASE_URL+'/rest/v1/'+t, 'POST', sbHeaders(), b);
 const sbPatch = (t, q, b) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'PATCH', sbHeaders(), b);
 const sbDelete= (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'DELETE', sbHeaders(), null);
@@ -1224,6 +1224,7 @@ async function executar(intencao, p, dados, chatId) {
     try {
       // Buscar na tabela boletos local
       const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&select=id,mes,valor,codigo_solicitacao,vencimento,status&order=mes.asc`);
+      console.log('[REENVIAR] aluno_id:', aluno.id, 'r.data:', JSON.stringify(r?.data).slice(0,200), 'error:', r?.error);
       let boletos = (r?.data || []).filter(b => b.status === 'aberto' || b.status === 'aberto ');
 
       if (!boletos.length) {
@@ -1477,7 +1478,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.4*\n\n' +
+      '👋 *LCA Studio Bot v4.5*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
@@ -1622,7 +1623,7 @@ async function processar(msg) {
 
 // ── Loop principal ────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v3.6 iniciado ✓');
+  console.log('LCA Bot v4.5 iniciado ✓');
   let offset = 0;
   try {
     const init = await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=-1&limit=1&timeout=0`, 'GET', {}, null);
@@ -1730,7 +1731,7 @@ async function main() {
 
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v3.8 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.5 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
