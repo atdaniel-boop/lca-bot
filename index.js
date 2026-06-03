@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.11 — mensagem WhatsApp separada da orientação
+// Versão 4.12 — endpoint /comando para site acionar o bot
 
 const https = require('https');
 
@@ -1817,9 +1817,46 @@ async function main() {
         res.end(JSON.stringify({ erro: e.message }));
       }
 
+    // ── Endpoint /comando — recebe ações do site ───────────────────
+    } else if (req.url === '/comando' && req.method === 'POST') {
+      // Verificar CORS para o site no Netlify
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        try {
+          const payload = JSON.parse(body);
+          const chatId = payload.chatId || TELEGRAM_CHAT_ID;
+          const comando = payload.comando || '';
+          const alunoId = payload.aluno_id;
+          console.log('[COMANDO SITE]', comando, 'aluno_id:', alunoId);
+          if (!comando) {
+            res.writeHead(400, {'Content-Type':'application/json'});
+            res.end(JSON.stringify({ ok: false, erro: 'comando não informado' }));
+            return;
+          }
+          // Processar como mensagem do Telegram
+          const msgFake = { text: comando, chat: { id: chatId }, from: { username: 'site' } };
+          processar(msgFake).catch(e => console.error('[COMANDO SITE] erro:', e.message));
+          res.writeHead(200, {'Content-Type':'application/json'});
+          res.end(JSON.stringify({ ok: true, mensagem: 'Comando recebido — verifique o Telegram' }));
+        } catch(e) {
+          res.writeHead(400, {'Content-Type':'application/json'});
+          res.end(JSON.stringify({ ok: false, erro: e.message }));
+        }
+      });
+
+    // ── CORS preflight ─────────────────────────────────────────────
+    } else if (req.method === 'OPTIONS') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+      res.writeHead(204);
+      res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.10 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.11 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
