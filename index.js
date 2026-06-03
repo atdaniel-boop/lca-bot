@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 3.28 — extrato: regex corrigida para nome Pix, nome composto para homônimos, log boleto
+// Versão 3.29 — diagnóstico extrato enriquecido e Pix sem Cp
 
 const https = require('https');
 
@@ -99,12 +99,14 @@ async function interExtrato(dataInicio, dataFim) {
     '/banking/v2/extrato/enriquecido?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
     'GET', null, token
   );
+  console.log('[EXTRATO] enriquecido status:', r.status);
   if (r.status >= 200 && r.status < 300) return r.data;
   // Fallback: extrato simples
   const r2 = await interReq(
     '/banking/v2/extrato?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
     'GET', null, token
   );
+  console.log('[EXTRATO] simples status:', r2.status);
   return r2.data;
 }
 
@@ -869,6 +871,10 @@ async function executar(intencao, p, dados) {
       const dataInicio = p?.data_inicio || new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
       const ext = await interExtrato(dataInicio, dataFim);
       const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
+      // Log diagnóstico: Pix sem padrão Cp:
+      transacoes.filter(t => t.tipoTransacao==='PIX' && t.tipoOperacao==='C' && !(t.descricao||'').includes('Cp:')).slice(0,3).forEach(t => {
+        console.log('[PIX SEM CP] desc:', t.descricao, '| titulo:', t.titulo);
+      });
       // Log de um boleto para ver campos
       const primeiroBoleto = transacoes.find(t => t.tipoTransacao === 'BOLETO_COBRANCA' && t.tipoOperacao === 'C');
       if (primeiroBoleto) console.log('[BOLETO CAMPOS]', JSON.stringify(primeiroBoleto));
