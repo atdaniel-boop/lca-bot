@@ -395,7 +395,7 @@ async function aiJSON(prompt) {
 // ── Dados ─────────────────────────────────────────────────────────
 async function getDados() {
   const [ra, rc, rk] = await Promise.all([
-    sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco'),
+    sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo'),
     sbGet('custos', 'select=*&order=id.desc'),
     sbGet('aulas',  'select=*&order=id.desc')
   ]);
@@ -603,7 +603,9 @@ async function processarComIA(texto, dados, mes) {
 
   // Detectar perguntas sobre aniversariantes diretamente
   if (/aniversar/i.test(texto)) {
-    const hoje4 = new Date();
+    // Data em horário de Brasília (UTC-3)
+    const agora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+    const hoje4 = agora;
     const dh4 = String(hoje4.getDate()).padStart(2,'0');
     const mh4 = String(hoje4.getMonth()+1).padStart(2,'0');
     const anivHoje = dados.alunos.filter(a => (a.aniversario||'').indexOf(dh4+'/'+mh4) === 0);
@@ -1830,7 +1832,7 @@ async function processar(msg) {
 async function enviarAniversariantesHoje() {
   try {
     const dados = await getDados();
-    const hoje = new Date();
+    const hoje = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
     const dh = String(hoje.getDate()).padStart(2,'0');
     const mh = String(hoje.getMonth()+1).padStart(2,'0');
 
@@ -1895,9 +1897,8 @@ function agendarRotinaAniversarios() {
   // Verificar a cada hora se chegou às 8h (horário de Brasília = UTC-3)
   async function checar() {
     const agora = new Date();
-    // Horário de Brasília
-    const horaBrasilia = (agora.getUTCHours() - 3 + 24) % 24;
-    const min = agora.getUTCMinutes();
+    const horaBrasilia = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })).getHours();
+    const min = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })).getMinutes();
     if (horaBrasilia === 8 && min < 5) {
       await enviarAniversariantesHoje();
     }
