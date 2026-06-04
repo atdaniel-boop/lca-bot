@@ -1727,13 +1727,6 @@ async function processar(msg) {
     const al = dados.alunos.find(function(a){ return a.nome.toLowerCase().includes((params.aluno_nome||'').toLowerCase()); });
     if (al) params.aluno_id = al.id;
   }
-  // IA tem precedência sobre extração regex: se params.mes existir, usar como mes canônico
-  if (params.mes && /^\d{4}-\d{2}$/.test(params.mes)) {
-    // já está em params.mes, executar() vai usar p?.mes || mes — ok
-  } else if (!params.mes) {
-    // garantir que executar receba o mes extraído do texto como fallback
-    params.mes = mes;
-  }
 
   // Rescisão: mostrar cálculo e aguardar confirmação
   if (intencao === 'calcular_rescisao') {
