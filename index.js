@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.14 — correções: versão unificada, extração de mês via IA, confirmar_cheque persiste pagamento, checkin valida feriado, getDados busca planos, logOp em lancar_custo, ctx limpo no timeout, credenciais sem fallback hardcoded
+// Versão 4.15 — correções: versão unificada, extração de mês via IA, confirmar_cheque persiste pagamento, checkin valida feriado, getDados busca planos, logOp em lancar_custo, ctx limpo no timeout, credenciais sem fallback hardcoded
 
 const https = require('https');
 
@@ -1763,6 +1763,90 @@ async function processar(msg) {
 }
 
 // ── Loop principal ────────────────────────────────────────────────
+// ── Rotina diária de aniversariantes ─────────────────────────────────────────
+async function enviarAniversariantesHoje() {
+  try {
+    const dados = await getDados();
+    const hoje = new Date();
+    const dh = String(hoje.getDate()).padStart(2,'0');
+    const mh = String(hoje.getMonth()+1).padStart(2,'0');
+
+    const aniv = dados.alunos.filter(a => {
+      const aniversario = a.aniversario || '';
+      return aniversario.indexOf(dh + '/' + mh) === 0;
+    });
+
+    if (!aniv.length) return; // nenhum aniversariante hoje
+
+    const linhas = aniv.map(a => {
+      const nome1 = a.nome.split(' ')[0];
+      const fem = (a.sexo || 'F') === 'F';
+      const ativo = a.ativo === 'SIM';
+      const ola = fem ? 'a' : 'o';
+      const bem = fem ? 'bem-vinda' : 'bem-vindo';
+      const tel = a.telefone ? a.telefone.replace(/[^0-9]/g,'') : '';
+      const telInfo = tel ? `📱 55${tel}` : '📵 sem telefone';
+      const status = ativo ? '🟢 Ativa(o)' : '🔴 Inativa(o)';
+
+      let msg;
+      if (ativo) {
+        msg = `🎂 Feliz aniversário, ${nome1}!
+
+Que este novo ano de vida seja repleto de saúde, alegria e muita energia! É uma alegria enorme tê-l${ola} aqui no LCA, cuidando do seu corpo e da sua qualidade de vida com tanto carinho e dedicação.
+
+Que os próximos anos sejam cada vez mais leves — no movimento e no coração. 💛
+
+Com carinho, Equipe LCA Studio de Pilates`;
+      } else {
+        msg = `🎂 Feliz aniversário, ${nome1}!
+
+Que este novo ano de vida seja cheio de saúde e momentos especiais. Você faz parte da história do LCA e a gente não esquece disso.
+
+E se um dia quiser voltar, será sempre ${bem}(a). 🌿
+
+Com carinho, Equipe LCA Studio de Pilates`;
+      }
+
+      return `👤 *${a.nome}* — ${status}
+${telInfo}
+
+📋 *Mensagem para copiar:*
+\`\`\`
+${msg}
+\`\`\``;
+    });
+
+    const cabecalho = `🎂 *Aniversariantes de hoje (${dh}/${mh}):*
+
+`;
+    // Telegram tem limite de 4096 chars — enviar uma mensagem por aniversariante se necessário
+    for (const linha of linhas) {
+      await tgSend(TELEGRAM_CHAT_ID, cabecalho + linha);
+    }
+  } catch(e) {
+    console.error('Erro rotina aniversariantes:', e.message);
+  }
+}
+
+function agendarRotinaAniversarios() {
+  // Verificar a cada hora se chegou às 8h (horário de Brasília = UTC-3)
+  async function checar() {
+    const agora = new Date();
+    // Horário de Brasília
+    const horaBrasilia = (agora.getUTCHours() - 3 + 24) % 24;
+    const min = agora.getUTCMinutes();
+    if (horaBrasilia === 8 && min < 5) {
+      await enviarAniversariantesHoje();
+    }
+  }
+  // Verificar a cada 5 minutos
+  setInterval(checar, 5 * 60 * 1000);
+  // Verificar também na inicialização (para não perder se o bot reiniciar às 8h)
+  checar();
+  console.log('Rotina de aniversários agendada (08:00 BRT diariamente)');
+}
+
+
 async function main() {
   console.log('LCA Bot v4.14 iniciado ✓');
   let offset = 0;
@@ -1912,6 +1996,7 @@ async function main() {
       res.end('LCA Bot v4.14 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
+  agendarRotinaAniversarios();
 
   while (true) {
     try {
