@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.13 — cheque: receber, confirmar compensação pelo site e bot, detectar devolvido no extrato
+// Versão 4.14 — correções: versão unificada, extração de mês via IA, confirmar_cheque persiste pagamento, checkin valida feriado, getDados busca planos, logOp em lancar_custo, ctx limpo no timeout, credenciais sem fallback hardcoded
 
 const https = require('https');
 
@@ -12,9 +12,9 @@ const ALLOWED_USER   = (process.env.ALLOWED_USER || '').toLowerCase();
 
 // ── Banco Inter ───────────────────────────────────────────────────
 // Certificados via variáveis de ambiente (INTER_CERT e INTER_KEY)
-// Client ID/Secret também via env para segurança
-const INTER_CLIENT_ID     = process.env.INTER_CLIENT_ID     || 'bac02151-c212-4982-ab50-35ae5fceaf96';
-const INTER_CLIENT_SECRET = process.env.INTER_CLIENT_SECRET || '61897158-54b2-4722-8a99-357628f56050';
+// Client ID/Secret APENAS via variáveis de ambiente — nunca hardcoded no código
+const INTER_CLIENT_ID     = process.env.INTER_CLIENT_ID     || '';
+const INTER_CLIENT_SECRET = process.env.INTER_CLIENT_SECRET || '';
 const INTER_BASE          = 'cdpj.partners.bancointer.com.br';
 const INTER_CERT          = process.env.INTER_CERT || ''; // conteúdo do .crt
 const INTER_KEY           = process.env.INTER_KEY  || ''; // conteúdo do .key
@@ -415,6 +415,15 @@ async function getDados() {
       {id:'kelly',  nome:'Kelly',  tipo:'hora',         percentual:0,  valor_hora:35, retirada:0}
     ];
   }
+  // Planos: busca tabela de planos para valores atualizados (fallback silencioso)
+  let planos = null;
+  try {
+    const rpl = await sbGet('changes', 'select=data&id=eq.1');
+    if (Array.isArray(rpl) && rpl[0]?.data) {
+      const chData = typeof rpl[0].data === 'string' ? JSON.parse(rpl[0].data) : rpl[0].data;
+      if (chData && chData.planos && typeof chData.planos === 'object') planos = chData.planos;
+    }
+  } catch(e) {}
   // Buscar agenda/checkins
   let changes = null;
   try {
@@ -428,6 +437,7 @@ async function getDados() {
     custos:  Array.isArray(rc) ? rc : [],
     aulas:   Array.isArray(rk) ? rk : [],
     professoras: professoras,
+    planos:  planos,
     changes: changes
   };
 }
@@ -729,6 +739,7 @@ async function executar(intencao, p, dados, chatId) {
     if (!p?.valor || !p?.categoria) return '❌ Informe o valor e a categoria.';
     const desc = (p.descricao||p.categoria) + ' [via Bot Telegram]';
     await sbPost('custos', { descricao: desc, valor: p.valor, categoria: p.categoria, mes });
+    await logOp('custo_lancado', (p.descricao||p.categoria) + ' — ' + mes, null, p.valor, mes, { categoria: p.categoria });
     const cat = p.descricao||p.categoria;
     return `✅ Custo lançado!\n*${cat}* — ${brl(p.valor)} — ${mes}\n_Para desfazer: "apagar custo ${p.categoria} ${mes}"_`;
   }
@@ -839,6 +850,11 @@ async function executar(intencao, p, dados, chatId) {
     const DIAS_PT = ['Dom','Seg','Ter','Qua','Qui','Sex','Sab'];
     const dow = new Date(dataCi+'T12:00:00').getDay();
     const diaKey = DIAS_PT[dow];
+    // Verificar se o dia é feriado (marcado na agenda via modal de feriado)
+    const agendaFeriados = dados.changes?.feriados || {};
+    if (agendaFeriados[dataCi]) {
+      return `🎌 Check-in bloqueado: *${dataCi.split('-').reverse().join('/')}* é feriado (${agendaFeriados[dataCi]||'feriado'}).\nNão é possível registrar presença em dias de feriado.`;
+    }
     // Buscar horários válidos do aluno neste dia da semana
     const horariosValidos = [];
     for (const [slotKey, slot] of Object.entries(dados.changes?.agenda||{})) {
@@ -1565,6 +1581,8 @@ async function processar(msg) {
   let _timedOut = false;
   const _timer = setTimeout(() => {
     _timedOut = true;
+    // Limpar contexto pendente para evitar que a próxima mensagem seja interpretada como valor
+    if (ctx[chatId]) delete ctx[chatId];
     // Só envia aviso se ainda não respondeu
     if (!_respondeu) tgSend(chatId, '⚠️ Demorou mais que o esperado. Tente novamente em alguns segundos.');
   }, 45000);
@@ -1601,7 +1619,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.7*\n\n' +
+      '👋 *LCA Studio Bot v4.14*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '• _"quem não pagou maio?"_\n' +
@@ -1709,6 +1727,13 @@ async function processar(msg) {
     const al = dados.alunos.find(function(a){ return a.nome.toLowerCase().includes((params.aluno_nome||'').toLowerCase()); });
     if (al) params.aluno_id = al.id;
   }
+  // IA tem precedência sobre extração regex: se params.mes existir, usar como mes canônico
+  if (params.mes && /^\d{4}-\d{2}$/.test(params.mes)) {
+    // já está em params.mes, executar() vai usar p?.mes || mes — ok
+  } else if (!params.mes) {
+    // garantir que executar receba o mes extraído do texto como fallback
+    params.mes = mes;
+  }
 
   // Rescisão: mostrar cálculo e aguardar confirmação
   if (intencao === 'calcular_rescisao') {
@@ -1746,7 +1771,7 @@ async function processar(msg) {
 
 // ── Loop principal ────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v4.5 iniciado ✓');
+  console.log('LCA Bot v4.14 iniciado ✓');
   let offset = 0;
   try {
     const init = await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=-1&limit=1&timeout=0`, 'GET', {}, null);
@@ -1891,7 +1916,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.11 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.14 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
 
