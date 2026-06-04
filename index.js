@@ -1,5 +1,5 @@
 // LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.15 — correções: versão unificada, extração de mês via IA, confirmar_cheque persiste pagamento, checkin valida feriado, getDados busca planos, logOp em lancar_custo, ctx limpo no timeout, credenciais sem fallback hardcoded
+// Versão 4.16 — correções: versão unificada, extração de mês via IA, confirmar_cheque persiste pagamento, checkin valida feriado, getDados busca planos, logOp em lancar_custo, ctx limpo no timeout, credenciais sem fallback hardcoded
 
 const https = require('https');
 
@@ -569,7 +569,26 @@ function buildContexto(dados, mes) {
     planosVencendo: planosVencendo,
     listaAlunos: dados.alunos.map(a => ({ id: a.id, nome: a.nome, ativo: a.ativo,
       plano: a.tipo_plano, vezes: a.vezes_semana, prof: a.professora })),
-    todosOsCustos: dados.custos.slice(0,20).map(c => ({ id: c.id, desc: c.descricao, valor: c.valor, mes: c.mes }))
+    todosOsCustos: dados.custos.slice(0,20).map(c => ({ id: c.id, desc: c.descricao, valor: c.valor, mes: c.mes })),
+    aniversariantes: (() => {
+      const hoje2 = new Date();
+      const dh2 = String(hoje2.getDate()).padStart(2,'0');
+      const mh2 = String(hoje2.getMonth()+1).padStart(2,'0');
+      const proximos = dados.alunos
+        .filter(a => a.aniversario && a.aniversario.trim())
+        .map(a => {
+          const p = a.aniversario.split('/');
+          const dia = parseInt(p[0]), mes2 = parseInt(p[1]);
+          const hojeDia = hoje2.getDate(), hojeMes = hoje2.getMonth()+1;
+          let diasFaltando = (mes2 - hojeMes)*30 + (dia - hojeDia);
+          if (diasFaltando < 0) diasFaltando += 365;
+          return { nome: a.nome, ativo: a.ativo, aniversario: a.aniversario, diasFaltando };
+        })
+        .sort((a,b) => a.diasFaltando - b.diasFaltando)
+        .slice(0, 10);
+      const hoje3 = proximos.filter(a => a.diasFaltando === 0);
+      return { hoje: hoje3, proximos };
+    })()
   };
 }
 
@@ -581,6 +600,50 @@ const INTENCOES_ACAO = ['lancar_custo','lancar_aula','confirmar_pagamento','calc
 // Chamada unificada: classifica E responde em uma só requisição
 async function processarComIA(texto, dados, mes) {
   const ctx = buildContexto(dados, mes);
+
+  // Detectar perguntas sobre aniversariantes diretamente
+  if (/aniversar/i.test(texto)) {
+    const hoje4 = new Date();
+    const dh4 = String(hoje4.getDate()).padStart(2,'0');
+    const mh4 = String(hoje4.getMonth()+1).padStart(2,'0');
+    const anivHoje = dados.alunos.filter(a => (a.aniversario||'').indexOf(dh4+'/'+mh4) === 0);
+    const proximos2 = dados.alunos
+      .filter(a => a.aniversario && a.aniversario.trim())
+      .map(a => {
+        const p = a.aniversario.split('/');
+        const dia = parseInt(p[0]), mes3 = parseInt(p[1]);
+        const hojeDia2 = hoje4.getDate(), hojeMes2 = hoje4.getMonth()+1;
+        let df = (mes3 - hojeMes2)*30 + (dia - hojeDia2);
+        if (df < 0) df += 365;
+        return { nome: a.nome, ativo: a.ativo === 'SIM', aniversario: a.aniversario, df };
+      })
+      .filter(a => a.df > 0)
+      .sort((a,b) => a.df - b.df)
+      .slice(0, 5);
+
+    let resp = '';
+    if (anivHoje.length) {
+      resp += `🎂 *Aniversariantes hoje (${dh4}/${mh4}):*
+`;
+      anivHoje.forEach(a => {
+        resp += `• *${a.nome}* — ${a.ativo === 'SIM' ? '🟢 Ativa(o)' : '🔴 Inativa(o)'} — ${a.telefone||'sem telefone'}
+`;
+      });
+    } else {
+      resp += `Nenhum aniversariante hoje (${dh4}/${mh4}).
+`;
+    }
+    if (proximos2.length) {
+      resp += `
+📅 *Próximos aniversários:*
+`;
+      proximos2.forEach(a => {
+        resp += `• *${a.nome}* — ${a.aniversario} (em ${a.df} dias) ${a.ativo ? '🟢' : '🔴'}
+`;
+      });
+    }
+    return resp;
+  }
 
   // Detectar ações por palavras-chave (sem IA) — economiza cota
   const tL = texto.toLowerCase();
@@ -1848,7 +1911,7 @@ function agendarRotinaAniversarios() {
 
 
 async function main() {
-  console.log('LCA Bot v4.14 iniciado ✓');
+  console.log('LCA Bot v4.16 iniciado ✓');
   let offset = 0;
   try {
     const init = await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=-1&limit=1&timeout=0`, 'GET', {}, null);
@@ -1993,7 +2056,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.14 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.16 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
   agendarRotinaAniversarios();
