@@ -644,7 +644,7 @@ async function processarComIA(texto, dados, mes) {
 `;
       });
     }
-    return resp;
+    return { tipo: 'consulta', resposta: resp };
   }
 
   // Detectar ações por palavras-chave (sem IA) — economiza cota
