@@ -1270,7 +1270,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const fmtData = d => String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear();
 
     const dtInicio = new Date(anoBase, mesBase, diaVenc);
-    const dtFimReal = new Date(anoBase, mesBase + dur - 1, diaVenc - 1); // dia anterior ao vencimento do último boleto
+    const dtFimReal = new Date(anoBase, mesBase + dur, diaVenc - 1); // último dia do plano: dia anterior ao vencimento após dur meses
     const periodoPlano = fmtData(dtInicio) + ' a ' + fmtData(dtFimReal);
     const planoLabel = plano.charAt(0).toUpperCase() + plano.slice(1);
 
