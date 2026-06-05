@@ -632,17 +632,17 @@ async function processarComIA(texto, dados, mes) {
 
     let resp = '';
     if (anivHoje.length) {
-      resp += '\uD83C\uDF82 *Aniversariantes hoje (' + dh4 + '/' + mh4 + '):*\n';
+      resp += '🎂 *Aniversariantes hoje (' + dh4 + '/' + mh4 + '):*\n';
       anivHoje.forEach(a => {
-        resp += '• *' + a.nome + '* \u2014 ' + (a.ativo === 'SIM' ? '\uD83D\uDFE2 Ativa(o)' : '\uD83D\uDD34 Inativa(o)') + ' \u2014 ' + (a.telefone||'sem telefone') + '\n';
+        resp += '• *' + a.nome + '* — ' + (a.ativo === 'SIM' ? '🟢 Ativa(o)' : '🔴 Inativa(o)') + ' — ' + (a.telefone||'sem telefone') + '\n';
       });
     } else {
       resp += 'Nenhum aniversariante hoje (' + dh4 + '/' + mh4 + ').\n';
     }
     if (proximos2.length) {
-      resp += '\n\uD83D\uDCC5 *Próximos aniversários:*\n';
+      resp += '\n📅 *Próximos aniversários:*\n';
       proximos2.forEach(a => {
-        resp += '\u2022 *' + a.nome + '* \u2014 ' + a.aniversario + ' (em ' + a.df + ' dias) ' + (a.ativo ? '\uD83D\uDFE2' : '\uD83D\uDD34') + '\n';
+        resp += '• *' + a.nome + '* — ' + a.aniversario + ' (em ' + a.df + ' dias) ' + (a.ativo ? '🟢' : '🔴') + '\n';
       });
     }
     return { tipo: 'consulta', resposta: resp };
@@ -728,7 +728,9 @@ async function processarComIA(texto, dados, mes) {
     'Planos vencendo: ' + (ctx.planosVencendo.length?ctx.planosVencendo.map(function(p){return p.nome+' ('+p.plano+', dia '+p.diaVenc+'/'+p.mesVenc+', '+p.dias+' dias)';}).join(' | '):'Nenhum') + '\n' +
     'Custos lancados: ' + (ctx.custosMes.map(function(c){return c.desc+' '+brl(c.valor);}).join(', ')||'Nenhum') + '\n' +
     'Faltas frequentes: ' + (ctx.faltasFrequentes.join(', ')||'Nenhuma') + '\n' +
-    'Professoras este mes: Leda ' + brl(ctx.financeiro.paramProf.retLeda) + ' fixo | Monica ' + brl(ctx.financeiro.detalheProfessoras.monica) + ' (' + Math.round(ctx.financeiro.paramProf.pctMonica*100) + '% alunos dela) | Kelly ' + brl(ctx.financeiro.detalheProfessoras.kelly) + ' (' + ctx.aulasKelly.reduce(function(s,k){return s+(k.horas||0);},0) + 'h x ' + brl(ctx.financeiro.paramProf.vhKelly) + ')\n' +
+    'Professoras este mes: Leda ' + brl(ctx.financeiro.paramProf.retLeda) + ' fixo |\n' +
+    'Monica ' + brl(ctx.financeiro.detalheProfessoras.monica) + ' (' + Math.round(ctx.financeiro.paramProf.pctMonica*100) + '% alunos dela) |\n' +
+    'Kelly ' + brl(ctx.financeiro.detalheProfessoras.kelly) + ' (' + ctx.aulasKelly.reduce(function(s,k){return s+(k.horas||0);},0) + 'h x ' + brl(ctx.financeiro.paramProf.vhKelly) + ')\n' +
     'Ultimo pagamento por aluno: ' + JSON.stringify(ultimoValor) + '\n\n' +
     'REGRAS DE INTENCAO (siga rigorosamente):\n' +
     '- "saldo da conta/inter/banco", "quanto tem no banco" → inter_saldo\n' +
@@ -1118,7 +1120,7 @@ async function executar(intencao, p, dados, chatId) {
           if (al) nomeAluno = al.nome.split(' ').slice(0,2).join(' ');
         }
         const diasAtraso = Math.round((new Date() - new Date(b.dataVencimento)) / 86400000);
-        return '\uD83D\uDD34 ' + venc + ' ' + val + ' \u2014 *' + (nomeAluno||'?') + '*' + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '');
+        return '🔴 ' + venc + ' ' + val + ' — *' + (nomeAluno||'?') + '*' + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '');
       }).join('\n');
 
       return '🔴 *Boletos vencidos/em aberto (últimos 15 dias)*\n\n' + linhas + '\n\n_Total: ' + lista.length + ' boleto(s) — R$ ' + brl(lista.reduce((s,b)=>s+(b.valorNominal||0),0)) + '_';
@@ -1215,7 +1217,14 @@ async function executar(intencao, p, dados, chatId) {
 function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   const primeiroNome = aluno.nome.split(' ')[0];
   const vezes = aluno.vezes_semana || 2;
-  return 'Olá, ' + primeiroNome + '! 😊\n\nSeguem os boletos referentes ao seu plano semestral no LCA Studio de Pilates.\n\n📋 *Plano ' + planoLabel + ' — ' + vezes + 'x por semana*\n📅 *Validade: ' + periodoPlano + '*\n💰 *' + brl(valor) + '/mês*\n\nOs boletos vencem todo dia ' + diaVenc + ' de cada mês. Você também pode pagar via Pix utilizando o QR Code impresso em cada boleto.\n\nQualquer dúvida, estamos à disposição! 🌿\nLCA Studio de Pilates';
+  return 'Olá, ' + primeiroNome + '! 😊\n\n' +
+    'Seguem os boletos referentes ao seu plano semestral no LCA Studio de Pilates.\n\n' +
+    '📋 *Plano ' + planoLabel + ' — ' + vezes + 'x por semana*\n' +
+    '📅 *Validade: ' + periodoPlano + '*\n' +
+    '💰 *' + brl(valor) + '/mês*\n\n' +
+    'Os boletos vencem todo dia ' + diaVenc + ' de cada mês. ' +
+    'Você também pode pagar via Pix utilizando o QR Code impresso em cada boleto.\n\n' +
+    'Qualquer dúvida, estamos à disposição! 🌿\nLCA Studio de Pilates';
 }
 
   if (intencao === 'inter_emitir_plano') {
@@ -1513,7 +1522,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const diferenca  = deveria - pagosPlanoAtual;
     const multa      = valorMensal * 0.20 * mNaoUsados;
     const saldo      = diferenca + multa;
-    return '\uD83D\uDCCB *Rescisão — ' + aluno.nome + '*\n\n' +
+    return '📋 *Rescisão — ' + aluno.nome + '*\n\n' +
       'Plano: ' + aluno.tipo_plano + ' (' + dur + ' meses)\n' +
       'Valor mensal ref.: ' + brl(valorMensal) + '\n' +
       'Meses utilizados: ' + mUsados + ' | Não usados: ' + mNaoUsados + '\n\n' +
@@ -1849,23 +1858,23 @@ async function enviarAniversariantesHoje() {
 
       let msg;
       if (ativo) {
-        msg = '\uD83C\uDF82 Feliz aniversário, ' + nome1 + '!\n\n' +
+        msg = '🎂 Feliz aniversário, ' + nome1 + '!\n\n' +
           'Que este novo ano de vida seja repleto de saúde, alegria e muita energia! ' +
           'É uma alegria enorme tê-l' + ola + ' aqui no LCA, cuidando do seu corpo e da sua qualidade de vida com tanto carinho e dedicação.\n\n' +
-          'Que os próximos anos sejam cada vez mais leves — no movimento e no coração. \uD83D\uDC9B\n\n' +
+          'Que os próximos anos sejam cada vez mais leves — no movimento e no coração. 💛\n\n' +
           'Com carinho, Equipe LCA Studio de Pilates';
       } else {
-        msg = '\uD83C\uDF82 Feliz aniversário, ' + nome1 + '!\n\n' +
+        msg = '🎂 Feliz aniversário, ' + nome1 + '!\n\n' +
           'Que este novo ano de vida seja cheio de saúde e momentos especiais. ' +
           'Você faz parte da história do LCA e a gente não esquece disso.\n\n' +
-          'E se um dia quiser voltar, será sempre ' + bem + '. \uD83C\uDF3F\n\n' +
+          'E se um dia quiser voltar, será sempre ' + bem + '. 🌿\n\n' +
           'Com carinho, Equipe LCA Studio de Pilates';
       }
 
       return '👤 *' + a.nome + '* — ' + status + '\n' + telInfo + '\n\n📋 *Mensagem para copiar:*\n```\n' + msg + '\n```';
     });
 
-    const cabecalho = '\uD83C\uDF82 *Aniversariantes de hoje (' + dh + '/' + mh + '):*\n\n';
+    const cabecalho = '🎂 *Aniversariantes de hoje (' + dh + '/' + mh + '):*\n\n';
     // Telegram tem limite de 4096 chars — enviar uma mensagem por aniversariante se necessário
     for (const linha of linhas) {
       await tgSend(TELEGRAM_CHAT_ID, cabecalho + linha);
@@ -1923,4 +1932,5 @@ async function main() {
           console.log('[WEBHOOK-INTER]', JSON.stringify(payload).slice(0, 300));
 
           // Inter envia evento "PAGO" com o seuNumero que gravamos na emissão
-          const evento = payload?.evento || payload
+          const evento = payload?.evento || payload?.tipo || '';
+          const seuNum = payload?.seuNumero || payload?.co
