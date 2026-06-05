@@ -604,8 +604,7 @@ async function processarComIA(texto, dados, mes) {
   // Detectar perguntas sobre aniversariantes diretamente
   if (/aniversar/i.test(texto)) {
     // Data em horário de Brasília (UTC-3)
-    const agora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
-    const hoje4 = agora;
+    const hoje4 = new Date(Date.now() - 3*60*60*1000);
     const dh4 = String(hoje4.getDate()).padStart(2,'0');
     const mh4 = String(hoje4.getMonth()+1).padStart(2,'0');
     const anivHoje = dados.alunos.filter(a => (a.aniversario||'').indexOf(dh4+'/'+mh4) === 0);
@@ -1832,7 +1831,7 @@ async function processar(msg) {
 async function enviarAniversariantesHoje() {
   try {
     const dados = await getDados();
-    const hoje = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+    const hoje = new Date(Date.now() - 3*60*60*1000);
     const dh = String(hoje.getDate()).padStart(2,'0');
     const mh = String(hoje.getMonth()+1).padStart(2,'0');
 
@@ -1897,8 +1896,9 @@ function agendarRotinaAniversarios() {
   // Verificar a cada hora se chegou às 8h (horário de Brasília = UTC-3)
   async function checar() {
     const agora = new Date();
-    const horaBrasilia = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })).getHours();
-    const min = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' })).getMinutes();
+    const brNow = new Date(agora.getTime() - 3*60*60*1000);
+    const horaBrasilia = brNow.getHours();
+    const min = brNow.getMinutes();
     if (horaBrasilia === 8 && min < 5) {
       await enviarAniversariantesHoje();
     }
@@ -1985,101 +1985,4 @@ async function main() {
                 const chatId = TELEGRAM_CHAT_ID;
                 if (chatId) {
                   await logOp('boleto_pago_webhook', aluno.nome + ' — ' + mes, alunoId, valorPago, mes, {dataPagamento: dataPag});
-                await tgSend(chatId, `🏦 *Pagamento confirmado automaticamente!*\n\n👤 ${aluno.nome}\n💰 ${brl(valorPago)}\n📅 ${mes} — pago em ${dataPag.split('-').reverse().join('/')}\n_Boleto Inter baixado automaticamente._`);
-                }
-                console.log(`[WEBHOOK-INTER] Pagamento confirmado: aluno ${alunoId} mes ${mes} valor ${valorPago}`);
-              } else {
-                console.log(`[WEBHOOK-INTER] Pagamento já existe para aluno ${alunoId} mes ${mes} — ignorado`);
-              }
-            } else {
-              console.log(`[WEBHOOK-INTER] Aluno ${alunoId} não encontrado`);
-            }
-          } else {
-            console.log(`[WEBHOOK-INTER] Evento ignorado: evento="${evento}" seuNum="${seuNum}" valor=${valorPago}`);
-          }
-        } catch(e) {
-          console.error('[WEBHOOK-INTER] Erro:', e.message);
-        }
-        res.writeHead(200, {'Content-Type':'application/json'});
-        res.end('{"ok":true}');
-      });
-
-    // ── Cadastrar webhook no Inter (chamar uma vez via browser) ────────────
-    } else if (req.url === '/cadastrar-webhook-inter' && req.method === 'GET') {
-      try {
-        const token = await interGetToken();
-        const webhookUrl = process.env.RENDER_EXTERNAL_URL + '/webhook-inter';
-        const r = await interReq('/cobranca/v3/cobrancas/webhook', 'PUT',
-          { webhookUrl }, token);
-        res.writeHead(200, {'Content-Type':'application/json'});
-        res.end(JSON.stringify({ ok: true, webhookUrl, resposta: r }));
-      } catch(e) {
-        res.writeHead(500, {'Content-Type':'application/json'});
-        res.end(JSON.stringify({ erro: e.message }));
-      }
-
-    // ── Endpoint /comando — recebe ações do site ───────────────────
-    } else if (req.url === '/comando' && req.method === 'POST') {
-      // Verificar CORS para o site no Netlify
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
-        try {
-          const payload = JSON.parse(body);
-          const chatId = payload.chatId || TELEGRAM_CHAT_ID;
-          const comando = payload.comando || '';
-          const alunoId = payload.aluno_id;
-          console.log('[COMANDO SITE]', comando, 'aluno_id:', alunoId);
-          if (!comando) {
-            res.writeHead(400, {'Content-Type':'application/json'});
-            res.end(JSON.stringify({ ok: false, erro: 'comando não informado' }));
-            return;
-          }
-          // Processar como mensagem do Telegram
-          const msgFake = { text: comando, chat: { id: chatId }, from: { username: 'site' } };
-          processar(msgFake).catch(e => console.error('[COMANDO SITE] erro:', e.message));
-          res.writeHead(200, {'Content-Type':'application/json'});
-          res.end(JSON.stringify({ ok: true, mensagem: 'Comando recebido — verifique o Telegram' }));
-        } catch(e) {
-          res.writeHead(400, {'Content-Type':'application/json'});
-          res.end(JSON.stringify({ ok: false, erro: e.message }));
-        }
-      });
-
-    // ── CORS preflight ─────────────────────────────────────────────
-    } else if (req.method === 'OPTIONS') {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-      res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-      res.writeHead(204);
-      res.end();
-    } else {
-      res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.16 ✓ — ' + new Date().toLocaleString('pt-BR'));
-    }
-  }).listen(process.env.PORT||3000, () => console.log('HTTP OK — /ping disponível'));
-  agendarRotinaAniversarios();
-
-  while (true) {
-    try {
-      const res = await tgUpdates(offset);
-      if (res?.result?.length) {
-        for (const upd of res.result) {
-          offset = upd.update_id+1;
-          if (processados[upd.update_id]) continue;
-          processados[upd.update_id] = true;
-          const ids = Object.keys(processados);
-          if (ids.length > 200) delete processados[ids[0]];
-          if (upd.message?.text) processar(upd.message).catch(e => console.error('Erro:', e.message));
-        }
-      }
-    } catch(e) {
-      console.error('Loop error:', e.message);
-      await new Promise(r => setTimeout(r, 5000));
-    }
-  }
-}
-
-main();
+                await tgSend(chatId, `
