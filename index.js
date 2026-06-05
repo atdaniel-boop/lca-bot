@@ -1,6 +1,7 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
 // Versão 4.16 - correções: versão unificada, extração de mês via IA, confirmar_cheque persiste pagamento, checkin valida feriado, getDados busca planos, logOp em lancar_custo, ctx limpo no timeout, credenciais sem fallback hardcoded
 
+// ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -22,6 +23,7 @@ const INTER_CONTA         = process.env.INTER_CONTA || ''; // número da conta c
 // Token cacheado por scope - ver interTokenCache em interGetToken
 
 // Requisição mTLS para a API do Inter
+// ── Banco Inter ─────────────────────────────────────────────────────────────────
 function interReq(path, method, body, token, extraHeaders) {
   return new Promise((resolve, reject) => {
     if (!INTER_CERT || !INTER_KEY) {
@@ -200,6 +202,7 @@ async function cancelarBoletoPorMes(alunoId, mes) {
   }
 }
 
+// ── HTTP genérico ───────────────────────────────────────────────────────────────
 function req(url, method, headers, body, timeoutMs) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -221,6 +224,7 @@ function req(url, method, headers, body, timeoutMs) {
   });
 }
 
+// ── Telegram ────────────────────────────────────────────────────────────────────
 function tgSend(chatId, text) {
   return req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
     'POST', { 'Content-Type': 'application/json' },
@@ -311,10 +315,12 @@ async function tgSendPDF(chatId, pdfUrl, filename, caption) {
     r.end();
   });
 }
+// ── Polling ──────────────────────────────────────────────────────────────────────
 function tgUpdates(offset) {
   return req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=' + offset + '&timeout=25', 'GET', {}, null, 35000);
 }
 
+// ── Supabase ─────────────────────────────────────────────────────────────────────
 function sbHeaders() {
   return { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY,
     'Content-Type': 'application/json', Prefer: 'return=representation' };
@@ -324,6 +330,7 @@ const sbPost  = (t, b) => req(SUPABASE_URL+'/rest/v1/'+t, 'POST', sbHeaders(), b
 const sbPatch = (t, q, b) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'PATCH', sbHeaders(), b);
 const sbDelete= (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'DELETE', sbHeaders(), null);
 
+// ── Log de operações ────────────────────────────────────────────────────────────
 async function logOp(tipo, descricao, alunoId, valor, mes, extra) {
   try {
     await sbPost('log_operacoes', {
@@ -341,6 +348,7 @@ async function logOp(tipo, descricao, alunoId, valor, mes, extra) {
   }
 }
 
+// ── IA / Gemini ──────────────────────────────────────────────────────────────────
 function aiWithTimeout(promise, ms) {
   return Promise.race([
     promise,
@@ -386,6 +394,7 @@ async function aiJSON(prompt) {
   }
 }
 
+// ── Dados do Supabase ───────────────────────────────────────────────────────────
 async function getDados() {
   const [ra, rc, rk] = await Promise.all([
     sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo'),
@@ -442,8 +451,10 @@ async function saveChanges(ch) {
   } catch(e) { console.error('saveChanges erro:', e.message); }
 }
 
+// ── Utilitários ─────────────────────────────────────────────────────────────────
 function brl(v) { return 'R$ ' + Math.abs(Number(v)||0).toFixed(2).replace('.', ','); }
 
+// ── Contexto para a IA ─────────────────────────────────────────────────────────
 function buildContexto(dados, mes) {
   const ativos = dados.alunos.filter(a => a.ativo === 'SIM');
   const inativos = dados.alunos.filter(a => a.ativo !== 'SIM');
@@ -589,6 +600,7 @@ const INTENCOES_ACAO = ['lancar_custo','lancar_aula','confirmar_pagamento','calc
   'remover_custo','remover_custo_id','desfazer_pagamento','desfazer_aula','checkin','desfazer_checkin'];
 
 // Chamada unificada: classifica E responde em uma só requisição
+// ── Processamento com IA ────────────────────────────────────────────────────────
 async function processarComIA(texto, dados, mes) {
   const ctx = buildContexto(dados, mes);
 
@@ -756,6 +768,7 @@ async function processarComIA(texto, dados, mes) {
   return raw;
 }
 
+// ── Extração de parâmetros ──────────────────────────────────────────────────────
 async function extrairParams(intencao, texto, dados) {
   const nomes = dados.alunos.map(function(a){ return a.id + '|' + a.nome; }).join('\n');
   const mesAtual = new Date().toISOString().slice(0,7);
@@ -784,6 +797,7 @@ async function extrairParams(intencao, texto, dados) {
   return await aiJSON(prompt);
 }
 
+// ── Executar ação ───────────────────────────────────────────────────────────────
 async function executar(intencao, p, dados, chatId) {
   const mes = p?.mes || new Date().toISOString().slice(0,7);
 
@@ -1198,6 +1212,7 @@ async function executar(intencao, p, dados, chatId) {
     } catch(e) { return '❌ Erro emissão boleto: ' + e.message; }
   }
 
+// ── Mensagens WhatsApp ──────────────────────────────────────────────────────────
 function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   const primeiroNome = aluno.nome.split(' ')[0];
   const vezes = aluno.vezes_semana || 2;
@@ -1523,6 +1538,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 
 const pendente = {};
 
+// ── Processar mensagem ──────────────────────────────────────────────────────────
 async function processar(msg) {
   const chatId   = msg.chat.id;
   const username = (msg.from.username||'').toLowerCase();
@@ -1811,6 +1827,7 @@ async function processar(msg) {
   return tgSend(chatId, resultado || '❌ Não consegui executar a ação.');
 }
 
+// ── Rotina diária de aniversariantes ────────────────────────────────────────────
 async function enviarAniversariantesHoje() {
   try {
     const dados = await getDados();
@@ -1863,6 +1880,7 @@ async function enviarAniversariantesHoje() {
   }
 }
 
+// ── Agendamento da rotina ───────────────────────────────────────────────────────
 function agendarRotinaAniversarios() {
   // Verificar a cada hora se chegou às 8h (horário de Brasília = UTC-3)
   async function checar() {
@@ -1883,6 +1901,7 @@ function agendarRotinaAniversarios() {
 
 const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguardando }
 
+// ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
   console.log('LCA Bot v4.16 iniciado ok');
   let offset = 0;
