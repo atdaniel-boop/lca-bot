@@ -608,17 +608,25 @@ async function processarComIA(texto, dados, mes) {
     const dh4 = String(hoje4.getDate()).padStart(2,'0');
     const mh4 = String(hoje4.getMonth()+1).padStart(2,'0');
     const anivHoje = dados.alunos.filter(a => (a.aniversario||'').indexOf(dh4+'/'+mh4) === 0);
+
+    // Calcular dias faltando com datas reais (evita erros de aritmética simples)
+    function diasParaAniv(anivStr) {
+      const p = anivStr.split('/');
+      const dia = parseInt(p[0]), mes3 = parseInt(p[1]);
+      const ano = hoje4.getFullYear();
+      let proximo = new Date(ano, mes3-1, dia);
+      const hojeZero = new Date(hoje4.getFullYear(), hoje4.getMonth(), hoje4.getDate());
+      if (proximo <= hojeZero) proximo = new Date(ano+1, mes3-1, dia);
+      return Math.round((proximo - hojeZero) / 86400000);
+    }
+
     const proximos2 = dados.alunos
       .filter(a => a.aniversario && a.aniversario.trim())
+      .filter(a => (a.aniversario).indexOf(dh4+'/'+mh4) !== 0) // excluir hoje
       .map(a => {
-        const p = a.aniversario.split('/');
-        const dia = parseInt(p[0]), mes3 = parseInt(p[1]);
-        const hojeDia2 = hoje4.getDate(), hojeMes2 = hoje4.getMonth()+1;
-        let df = (mes3 - hojeMes2)*30 + (dia - hojeDia2);
-        if (df < 0) df += 365;
+        const df = diasParaAniv(a.aniversario);
         return { nome: a.nome, ativo: a.ativo === 'SIM', aniversario: a.aniversario, df };
       })
-      .filter(a => a.df > 0)
       .sort((a,b) => a.df - b.df)
       .slice(0, 5);
 
@@ -1979,10 +1987,4 @@ async function main() {
                 try {
                   await sbPatch('boletos', `aluno_id=eq.${alunoId}&mes=eq.${mes}&status=eq.aberto`,
                     { status: 'pago', pago_em: new Date().toISOString() });
-                } catch(e) { console.error('[webhook] erro ao marcar boleto pago:', e.message); }
-
-                // Notificar via Telegram
-                const chatId = TELEGRAM_CHAT_ID;
-                if (chatId) {
-                  await logOp('boleto_pago_webhook', aluno.nome + ' — ' + mes, alunoId, valorPago, mes, {dataPagamento: dataPag});
-                await tgSend(chatId, `
+                } catch(e) { co
