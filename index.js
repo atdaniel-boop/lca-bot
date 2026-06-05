@@ -765,8 +765,29 @@ async function processarComIA(texto, dados, mes) {
 
 // ── Extrair parâmetros de ação ────────────────────────────────────
 async function extrairParams(intencao, texto, dados) {
-  const nomes = dados.alunos.map(a => a.id+'|'+a.nome).join('\n');
-  const prompt = 'Extraia os parâmetros da ação "\' + intencao + \'" da mensagem abaixo.\n\nALUNOS (id|nome):\n\' + nomes + \'\n\nMENSAGEM: "\' + texto + \'"\n\nRetorne JSON com os campos relevantes (use null para campos não mencionados):\n{\n  "aluno_id": número ou null,\n  "aluno_nome": string ou null,\n  "valor": número ou null,\n  "mes": "YYYY-MM" ou null (mês atual: \' + new Date().toISOString().slice(0,7) + \'),\n  "categoria": string ou null,\n  "descricao": string ou null,\n  "professora": string ou null,\n  "horas": número ou null,\n  "meses_utilizados": número ou null,\n  "data": "YYYY-MM-DD" ou null (hoje: \' + new Date().toISOString().slice(0,10) + \'),\n  "hora": "HH:MM" ou null,\n  "status_checkin": "presente" | "falta" | "repos" ou null,\n  "custo_id": número ou null\n}';
+  const nomes = dados.alunos.map(function(a){ return a.id + '|' + a.nome; }).join('\n');
+  const mesAtual = new Date().toISOString().slice(0,7);
+  const hojeStr = new Date().toISOString().slice(0,10);
+  const prompt =
+    'Extraia os parâmetros da ação "' + intencao + '" da mensagem abaixo.\n\n' +
+    'ALUNOS (id|nome):\n' + nomes + '\n\n' +
+    'MENSAGEM: "' + texto + '"\n\n' +
+    'Retorne JSON com os campos relevantes (use null para campos não mencionados):\n' +
+    '{\n' +
+    '  "aluno_id": número ou null,\n' +
+    '  "aluno_nome": string ou null,\n' +
+    '  "valor": número ou null,\n' +
+    '  "mes": "YYYY-MM" ou null (mês atual: ' + mesAtual + '),\n' +
+    '  "categoria": string ou null,\n' +
+    '  "descricao": string ou null,\n' +
+    '  "professora": string ou null,\n' +
+    '  "horas": número ou null,\n' +
+    '  "meses_utilizados": número ou null,\n' +
+    '  "data": "YYYY-MM-DD" ou null (hoje: ' + hojeStr + '),\n' +
+    '  "hora": "HH:MM" ou null,\n' +
+    '  "status_checkin": "presente" | "falta" | "repos" ou null,\n' +
+    '  "custo_id": número ou null\n' +
+    '}';
 
   return await aiJSON(prompt);
 }
@@ -1492,7 +1513,17 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const diferenca  = deveria - pagosPlanoAtual;
     const multa      = valorMensal * 0.20 * mNaoUsados;
     const saldo      = diferenca + multa;
-    return '📋 *Rescisão — ' + aluno.nome + '*\n\nPlano: ' + aluno.tipo_plano + ' (' + dur + ' meses)\nValor mensal ref.: ' + brl(valorMensal) + '\nMeses utilizados: ' + mUsados + ' | Não usados: ' + mNaoUsados + '\n\nDeveria pagar (mensal × usados): ' + brl(deveria) + '\nPago no plano atual: ' + brl(pagosPlanoAtual) + '\nDiferença de plano: ' + brl(diferenca) + '\nMulta 20% × ' + mNaoUsados + ' meses: ' + brl(multa) + '\n\n*Saldo a pagar: ' + brl(saldo) + '*\n\n_Confira o valor mensal. Se estiver errado, mande "' + aluno.nome.split(' ')[0] + ' rescindir, ' + mUsados + ' meses, mensal 329"_\n_Para confirmar e lançar: responda_ *sim*';
+    return '\uD83D\uDCCB *Rescisão — ' + aluno.nome + '*\n\n' +
+      'Plano: ' + aluno.tipo_plano + ' (' + dur + ' meses)\n' +
+      'Valor mensal ref.: ' + brl(valorMensal) + '\n' +
+      'Meses utilizados: ' + mUsados + ' | Não usados: ' + mNaoUsados + '\n\n' +
+      'Deveria pagar (mensal × usados): ' + brl(deveria) + '\n' +
+      'Pago no plano atual: ' + brl(pagosPlanoAtual) + '\n' +
+      'Diferença de plano: ' + brl(diferenca) + '\n' +
+      'Multa 20% × ' + mNaoUsados + ' meses: ' + brl(multa) + '\n\n' +
+      '*Saldo a pagar: ' + brl(saldo) + '*\n\n' +
+      '_Confira o valor mensal. Se estiver errado, mande "' + aluno.nome.split(' ')[0] + ' rescindir, ' + mUsados + ' meses, mensal 329"_\n' +
+      '_Para confirmar e lançar: responda_ *sim*';
   }
 
   return null;
@@ -1892,9 +1923,4 @@ async function main() {
           console.log('[WEBHOOK-INTER]', JSON.stringify(payload).slice(0, 300));
 
           // Inter envia evento "PAGO" com o seuNumero que gravamos na emissão
-          const evento = payload?.evento || payload?.tipo || '';
-          const seuNum = payload?.seuNumero || payload?.cobranca?.seuNumero || '';
-          const valorPago = parseFloat(payload?.valorTotalRecebido || payload?.valor || 0);
-          const dataPag = payload?.dataLiquidacao || payload?.dataPagamento || new Date().toISOString().slice(0,10);
-
-          // seuNumero formato: "LCA-{id}-{mes}
+          const evento = payload?.evento || payload
