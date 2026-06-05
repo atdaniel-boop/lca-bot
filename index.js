@@ -1862,21 +1862,17 @@ async function enviarAniversariantesHoje() {
 
       let msg;
       if (ativo) {
-        msg = `🎂 Feliz aniversário, ${nome1}!
-
-Que este novo ano de vida seja repleto de saúde, alegria e muita energia! É uma alegria enorme tê-l${ola} aqui no LCA, cuidando do seu corpo e da sua qualidade de vida com tanto carinho e dedicação.
-
-Que os próximos anos sejam cada vez mais leves — no movimento e no coração. 💛
-
-Com carinho, Equipe LCA Studio de Pilates`;
+        msg = '\uD83C\uDF82 Feliz aniversário, ' + nome1 + '!\n\n' +
+          'Que este novo ano de vida seja repleto de saúde, alegria e muita energia! ' +
+          'É uma alegria enorme tê-l' + ola + ' aqui no LCA, cuidando do seu corpo e da sua qualidade de vida com tanto carinho e dedicação.\n\n' +
+          'Que os próximos anos sejam cada vez mais leves — no movimento e no coração. \uD83D\uDC9B\n\n' +
+          'Com carinho, Equipe LCA Studio de Pilates';
       } else {
-        msg = `🎂 Feliz aniversário, ${nome1}!
-
-Que este novo ano de vida seja cheio de saúde e momentos especiais. Você faz parte da história do LCA e a gente não esquece disso.
-
-E se um dia quiser voltar, será sempre ${bem}(a). 🌿
-
-Com carinho, Equipe LCA Studio de Pilates`;
+        msg = '\uD83C\uDF82 Feliz aniversário, ' + nome1 + '!\n\n' +
+          'Que este novo ano de vida seja cheio de saúde e momentos especiais. ' +
+          'Você faz parte da história do LCA e a gente não esquece disso.\n\n' +
+          'E se um dia quiser voltar, será sempre ' + bem + '. \uD83C\uDF3F\n\n' +
+          'Com carinho, Equipe LCA Studio de Pilates';
       }
 
       return `👤 *${a.nome}* — ${status}
@@ -1985,6 +1981,4 @@ async function main() {
                 await sbPatch('alunos', `id=eq.${alunoId}`, patch);
                 // Marcar boleto como pago na tabela
                 try {
-                  await sbPatch('boletos', `aluno_id=eq.${alunoId}&mes=eq.${mes}&status=eq.aberto`,
-                    { status: 'pago', pago_em: new Date().toISOString() });
-                } catch(e) { co
+                  
