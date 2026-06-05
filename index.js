@@ -1197,7 +1197,6 @@ async function executar(intencao, p, dados, chatId) {
       return '[aviso] Resposta: ' + JSON.stringify(result).slice(0,200);
     } catch(e) { return '[erro] Erro emissão boleto: ' + e.message; }
   }
-
 function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   const primeiroNome = aluno.nome.split(' ')[0];
   const vezes = aluno.vezes_semana || 2;
@@ -1881,6 +1880,8 @@ function agendarRotinaAniversarios() {
   console.log('Rotina de aniversários agendada (08:00 BRT diariamente)');
 }
 
+const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguardando }
+
 async function main() {
   console.log('LCA Bot v4.16 iniciado ok');
   let offset = 0;
@@ -1892,7 +1893,6 @@ async function main() {
   } catch(e) { console.log('Init aviso:', e.message); }
 
   const processados = {};
-  const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguardando }
 
   // Servidor HTTP para o Render + endpoint /ping para keep-alive (UptimeRobot)
   require('http').createServer(async (req, res) => {
@@ -2049,3 +2049,4 @@ async function main() {
 }
 
 main();
+
