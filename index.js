@@ -1,5 +1,5 @@
-// LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.16 — correções: versão unificada, extração de mês via IA, confirmar_cheque persiste pagamento, checkin valida feriado, getDados busca planos, logOp em lancar_custo, ctx limpo no timeout, credenciais sem fallback hardcoded
+// LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
+// Versão 4.16 - correções: versão unificada, extração de mês via IA, confirmar_cheque persiste pagamento, checkin valida feriado, getDados busca planos, logOp em lancar_custo, ctx limpo no timeout, credenciais sem fallback hardcoded
 
 const https = require('https');
 
@@ -10,9 +10,8 @@ const SUPABASE_URL   = process.env.SUPABASE_URL || 'https://amkuqijbwjspxajiguxz
 const SUPABASE_KEY   = process.env.SUPABASE_KEY;
 const ALLOWED_USER   = (process.env.ALLOWED_USER || '').toLowerCase();
 
-// ── Banco Inter ───────────────────────────────────────────────────
 // Certificados via variáveis de ambiente (INTER_CERT e INTER_KEY)
-// Client ID/Secret APENAS via variáveis de ambiente — nunca hardcoded no código
+// Client ID/Secret APENAS via variáveis de ambiente - nunca hardcoded no código
 const INTER_CLIENT_ID     = process.env.INTER_CLIENT_ID     || '';
 const INTER_CLIENT_SECRET = process.env.INTER_CLIENT_SECRET || '';
 const INTER_BASE          = 'cdpj.partners.bancointer.com.br';
@@ -20,7 +19,7 @@ const INTER_CERT          = process.env.INTER_CERT || ''; // conteúdo do .crt
 const INTER_KEY           = process.env.INTER_KEY  || ''; // conteúdo do .key
 const INTER_CONTA         = process.env.INTER_CONTA || ''; // número da conta corrente PJ
 
-// Token cacheado por scope — ver interTokenCache em interGetToken
+// Token cacheado por scope - ver interTokenCache em interGetToken
 
 // Requisição mTLS para a API do Inter
 function interReq(path, method, body, token, extraHeaders) {
@@ -177,7 +176,7 @@ async function gravarBoleto(alunoId, mes, codigoSolicitacao, seuNumero, valor, v
       seu_numero: seuNumero, valor, vencimento,
       status: 'aberto', criado_em: new Date().toISOString()
     });
-    await logOp('boleto_emitido', seuNumero + ' — vence ' + vencimento, alunoId, valor, mes, {codigoSolicitacao});
+    await logOp('boleto_emitido', seuNumero + ' - vence ' + vencimento, alunoId, valor, mes, {codigoSolicitacao});
   } catch(e) {
     console.error('[gravarBoleto] erro:', e.message);
   }
@@ -201,7 +200,6 @@ async function cancelarBoletoPorMes(alunoId, mes) {
   }
 }
 
-// ── HTTP ──────────────────────────────────────────────────────────
 function req(url, method, headers, body, timeoutMs) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -223,7 +221,6 @@ function req(url, method, headers, body, timeoutMs) {
   });
 }
 
-// ── Telegram ──────────────────────────────────────────────────────
 function tgSend(chatId, text) {
   return req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
     'POST', { 'Content-Type': 'application/json' },
@@ -318,7 +315,6 @@ function tgUpdates(offset) {
   return req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=' + offset + '&timeout=25', 'GET', {}, null, 35000);
 }
 
-// ── Supabase ──────────────────────────────────────────────────────
 function sbHeaders() {
   return { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY,
     'Content-Type': 'application/json', Prefer: 'return=representation' };
@@ -328,7 +324,6 @@ const sbPost  = (t, b) => req(SUPABASE_URL+'/rest/v1/'+t, 'POST', sbHeaders(), b
 const sbPatch = (t, q, b) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'PATCH', sbHeaders(), b);
 const sbDelete= (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'DELETE', sbHeaders(), null);
 
-// ── Log de operações ──────────────────────────────────────────────
 async function logOp(tipo, descricao, alunoId, valor, mes, extra) {
   try {
     await sbPost('log_operacoes', {
@@ -346,7 +341,6 @@ async function logOp(tipo, descricao, alunoId, valor, mes, extra) {
   }
 }
 
-// ── Gemini ────────────────────────────────────────────────────────
 function aiWithTimeout(promise, ms) {
   return Promise.race([
     promise,
@@ -367,7 +361,7 @@ async function ai(prompt) {
       if (r?.candidates?.[0]?.content) return r.candidates[0].content.parts[0].text.trim();
       if (r?.error?.code === 503 || r?.error?.code === 429) { console.log(model+' indisponível ('+r.error.code+')'); continue; }
       if (r?.error) { console.error('Gemini erro em '+model+':', r.error.code, r.error.message?.slice(0,60)); continue; }
-      console.log(model+' sem candidatos — resposta:', JSON.stringify(r).slice(0,80));
+      console.log(model+' sem candidatos - resposta:', JSON.stringify(r).slice(0,80));
     } catch(e) {
       console.error('Gemini '+model+':', e.message);
       if (e.message.includes('timeout')) continue;
@@ -392,7 +386,6 @@ async function aiJSON(prompt) {
   }
 }
 
-// ── Dados ─────────────────────────────────────────────────────────
 async function getDados() {
   const [ra, rc, rk] = await Promise.all([
     sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo'),
@@ -451,7 +444,6 @@ async function saveChanges(ch) {
 
 function brl(v) { return 'R$ ' + Math.abs(Number(v)||0).toFixed(2).replace('.', ','); }
 
-// ── Contexto resumido para a IA ───────────────────────────────────
 function buildContexto(dados, mes) {
   const ativos = dados.alunos.filter(a => a.ativo === 'SIM');
   const inativos = dados.alunos.filter(a => a.ativo !== 'SIM');
@@ -486,7 +478,7 @@ function buildContexto(dados, mes) {
   const custosMes = dados.custos.filter(c => c.mes === mes);
   const totalCustos = custosMes.reduce((s, c) => s + (c.valor||0), 0);
 
-  // Professoras — valores reais da tabela (fonte única de verdade)
+  // Professoras - valores reais da tabela (fonte única de verdade)
   const profs = dados.professoras || [];
   const profMonica = profs.find(p => p.id === 'monica') || profs.find(p => p.tipo === 'percentual');
   const profKelly  = profs.find(p => p.id === 'kelly')  || profs.find(p => p.tipo === 'hora');
@@ -592,7 +584,6 @@ function buildContexto(dados, mes) {
   };
 }
 
-// ── Classificar intenção ──────────────────────────────────────────
 // Intenções que alteram dados (precisam de execução estruturada)
 const INTENCOES_ACAO = ['lancar_custo','lancar_aula','confirmar_pagamento','calcular_rescisao',
   'remover_custo','remover_custo_id','desfazer_pagamento','desfazer_aula','checkin','desfazer_checkin'];
@@ -632,25 +623,25 @@ async function processarComIA(texto, dados, mes) {
 
     let resp = '';
     if (anivHoje.length) {
-      resp += '🎂 *Aniversariantes hoje (' + dh4 + '/' + mh4 + '):*\n';
+      resp += '[aniversario] *Aniversariantes hoje (' + dh4 + '/' + mh4 + '):*\n';
       anivHoje.forEach(a => {
-        resp += '• *' + a.nome + '* — ' + (a.ativo === 'SIM' ? '🟢 Ativa(o)' : '🔴 Inativa(o)') + ' — ' + (a.telefone||'sem telefone') + '\n';
+        resp += '- *' + a.nome + '* - ' + (a.ativo === 'SIM' ? '[ativo] Ativa(o)' : '[inativo] Inativa(o)') + ' - ' + (a.telefone||'sem telefone') + '\n';
       });
     } else {
       resp += 'Nenhum aniversariante hoje (' + dh4 + '/' + mh4 + ').\n';
     }
     if (proximos2.length) {
-      resp += '\n📅 *Próximos aniversários:*\n';
+      resp += '\n[calendario] *Próximos aniversários:*\n';
       proximos2.forEach(a => {
-        resp += '• *' + a.nome + '* — ' + a.aniversario + ' (em ' + a.df + ' dias) ' + (a.ativo ? '🟢' : '🔴') + '\n';
+        resp += '- *' + a.nome + '* - ' + a.aniversario + ' (em ' + a.df + ' dias) ' + (a.ativo ? '[ativo]' : '[inativo]') + '\n';
       });
     }
     return { tipo: 'consulta', resposta: resp };
   }
 
-  // Detectar ações por palavras-chave (sem IA) — economiza cota
+  // Detectar ações por palavras-chave (sem IA) - economiza cota
   const tL = texto.toLowerCase();
-  // Saudação e ajuda — sem IA
+  // Saudação e ajuda - sem IA
   if (['oi','olá','ola','bom dia','boa tarde','boa noite'].some(k => tL.startsWith(k))) {
     return { tipo: 'saudacao' };
   }
@@ -658,7 +649,7 @@ async function processarComIA(texto, dados, mes) {
     return { tipo: 'ajuda' };
   }
 
-  // Comandos Inter — detecção direta por palavra-chave (sem IA)
+  // Comandos Inter - detecção direta por palavra-chave (sem IA)
   const temInter = tL.includes('inter') || tL.includes('banco') || tL.includes('conta');
   if (tL.includes('extrato') || tL.includes('movimentação') || tL.includes('transaç')) {
     return { tipo: 'acao', intencao: 'inter_extrato', params: {} };
@@ -710,10 +701,10 @@ async function processarComIA(texto, dados, mes) {
   // Despedidas e respostas curtas não-acionáveis
   const despedidas = ['obrigado','obrigada','valeu','tchau','até','flw','ok','entendi','certo','legal','perfeito','ótimo','otimo','show','blz','beleza'];
   if (texto.length < 30 && despedidas.some(k => tL.includes(k))) {
-    return { tipo: 'consulta', resposta: '😊 Disponível quando precisar!' };
+    return { tipo: 'consulta', resposta: ':) Disponível quando precisar!' };
   }
 
-  // UMA chamada ao Gemini — classifica E responde/extrai tudo
+  // UMA chamada ao Gemini - classifica E responde/extrai tudo
   const ultimoValor = {};
   dados.alunos.forEach(function(a) {
     var pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
@@ -765,7 +756,6 @@ async function processarComIA(texto, dados, mes) {
   return raw;
 }
 
-// ── Extrair parâmetros de ação ────────────────────────────────────
 async function extrairParams(intencao, texto, dados) {
   const nomes = dados.alunos.map(function(a){ return a.id + '|' + a.nome; }).join('\n');
   const mesAtual = new Date().toISOString().slice(0,7);
@@ -794,21 +784,20 @@ async function extrairParams(intencao, texto, dados) {
   return await aiJSON(prompt);
 }
 
-// ── Executar ação ─────────────────────────────────────────────────
 async function executar(intencao, p, dados, chatId) {
   const mes = p?.mes || new Date().toISOString().slice(0,7);
 
   if (intencao === 'lancar_custo') {
-    if (!p?.valor || !p?.categoria) return '❌ Informe o valor e a categoria.';
+    if (!p?.valor || !p?.categoria) return '[erro] Informe o valor e a categoria.';
     const desc = (p.descricao||p.categoria) + ' [via Bot Telegram]';
     await sbPost('custos', { descricao: desc, valor: p.valor, categoria: p.categoria, mes });
-    await logOp('custo_lancado', (p.descricao||p.categoria) + ' — ' + mes, null, p.valor, mes, { categoria: p.categoria });
+    await logOp('custo_lancado', (p.descricao||p.categoria) + ' - ' + mes, null, p.valor, mes, { categoria: p.categoria });
     const cat = p.descricao||p.categoria;
-    return '✅ Custo lançado!\n*' + cat + '* — ' + brl(p.valor) + ' — ' + mes + '\n_Para desfazer: "apagar custo ' + p.categoria + ' ' + mes + '"_';
+    return '[ok] Custo lançado!\n*' + cat + '* - ' + brl(p.valor) + ' - ' + mes + '\n_Para desfazer: "apagar custo ' + p.categoria + ' ' + mes + '"_';
   }
 
   if (intencao === 'lancar_aula') {
-    if (!p?.horas) return '❌ Informe o número de horas.';
+    if (!p?.horas) return '[erro] Informe o número de horas.';
     const profId = (p.professora||'').toLowerCase().includes('kelly') ? 'kelly' :
                    (p.professora||'').toLowerCase().includes('monica') ? 'monica' : 'kelly';
     const data = p.data || new Date().toISOString().slice(0,10);
@@ -816,16 +805,16 @@ async function executar(intencao, p, dados, chatId) {
     const profObj = (dados.professoras||[]).find(x => x.id === profId);
     const vhReal = profObj && profObj.valor_hora > 0 ? profObj.valor_hora : 35;
     await sbPost('aulas', { prof_id: profId, mes, data, data_fmt: data.split('-').reverse().join('/'),
-      horas: p.horas, vh: vhReal, desc_aula: 'Lançado via Bot Telegram — '+p.horas+'h' });
-    await logOp('aula_lancada', profId + ' — ' + p.horas + 'h — ' + data, null, p.horas*vhReal, mes, {profId, horas: p.horas});
-    return '✅ Aula lançada!\n*' + profId + '* — ' + p.horas + 'h × ' + brl(vhReal) + ' = ' + brl(p.horas*vhReal) + ' — ' + data + '\n_Para desfazer: "remover aula ' + profId + '"_';
+      horas: p.horas, vh: vhReal, desc_aula: 'Lançado via Bot Telegram - '+p.horas+'h' });
+    await logOp('aula_lancada', profId + ' - ' + p.horas + 'h - ' + data, null, p.horas*vhReal, mes, {profId, horas: p.horas});
+    return '[ok] Aula lançada!\n*' + profId + '* - ' + p.horas + 'h × ' + brl(vhReal) + ' = ' + brl(p.horas*vhReal) + ' - ' + data + '\n_Para desfazer: "remover aula ' + profId + '"_';
   }
 
   if (intencao === 'confirmar_pagamento') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
-    if (!p?.valor) return '❌ Informe o valor.';
+    if (!aluno) return '[erro] Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!p?.valor) return '[erro] Informe o valor.';
     const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{});
     pags[mes] = p.valor;
     // Remover de pendentes se existir (consistência com o sistema web)
@@ -839,36 +828,36 @@ async function executar(intencao, p, dados, chatId) {
     const patchData = { pagamentos: pags, historico_alteracoes: hist };
     if (tinhaPend) patchData.pagamentos_pendentes = pend;
     await sbPatch('alunos', 'id=eq.' + aluno.id, patchData);
-    await logOp('pagamento_confirmado', aluno.nome + ' — ' + mes, aluno.id, p.valor, mes);
+    await logOp('pagamento_confirmado', aluno.nome + ' - ' + mes, aluno.id, p.valor, mes);
     // Cancelar boleto em aberto no Inter (se houver)
     const nCancelados = await cancelarBoletoPorMes(aluno.id, mes);
     const msgCancelamento = nCancelados > 0 ? '\n_Boleto Inter cancelado automaticamente._' : '';
-    return '✅ Pagamento confirmado!\n*' + aluno.nome + '* — ' + brl(p.valor) + ' — ' + mes + tinhaPend?'\n_(boleto que estava aguardando foi baixado)_':'' + msgCancelamento + '\n_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mes + '"_';
+    return '[ok] Pagamento confirmado!\n*' + aluno.nome + '* - ' + brl(p.valor) + ' - ' + mes + tinhaPend?'\n_(boleto que estava aguardando foi baixado)_':'' + msgCancelamento + '\n_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mes + '"_';
   }
 
   if (intencao === 'desfazer_pagamento') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno) return '[erro] Aluno não encontrado: "' + p?.aluno_nome + '".';
     const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{});
     const mesD = p?.mes || mes;
-    if (!pags[mesD]) return '⚠️ ' + aluno.nome + ' não tem pagamento em ' + mesD + '.';
+    if (!pags[mesD]) return '[aviso] ' + aluno.nome + ' não tem pagamento em ' + mesD + '.';
     const val = pags[mesD];
     delete pags[mesD];
     await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags });
-    await logOp('pagamento_desfeito', aluno.nome + ' — ' + mesD, aluno.id, val, mesD);
-    return '✅ Pagamento desfeito!\n*' + aluno.nome + '* — ' + brl(val) + ' — ' + mesD + ' removido.';
+    await logOp('pagamento_desfeito', aluno.nome + ' - ' + mesD, aluno.id, val, mesD);
+    return '[ok] Pagamento desfeito!\n*' + aluno.nome + '* - ' + brl(val) + ' - ' + mesD + ' removido.';
   }
 
   if (intencao === 'remover_custo' || intencao === 'remover_custo_id') {
     let custo;
     if (intencao === 'remover_custo_id' && p?.custo_id) {
       custo = dados.custos.find(c => (c.id||c._id) === p.custo_id);
-      if (!custo) return '❌ Custo ID ' + p.custo_id + ' não encontrado.';
+      if (!custo) return '[erro] Custo ID ' + p.custo_id + ' não encontrado.';
     } else {
       const busca = ((p?.descricao||p?.categoria)||'').toLowerCase();
       const mesR  = p?.mes || mes;
-      if (!busca) return '❌ Informe a categoria do custo.';
+      if (!busca) return '[erro] Informe a categoria do custo.';
       const filtro = dados.custos.filter(c => {
         const descOk = (c.descricao||'').toLowerCase().includes(busca);
         const catOk  = (c.categoria||'').toLowerCase().includes(busca);
@@ -876,19 +865,19 @@ async function executar(intencao, p, dados, chatId) {
       });
       if (!filtro.length) {
         const doMes = dados.custos.filter(c => c.mes === mesR);
-        const lista = doMes.map(c => '• ' + c.descricao||c.categoria + ' — ' + brl(c.valor)).join('\n');
-        return '❌ Custo "' + busca + '" não encontrado em ' + mesR + '.' + lista?'\n\nCustos em '+mesR+':\n'+lista:'';
+        const lista = doMes.map(c => '- ' + c.descricao||c.categoria + ' - ' + brl(c.valor)).join('\n');
+        return '[erro] Custo "' + busca + '" não encontrado em ' + mesR + '.' + lista?'\n\nCustos em '+mesR+':\n'+lista:'';
       }
       if (filtro.length > 1) {
-        return '⚠️ Encontrei ' + filtro.length + ' registros:\n' +
-          filtro.map(c => '• ID ' + c.id||c._id + ': ' + c.descricao||c.categoria + ' — ' + brl(c.valor)).join('\n') +
+        return '[aviso] Encontrei ' + filtro.length + ' registros:\n' +
+          filtro.map(c => '- ID ' + c.id||c._id + ': ' + c.descricao||c.categoria + ' - ' + brl(c.valor)).join('\n') +
           '\n\nMande: "remover custo ID XX"';
       }
       custo = filtro[0];
     }
     await sbDelete('custos', 'id=eq.' + custo.id||custo._id);
-    await logOp('custo_removido', (custo.descricao||custo.categoria) + ' — ' + (custo.mes||''), null, custo.valor, custo.mes);
-    return '✅ Custo removido!\n*' + (custo.descricao||custo.categoria).replace(' [via Bot Telegram]','') + '* — ' + brl(custo.valor);
+    await logOp('custo_removido', (custo.descricao||custo.categoria) + ' - ' + (custo.mes||''), null, custo.valor, custo.mes);
+    return '[ok] Custo removido!\n*' + (custo.descricao||custo.categoria).replace(' [via Bot Telegram]','') + '* - ' + brl(custo.valor);
   }
 
   if (intencao === 'desfazer_aula') {
@@ -897,17 +886,17 @@ async function executar(intencao, p, dados, chatId) {
     let filtro = dados.aulas;
     if (profId) filtro = filtro.filter(k => k.prof_id === profId);
     if (p?.mes)  filtro = filtro.filter(k => k.mes === p.mes);
-    if (!filtro.length) return '❌ Nenhuma aula encontrada' + profId?' para '+profId:'' + '.';
+    if (!filtro.length) return '[erro] Nenhuma aula encontrada' + profId?' para '+profId:'' + '.';
     const aula = filtro[0];
     await sbDelete('aulas', 'id=eq.' + aula.id);
-    await logOp('aula_removida', aula.prof_id + ' — ' + (aula.horas||aula.vh) + 'h — ' + (aula.data_fmt||aula.data), null, null, aula.mes);
-    return '✅ Aula removida!\n*' + aula.prof_id + '* — ' + aula.horas||aula.vh + 'h — ' + aula.data_fmt||aula.data;
+    await logOp('aula_removida', aula.prof_id + ' - ' + (aula.horas||aula.vh) + 'h - ' + (aula.data_fmt||aula.data), null, null, aula.mes);
+    return '[ok] Aula removida!\n*' + aula.prof_id + '* - ' + aula.horas||aula.vh + 'h - ' + aula.data_fmt||aula.data;
   }
 
   if (intencao === 'checkin') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno) return '[erro] Aluno não encontrado: "' + p?.aluno_nome + '".';
     const status  = p?.status_checkin || 'presente';
     const dataCi  = p?.data || new Date().toISOString().slice(0,10);
     const DIAS_PT = ['Dom','Seg','Ter','Qua','Qui','Sex','Sab'];
@@ -916,7 +905,7 @@ async function executar(intencao, p, dados, chatId) {
     // Verificar se o dia é feriado (marcado na agenda via modal de feriado)
     const agendaFeriados = dados.changes?.feriados || {};
     if (agendaFeriados[dataCi]) {
-      return '🎌 Check-in bloqueado: *' + dataCi.split('-').reverse().join('/') + '* é feriado (' + agendaFeriados[dataCi]||'feriado' + ').\nNão é possível registrar presença em dias de feriado.';
+      return '[feriado] Check-in bloqueado: *' + dataCi.split('-').reverse().join('/') + '* é feriado (' + agendaFeriados[dataCi]||'feriado' + ').\nNão é possível registrar presença em dias de feriado.';
     }
     // Buscar horários válidos do aluno neste dia da semana
     const horariosValidos = [];
@@ -929,12 +918,12 @@ async function executar(intencao, p, dados, chatId) {
     // Hora informada: validar contra agenda
     let horaCi = p?.hora || null;
     if (horaCi && horariosValidos.length > 0 && !horariosValidos.includes(horaCi)) {
-      return '⚠️ Horário *' + horaCi + '* não consta na agenda de *' + aluno.nome.split(' ')[0] + '* para ' + diaKey + '.\nHorários cadastrados: ' + horariosValidos.join(', ') + '\nUse um dos horários acima ou corrija a agenda.';
+      return '[aviso] Horário *' + horaCi + '* não consta na agenda de *' + aluno.nome.split(' ')[0] + '* para ' + diaKey + '.\nHorários cadastrados: ' + horariosValidos.join(', ') + '\nUse um dos horários acima ou corrija a agenda.';
     }
     // Se não informada, busca o primeiro slot
     if (!horaCi && horariosValidos.length > 0) horaCi = horariosValidos[0];
     if (!horaCi) {
-      return '⚠️ Não consegui identificar o horário da aula de *' + aluno.nome + '*.\nInforme o horário: _"check-in ' + aluno.nome.split(' ')[0] + ' hoje 10:00"_';
+      return '[aviso] Não consegui identificar o horário da aula de *' + aluno.nome + '*.\nInforme o horário: _"check-in ' + aluno.nome.split(' ')[0] + ' hoje 10:00"_';
     }
     const ckKey   = dataCi + '-' + horaCi;
     const ch = (dados.changes?.checkins) ? dados.changes.checkins : {};
@@ -948,15 +937,15 @@ async function executar(intencao, p, dados, chatId) {
     if (dados.changes) { dados.changes.checkins = ch; await saveChanges(dados.changes); }
     const DIAS = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
     const dow2 = new Date(dataCi+'T12:00:00').getDay();
-    const LABEL = { presente:'✅ Presente', falta:'❌ Falta', repos:'🔄 Reposição' };
-    await logOp('checkin', aluno.nome + ' — ' + (LABEL[status]||status) + ' — ' + horaCi + ' ' + DIAS[dow2] + ' ' + dataCi, aluno.id, null, dataCi.slice(0,7), {status, hora: horaCi, data: dataCi});
-    return LABEL[status] + ' registrado!\n*' + aluno.nome + '* — ' + DIAS[dow2] + ' ' + dataCi.slice(8) + '/' + dataCi.slice(5,7) + ' ' + horaCi + '\n_Recarregue o site para ver o check-in atualizado._';
+    const LABEL = { presente:'[ok] Presente', falta:'[erro] Falta', repos:'[reposicao] Reposição' };
+    await logOp('checkin', aluno.nome + ' - ' + (LABEL[status]||status) + ' - ' + horaCi + ' ' + DIAS[dow2] + ' ' + dataCi, aluno.id, null, dataCi.slice(0,7), {status, hora: horaCi, data: dataCi});
+    return LABEL[status] + ' registrado!\n*' + aluno.nome + '* - ' + DIAS[dow2] + ' ' + dataCi.slice(8) + '/' + dataCi.slice(5,7) + ' ' + horaCi + '\n_Recarregue o site para ver o check-in atualizado._';
   }
 
   if (intencao === 'desfazer_checkin') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno) return '[erro] Aluno não encontrado: "' + p?.aluno_nome + '".';
     const dataCi = p?.data || new Date().toISOString().slice(0,10);
     const ch = (dados.changes?.checkins) || {};
     let removidos = 0;
@@ -970,12 +959,11 @@ async function executar(intencao, p, dados, chatId) {
       const depois = ch[ck].presente.length+ch[ck].falta.length+ch[ck].repos.length;
       if (depois<antes) removidos++;
     });
-    if (!removidos) return '⚠️ Nenhum check-in encontrado para *' + aluno.nome + '* em ' + dataCi + '.';
+    if (!removidos) return '[aviso] Nenhum check-in encontrado para *' + aluno.nome + '* em ' + dataCi + '.';
     if (dados.changes) { dados.changes.checkins = ch; await saveChanges(dados.changes); }
-    return '✅ Check-in desfeito!\n*' + aluno.nome + '* — ' + dataCi.slice(8) + '/' + dataCi.slice(5,7);
+    return '[ok] Check-in desfeito!\n*' + aluno.nome + '* - ' + dataCi.slice(8) + '/' + dataCi.slice(5,7);
   }
 
-  // ── Banco Inter ────────────────────────────────────────────────
   if (intencao === 'inter_saldo') {
     try {
       const s = await interSaldo();
@@ -983,14 +971,14 @@ async function executar(intencao, p, dados, chatId) {
         // Horário em BRT (UTC-3)
         const agora = new Date(Date.now() - 3*60*60*1000);
         const horaStr = agora.toISOString().replace('T',' ').slice(0,16) + ' (BRT)';
-        return '🏦 *Saldo Banco Inter*\n\n' +
-          '💰 Disponível: *' + brl(s.disponivel) + '*\n' +
-          (s.bloqueadoCheque   ? '🔒 Bloqueado Cheque: ' + brl(s.bloqueadoCheque) + '\n' : '') +
+        return '[banco] *Saldo Banco Inter*\n\n' +
+          '[R$] Disponível: *' + brl(s.disponivel) + '*\n' +
+          (s.bloqueadoCheque   ? '[bloqueado] Bloqueado Cheque: ' + brl(s.bloqueadoCheque) + '\n' : '') +
           (s.bloqueadoJudicial ? '⚖️ Bloqueado Judicial: ' + brl(s.bloqueadoJudicial) + '\n' : '') +
           '\n_Consultado em ' + horaStr + '_';
       }
-      return '⚠️ Resposta inesperada do Inter: ' + JSON.stringify(s) + '\n\n_Se o erro for "requested scope is not registered", acesse o Portal Inter → sua aplicação → habilite o escopo "Banking" (extrato e saldo)._';
-    } catch(e) { return '❌ Erro Inter: ' + e.message; }
+      return '[aviso] Resposta inesperada do Inter: ' + JSON.stringify(s) + '\n\n_Se o erro for "requested scope is not registered", acesse o Portal Inter → sua aplicação → habilite o escopo "Banking" (extrato e saldo)._';
+    } catch(e) { return '[erro] Erro Inter: ' + e.message; }
   }
 
   if (intencao === 'inter_extrato') {
@@ -1005,7 +993,7 @@ async function executar(intencao, p, dados, chatId) {
       transacoes.filter(t => t.tipoTransacao==='PIX' && t.tipoOperacao==='C' && !(t.descricao||'').includes('Cp:')).slice(0,3).forEach(t => {
       });
       // Log de um boleto para ver campos
-      if (!transacoes.length) return '📄 *Extrato Inter* (' + dataInicio + ' a ' + dataFim + ')\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ' + JSON.stringify(ext).slice(0,200);
+      if (!transacoes.length) return '[documento] *Extrato Inter* (' + dataInicio + ' a ' + dataFim + ')\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ' + JSON.stringify(ext).slice(0,200);
       // Log completo de uma transação Pix para ver todos os campos disponíveis
 
       // Índice de boletos emitidos por valor para cruzamento
@@ -1034,7 +1022,7 @@ async function executar(intencao, p, dados, chatId) {
       });
 
       const linhas = transacoes.slice().reverse().slice(0,15).map(t => {
-        const sinal = (t.tipoOperacao === 'C') ? '🟢' : '🔴';
+        const sinal = (t.tipoOperacao === 'C') ? '[ativo]' : '[inativo]';
         const valNum = parseFloat(t.valor || t.valorOperacao || 0);
         const val = brl(Math.abs(valNum));
         const desc = (t.titulo || t.descricao || t.tipoTransacao || '').slice(0,35);
@@ -1083,11 +1071,11 @@ async function executar(intencao, p, dados, chatId) {
         const chequeDevolvido = t.tipoOperacao === 'D' && 
           (descUp.includes('CHEQUE') || descUp.includes('CHQ') || descUp.includes('DEVOLUCAO') || descUp.includes('DEVOLVIDO'));
         const alertCheque = chequeDevolvido ? ' 🚨 *CHEQUE DEVOLVIDO*' : '';
-        return sinal + ' ' + data + ' ' + val + nomeAluno + ' — ' + desc + alertCheque;
+        return sinal + ' ' + data + ' ' + val + nomeAluno + ' - ' + desc + alertCheque;
       }).join('\n');
-      return '📄 *Extrato Inter* (' + dataInicio.split('-').reverse().join('/') + ' a ' + dataFim.split('-').reverse().join('/') + ')\n\n' + linhas +
+      return '[documento] *Extrato Inter* (' + dataInicio.split('-').reverse().join('/') + ' a ' + dataFim.split('-').reverse().join('/') + ')\n\n' + linhas +
         (transacoes.length > 15 ? '\n\n_...e mais ' + transacoes.length - 15 + ' transações._' : '');
-    } catch(e) { return '❌ Erro extrato Inter: ' + e.message; }
+    } catch(e) { return '[erro] Erro extrato Inter: ' + e.message; }
   }
 
   if (intencao === 'inter_boletos_vencidos') {
@@ -1104,7 +1092,7 @@ async function executar(intencao, p, dados, chatId) {
       const emAberto  = (rAberto?.content || rAberto?.cobrancas || [])
         .filter(b => b.dataVencimento && b.dataVencimento < dataFim);
       const lista = [...expirados, ...emAberto];
-      if (!lista.length) return '✅ *Boletos vencidos/em aberto (últimos 15 dias)*\n\n_Nenhum boleto vencido ou em aberto no período._';
+      if (!lista.length) return '[ok] *Boletos vencidos/em aberto (últimos 15 dias)*\n\n_Nenhum boleto vencido ou em aberto no período._';
 
       // Cruzar com alunos pelo nome do pagador ou valor
       const linhas = lista.map(b => {
@@ -1120,11 +1108,11 @@ async function executar(intencao, p, dados, chatId) {
           if (al) nomeAluno = al.nome.split(' ').slice(0,2).join(' ');
         }
         const diasAtraso = Math.round((new Date() - new Date(b.dataVencimento)) / 86400000);
-        return '🔴 ' + venc + ' ' + val + ' — *' + (nomeAluno||'?') + '*' + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '');
+        return '[inativo] ' + venc + ' ' + val + ' - *' + (nomeAluno||'?') + '*' + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '');
       }).join('\n');
 
-      return '🔴 *Boletos vencidos/em aberto (últimos 15 dias)*\n\n' + linhas + '\n\n_Total: ' + lista.length + ' boleto(s) — R$ ' + brl(lista.reduce((s,b)=>s+(b.valorNominal||0),0)) + '_';
-    } catch(e) { return '❌ Erro boletos Inter: ' + e.message; }
+      return '[inativo] *Boletos vencidos/em aberto (últimos 15 dias)*\n\n' + linhas + '\n\n_Total: ' + lista.length + ' boleto(s) - R$ ' + brl(lista.reduce((s,b)=>s+(b.valorNominal||0),0)) + '_';
+    } catch(e) { return '[erro] Erro boletos Inter: ' + e.message; }
   }
 
   if (intencao === 'inter_boletos') {
@@ -1135,17 +1123,17 @@ async function executar(intencao, p, dados, chatId) {
       const situacao = p?.situacao || null;
       const result = await interCobranças(situacao, dataInicio, dataFim);
       const lista = result?.content || result?.cobrancas || [];
-      if (!lista.length) return '📋 *Boletos Inter*\n\n_Nenhuma cobrança encontrada no período_';
+      if (!lista.length) return '[lista] *Boletos Inter*\n\n_Nenhuma cobrança encontrada no período_';
       const linhas = lista.slice(0,15).map(b => {
-        const status = b.situacao === 'PAGO' ? '✅' : b.situacao === 'CANCELADO' ? '❌' : '⏳';
+        const status = b.situacao === 'PAGO' ? '[ok]' : b.situacao === 'CANCELADO' ? '[erro]' : '⏳';
         const val = brl(b.valorNominal || 0);
         const nome = (b.pagador?.nome || '').split(' ').slice(0,2).join(' ');
         const venc = (b.dataVencimento||''). split('-').reverse().join('/');
-        return status + ' ' + venc + ' ' + val + ' — ' + nome;
+        return status + ' ' + venc + ' ' + val + ' - ' + nome;
       }).join('\n');
-      return '📋 *Boletos Inter* (' + situacao||'todos' + ')\n\n' + linhas +
+      return '[lista] *Boletos Inter* (' + situacao||'todos' + ')\n\n' + linhas +
         (lista.length > 15 ? '\n\n_...e mais ' + lista.length-15 + '_' : '');
-    } catch(e) { return '❌ Erro boletos Inter: ' + e.message; }
+    } catch(e) { return '[erro] Erro boletos Inter: ' + e.message; }
   }
 
   if (intencao === 'inter_emitir_boleto') {
@@ -1153,11 +1141,11 @@ async function executar(intencao, p, dados, chatId) {
       (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno) return '[erro] Aluno não encontrado: "' + p?.aluno_nome + '".';
     const hoje = new Date();
     const venc = p?.vencimento || new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10).toISOString().slice(0,10);
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
-    if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir o boleto.';
+    if (!cpf) return '[aviso] *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir o boleto.';
     // Calcular valor automaticamente
     const _pendB = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
     const _pagsB = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
@@ -1169,7 +1157,7 @@ async function executar(intencao, p, dados, chatId) {
       aluno.valor_referencia || 0;
     if (!valorBoleto) {
       ctx[chatId] = { intencao: 'inter_emitir_boleto', aluno_id: aluno.id, aluno_nome: aluno.nome, aguardando: 'valor', mes };
-      return '⚠️ Não encontrei o valor do plano de *' + aluno.nome.split(' ')[0] + '*.\nQual o valor? (ex: 329)';
+      return '[aviso] Não encontrei o valor do plano de *' + aluno.nome.split(' ')[0] + '*.\nQual o valor? (ex: 329)';
     }
     try {
       const result = await interEmitirBoleto({
@@ -1182,7 +1170,7 @@ async function executar(intencao, p, dados, chatId) {
         cep: aluno.cep ? aluno.cep.replace(/\D/g,'').slice(0,8) : '20000000',
         numero: aluno.numero || 'S/N',
         complemento: (aluno.complemento && aluno.complemento !== 'null') ? aluno.complemento : undefined,
-        descricao: 'Mensalidade Pilates LCA Studio — ' + aluno.nome.split(' ')[0],
+        descricao: 'Mensalidade Pilates LCA Studio - ' + aluno.nome.split(' ')[0],
         referencia: new Date().toLocaleDateString('pt-BR'),
         seuNumero: 'LCA-' + aluno.id + '-' + mes
       });
@@ -1194,7 +1182,7 @@ async function executar(intencao, p, dados, chatId) {
         const mesNomeAvulso = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt(mes.slice(5,7))-1];
         const anoAvulso = mes.slice(0,4);
         const nomeArq = 'Boleto - ' + aluno.nome.split(' ')[0] + ' - ' + mesNomeAvulso + ' ' + anoAvulso + '.pdf';
-        const caption = '✅ *Boleto emitido!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(p.valor) + '\n📅 Vencimento: ' + venc.split('-').reverse().join('/') + '\n🔑 Código: ' + cod;
+        const caption = '[ok] *Boleto emitido!*\n\n[aluno] ' + aluno.nome + '\n[R$] ' + brl(p.valor) + '\n[calendario] Vencimento: ' + venc.split('-').reverse().join('/') + '\n🔑 Código: ' + cod;
         if (link) {
           try {
             await tgSendPDF(chatId, link, nomeArq, caption);
@@ -1206,25 +1194,21 @@ async function executar(intencao, p, dados, chatId) {
         return caption + (link ? '\n\n[Visualizar boleto](' + link + ')' : '') +
           '\n\n_Use "confirmar pagamento ' + aluno.nome.split(' ')[0] + '" quando pagar._';
       }
-      return '⚠️ Resposta: ' + JSON.stringify(result).slice(0,200);
-    } catch(e) { return '❌ Erro emissão boleto: ' + e.message; }
+      return '[aviso] Resposta: ' + JSON.stringify(result).slice(0,200);
+    } catch(e) { return '[erro] Erro emissão boleto: ' + e.message; }
   }
-
-
-
-
 
 function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   const primeiroNome = aluno.nome.split(' ')[0];
   const vezes = aluno.vezes_semana || 2;
-  return 'Olá, ' + primeiroNome + '! 😊\n\n' +
+  return 'Olá, ' + primeiroNome + '! :)\n\n' +
     'Seguem os boletos referentes ao seu plano semestral no LCA Studio de Pilates.\n\n' +
-    '📋 *Plano ' + planoLabel + ' — ' + vezes + 'x por semana*\n' +
-    '📅 *Validade: ' + periodoPlano + '*\n' +
-    '💰 *' + brl(valor) + '/mês*\n\n' +
+    '[lista] *Plano ' + planoLabel + ' - ' + vezes + 'x por semana*\n' +
+    '[calendario] *Validade: ' + periodoPlano + '*\n' +
+    '[R$] *' + brl(valor) + '/mês*\n\n' +
     'Os boletos vencem todo dia ' + diaVenc + ' de cada mês. ' +
     'Você também pode pagar via Pix utilizando o QR Code impresso em cada boleto.\n\n' +
-    'Qualquer dúvida, estamos à disposição! 🌿\nLCA Studio de Pilates';
+    'Qualquer dúvida, estamos à disposição! [planta]\nLCA Studio de Pilates';
 }
 
   if (intencao === 'inter_emitir_plano') {
@@ -1232,9 +1216,9 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno) return '[erro] Aluno não encontrado: "' + p?.aluno_nome + '".';
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
-    if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir boletos.';
+    if (!cpf) return '[aviso] *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir boletos.';
 
     const DURACAO = { mensal:1, trimestral:3, semestral:6 };
     const plano = aluno.tipo_plano || 'mensal';
@@ -1253,7 +1237,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     if (!valorAuto) {
       // Salvar contexto e pedir valor
       ctx[chatId] = { intencao: 'inter_emitir_plano', aluno_id: aluno.id, aluno_nome: aluno.nome, aguardando: 'valor', mes };
-      return '⚠️ Não encontrei o valor do plano de *' + aluno.nome.split(' ')[0] + '*.\nQual o valor mensal? (ex: 329)';
+      return '[aviso] Não encontrei o valor do plano de *' + aluno.nome.split(' ')[0] + '*.\nQual o valor mensal? (ex: 329)';
     }
     const valor = valorAuto;
 
@@ -1292,7 +1276,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       const hojeDate = new Date(); hojeDate.setHours(0,0,0,0);
       if (dtVenc < hojeDate) {
         dtVenc = new Date(hojeDate.getTime() + 24*60*60*1000);
-        console.log('[PLANO] Boleto ' + i+1 + ': data ' + new Date(anoBase, mesBase + i, diaVenc).toISOString().slice(0,10) + ' já passou — usando ' + dtVenc.toISOString().slice(0,10));
+        console.log('[PLANO] Boleto ' + i+1 + ': data ' + new Date(anoBase, mesBase + i, diaVenc).toISOString().slice(0,10) + ' já passou - usando ' + dtVenc.toISOString().slice(0,10));
       }
       const anoVenc = dtVenc.getFullYear();
       const mesVenc = String(dtVenc.getMonth()+1).padStart(2,'0');
@@ -1330,24 +1314,24 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         if (link) {
           try {
             await tgSendPDF(chatId,link, nomeArq,
-              '📄 Boleto ' + numBoleto + '/' + dur + ' — ' + mesNome + ' ' + anoVenc + ' | vence ' + fmtData(dtVenc) + ' | ' + brl(valor));
+              '[documento] Boleto ' + numBoleto + '/' + dur + ' - ' + mesNome + ' ' + anoVenc + ' | vence ' + fmtData(dtVenc) + ' | ' + brl(valor));
           } catch(ePdf) {
             console.error('[PDF plano ' + numBoleto + ']', ePdf.message);
-            resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* — vence ' + fmtData(dtVenc) + ' — [ver](' + link + ')');
+            resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - [ver](' + link + ')');
           }
         } else {
-          resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* — vence ' + fmtData(dtVenc) + ' — cod: ' + cod);
+          resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - cod: ' + cod);
         }
       } catch(e) {
-        resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* — ❌ ' + e.message.slice(0,60));
+        resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - [erro] ' + e.message.slice(0,60));
         erros++;
       }
       if (i < dur - 1) await new Promise(r => setTimeout(r, 800));
     }
 
-    const status = erros === 0 ? '✅' : erros === dur ? '❌' : '⚠️';
-    const resumo = status + ' *Plano ' + planoLabel + ' — ' + aluno.nome.split(' ')[0] + '*\n' +
-      '📋 ' + periodoPlano + '\n💰 ' + brl(valor) + '/mês × ' + dur + ' boletos' +
+    const status = erros === 0 ? '[ok]' : erros === dur ? '[erro]' : '[aviso]';
+    const resumo = status + ' *Plano ' + planoLabel + ' - ' + aluno.nome.split(' ')[0] + '*\n' +
+      '[lista] ' + periodoPlano + '\n[R$] ' + brl(valor) + '/mês × ' + dur + ' boletos' +
       (resultados.length ? '\n\n' + resultados.join('\n') : '') +
       (erros === 0 ? '\n\n_Baixa automática via webhook quando pagos._' : '');
     // Enviar mensagem para copiar no WhatsApp
@@ -1358,13 +1342,12 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     return resumo;
   }
 
-
   if (intencao === 'confirmar_cheque') {
     const aluno = dados.alunos.find(a =>
       (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
-    if (!aluno) return '❌ Informe o nome do aluno.\nEx: _"cheque compensou Ana"_';
+    if (!aluno) return '[erro] Informe o nome do aluno.\nEx: _"cheque compensou Ana"_';
     const mes = p?.mes || new Date().toISOString().slice(0,7);
     const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
     // Verificar se há cheque pendente
@@ -1376,10 +1359,10 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
     pags[mes] = val;
     delete pend[mes];
-    const histNovo = [...hist, { data: new Date().toLocaleDateString('pt-BR'), tipo: 'cheque_compensado', desc: 'Cheque compensado — ' + mes + ' — ' + brl(val) }];
+    const histNovo = [...hist, { data: new Date().toLocaleDateString('pt-BR'), tipo: 'cheque_compensado', desc: 'Cheque compensado - ' + mes + ' - ' + brl(val) }];
     await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: histNovo });
-    await logOp('cheque_compensado', aluno.nome + ' — ' + mes, aluno.id, val, mes);
-    return '✅ *Cheque compensado!*\n\n👤 ' + aluno.nome.split(' ')[0] + '\n💰 ' + brl(val) + '\n📅 ' + mes + '\n\n_Pagamento confirmado no sistema._';
+    await logOp('cheque_compensado', aluno.nome + ' - ' + mes, aluno.id, val, mes);
+    return '[ok] *Cheque compensado!*\n\n[aluno] ' + aluno.nome.split(' ')[0] + '\n[R$] ' + brl(val) + '\n[calendario] ' + mes + '\n\n_Pagamento confirmado no sistema._';
   }
 
   if (intencao === 'inter_reenviar_boletos') {
@@ -1387,7 +1370,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
-    if (!aluno) return '❌ Informe o nome do aluno.\nEx: _"reenviar boletos Thalita"_';
+    if (!aluno) return '[erro] Informe o nome do aluno.\nEx: _"reenviar boletos Thalita"_';
     try {
       // Buscar na tabela boletos local
       const r = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&select=id,mes,valor,codigo_solicitacao,vencimento,status&order=mes.asc');
@@ -1397,7 +1380,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       if (!boletos.length) {
         const total = r?.data?.length || 0;
         if (total > 0) return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + total + ' boleto(s) na tabela mas nenhum com status "aberto".\nStatus encontrados: ' + [...new Set((r?.data||[]).map(b=>b.status))].join(', ');
-        // Sem nenhum registro — buscar na API Inter
+        // Sem nenhum registro - buscar na API Inter
         await tgSend(chatId, '🔍 Buscando boletos na API Inter para *' + aluno.nome.split(' ')[0] + '*...');
         const hoje = new Date();
         const dataFim = new Date(hoje.getFullYear(), hoje.getMonth() + 6, 30).toISOString().slice(0,10);
@@ -1445,7 +1428,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           const mesNome = MESES_PT2[parseInt((b.mes||'').slice(5,7))-1] || b.mes;
           const vencFmt = (b.vencimento||'').split('-').reverse().join('/');
           const nomeArq = 'Boleto - ' + mesNome + ' - ' + aluno.nome.split(' ')[0] + '.pdf';
-          const caption = '📄 *' + mesNome + '* | vence ' + vencFmt + ' | ' + brl(b.valor||0);
+          const caption = '[documento] *' + mesNome + '* | vence ' + vencFmt + ' | ' + brl(b.valor||0);
           if (link) {
             if (link.startsWith('data:application/pdf;base64,')) {
               const pdfBuffer = Buffer.from(link.replace('data:application/pdf;base64,', ''), 'base64');
@@ -1455,11 +1438,11 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
             }
             enviados++;
           } else {
-            await tgSend(chatId, '⚠️ ' + mesNome + ': link não disponível');
+            await tgSend(chatId, '[aviso] ' + mesNome + ': link não disponível');
           }
           if (boletos.length > 1) await new Promise(r => setTimeout(r, 600));
         } catch(eBol) {
-          await tgSend(chatId, '❌ Erro ' + b.mes + ': ' + eBol.message.slice(0,60));
+          await tgSend(chatId, '[erro] Erro ' + b.mes + ': ' + eBol.message.slice(0,60));
         }
       }
       // Enviar mensagem para copiar no WhatsApp
@@ -1475,8 +1458,8 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         await tgSend(chatId, '✂️ *Copie a mensagem abaixo e envie no WhatsApp da aluna:*');
         await tgSend(chatId, msgWhatsApp(aluno, planoLabelR, periodoR, boletos[0]?.valor||0, aluno.dia_vencimento||10));
       }
-      return enviados > 0 ? null : '⚠️ Não foi possível reenviar. Tente emitir novamente.';
-    } catch(e) { return '❌ Erro: ' + e.message; }
+      return enviados > 0 ? null : '[aviso] Não foi possível reenviar. Tente emitir novamente.';
+    } catch(e) { return '[erro] Erro: ' + e.message; }
   }
 
   if (intencao === 'inter_cancelar_boleto') {
@@ -1484,7 +1467,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno) return '[erro] Aluno não encontrado: "' + p?.aluno_nome + '".';
     const mes = p?.mes || new Date().toISOString().slice(0,7);
     try {
       const r = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&mes=eq.' + mes + '&status=eq.aberto&select=id,codigo_solicitacao,valor,vencimento');
@@ -1496,17 +1479,17 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
         cancelados++;
       }
-      return '✅ *' + cancelados + ' boleto(s) cancelado(s) no Inter!*\n\n👤 ' + aluno.nome + '\n📅 Mês: ' + mes + '\n\n_Pagamento recebido por outro meio._';
+      return '[ok] *' + cancelados + ' boleto(s) cancelado(s) no Inter!*\n\n[aluno] ' + aluno.nome + '\n[calendario] Mês: ' + mes + '\n\n_Pagamento recebido por outro meio._';
     } catch(e) {
-      return '❌ Erro ao cancelar boleto: ' + e.message;
+      return '[erro] Erro ao cancelar boleto: ' + e.message;
     }
   }
 
   if (intencao === 'calcular_rescisao') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
-    if (aluno.tipo_plano === 'mensal') return '⚠️ ' + aluno.nome + ' tem plano mensal — não há multa de rescisão. Basta inativar.';
+    if (!aluno) return '[erro] Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (aluno.tipo_plano === 'mensal') return '[aviso] ' + aluno.nome + ' tem plano mensal - não há multa de rescisão. Basta inativar.';
     const DUR = { trimestral:3, semestral:6 };
     const dur = DUR[aluno.tipo_plano]||3;
     const pags = Object.entries(typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{})
@@ -1522,7 +1505,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const diferenca  = deveria - pagosPlanoAtual;
     const multa      = valorMensal * 0.20 * mNaoUsados;
     const saldo      = diferenca + multa;
-    return '📋 *Rescisão — ' + aluno.nome + '*\n\n' +
+    return '[lista] *Rescisão - ' + aluno.nome + '*\n\n' +
       'Plano: ' + aluno.tipo_plano + ' (' + dur + ' meses)\n' +
       'Valor mensal ref.: ' + brl(valorMensal) + '\n' +
       'Meses utilizados: ' + mUsados + ' | Não usados: ' + mNaoUsados + '\n\n' +
@@ -1538,17 +1521,15 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   return null;
 }
 
-// ── Pendentes (só rescisão) ───────────────────────────────────────
 const pendente = {};
 
-// ── Processar mensagem ────────────────────────────────────────────
 async function processar(msg) {
   const chatId   = msg.chat.id;
   const username = (msg.from.username||'').toLowerCase();
   const texto    = (msg.text||'').trim();
 
   // Segurança
-  if (ALLOWED_USER && username !== ALLOWED_USER) return tgSend(chatId, '🔒 Acesso não autorizado.');
+  if (ALLOWED_USER && username !== ALLOWED_USER) return tgSend(chatId, '[bloqueado] Acesso não autorizado.');
 
   // Ignorar mensagens antigas (>60s)
   if ((Math.floor(Date.now()/1000) - (msg.date||0)) > 60) return;
@@ -1559,13 +1540,13 @@ async function processar(msg) {
     delete pendente[chatId];
     if (['sim','confirmar','ok','s'].includes(texto.toLowerCase())) {
       if (!conf.calc) {
-        return tgSend(chatId, '⚠️ Não há cálculo de rescisão para lançar. Refaça o pedido.');
+        return tgSend(chatId, '[aviso] Não há cálculo de rescisão para lançar. Refaça o pedido.');
       }
       try {
         // Buscar o aluno atual no banco
         const ra = await sbGet('alunos', 'id=eq.' + conf.calc.aluno_id + '&select=*');
         const aluno = Array.isArray(ra) && ra[0];
-        if (!aluno) return tgSend(chatId, '❌ Aluno não encontrado no banco.');
+        if (!aluno) return tgSend(chatId, '[erro] Aluno não encontrado no banco.');
 
         const hoje = new Date();
         const hojeStr = hoje.toISOString().slice(0,10);
@@ -1623,15 +1604,15 @@ async function processar(msg) {
           historico: histTxt
         });
 
-        const saldoMsg = conf.calc.saldo > 0.01 ? '\n💰 Saldo a receber lançado: ' + brl(conf.calc.saldo) :
-          conf.calc.saldo < -0.01 ? '\n↩️ Saldo a restituir: ' + brl(Math.abs(conf.calc.saldo)) : '\n✅ Quitado';
-        return tgSend(chatId, '✅ *Rescisão ' + numeroResc + ' lançada!*\n\n*' + aluno.nome + '* marcado como inativo.' + saldoMsg + '\n\n_Emita o termo formal pelo sistema web (botão Rescindir → 2ª via)._');
+        const saldoMsg = conf.calc.saldo > 0.01 ? '\n[R$] Saldo a receber lançado: ' + brl(conf.calc.saldo) :
+          conf.calc.saldo < -0.01 ? '\n[repos]️ Saldo a restituir: ' + brl(Math.abs(conf.calc.saldo)) : '\n[ok] Quitado';
+        return tgSend(chatId, '[ok] *Rescisão ' + numeroResc + ' lançada!*\n\n*' + aluno.nome + '* marcado como inativo.' + saldoMsg + '\n\n_Emita o termo formal pelo sistema web (botão Rescindir → 2ª via)._');
       } catch(e) {
         console.error('Lançamento rescisão erro:', e.message);
-        return tgSend(chatId, '❌ Erro ao lançar rescisão: '+e.message+'\nTente pelo sistema web.');
+        return tgSend(chatId, '[erro] Erro ao lançar rescisão: '+e.message+'\nTente pelo sistema web.');
       }
     }
-    return tgSend(chatId, '❌ Rescisão cancelada.');
+    return tgSend(chatId, '[erro] Rescisão cancelada.');
   }
 
   await tgSend(chatId, '⏳ Processando...');
@@ -1645,20 +1626,20 @@ async function processar(msg) {
   if (!_mesMatch) { var _mm = _tL.match(/(\d{2})\/(\d{4})/); if (_mm) _mesMatch = _mm[2]+'-'+_mm[1]; }
   if (!_mesMatch) { var _mm2 = _tL.match(/(\d{4})-(\d{2})/); if (_mm2) _mesMatch = _mm2[0]; }
   const mes = _mesMatch || new Date().toISOString().slice(0,7);
-  // Timeout geral — responde se demorar mais de 45s
+  // Timeout geral - responde se demorar mais de 45s
   let _timedOut = false;
   const _timer = setTimeout(() => {
     _timedOut = true;
     // Limpar contexto pendente para evitar que a próxima mensagem seja interpretada como valor
     if (ctx[chatId]) delete ctx[chatId];
     // Só envia aviso se ainda não respondeu
-    if (!_respondeu) tgSend(chatId, '⚠️ Demorou mais que o esperado. Tente novamente em alguns segundos.');
+    if (!_respondeu) tgSend(chatId, '[aviso] Demorou mais que o esperado. Tente novamente em alguns segundos.');
   }, 45000);
   let _respondeu = false;
 
   let dados;
   try { dados = await getDados(); }
-  catch(e) { return tgSend(chatId, '❌ Erro ao conectar ao banco: '+e.message); }
+  catch(e) { return tgSend(chatId, '[erro] Erro ao conectar ao banco: '+e.message); }
 
   // Restaurar contexto anterior se mensagem for só um número (valor)
   if (/^\d+([.,]\d+)?$/.test(texto.trim()) && ctx[chatId]) {
@@ -1672,7 +1653,7 @@ async function processar(msg) {
         _respondeu = true;
         const resultado = await executar(c.intencao, { aluno_id: c.aluno_id, aluno_nome: c.aluno_nome, valor: valorInformado, mes: c.mes }, dados, chatId);
         if (resultado === null) return;
-        return tgSend(chatId, resultado || '❌ Erro ao executar.');
+        return tgSend(chatId, resultado || '[erro] Erro ao executar.');
       }
     }
   }
@@ -1687,36 +1668,36 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.14*\n\n' +
+      '[oi] *LCA Studio Bot v4.14*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
-      '*📊 Consultas:*\n' +
-      '• _"quem não pagou maio?"_\n' +
-      '• _"quem tem plano vencendo?"_\n' +
-      '• _"resumo financeiro de maio"_\n' +
-      '• _"qual aluna falta mais?"_\n\n' +
-      '*💰 Lançamentos:*\n' +
-      '• _"custo aluguel 3700 junho"_\n' +
-      '• _"kelly deu 2 aulas hoje"_\n' +
-      '• _"Ana Lima pagou 329"_\n\n' +
-      '*✅ Check-in de aula:*\n' +
-      '• _"Luiza presente terça 09:00"_ — marcar presença\n' +
-      '• _"Ana faltou hoje 07:00"_ — registrar falta\n' +
-      '• _"Maria repôs quinta 10:00"_ — registrar reposição\n\n' +
-      '*↩️ Desfazer:*\n' +
-      '• _"apagar custo aluguel 2026-05"_\n' +
-      '• _"desfazer pagamento Ana maio"_\n' +
-      '• _"remover aula kelly"_\n' +
-      '• _"saldo da conta"_ — saldo Banco Inter\n' +
-      '• _"extrato de hoje"_ / _"extrato do mês"_ — extrato Inter\n' +
-      '• _"boletos em aberto"_ / _"boletos pagos este mês"_ — cobranças\n' +
-      '• _"emitir boleto Ana R$ 329 vence dia 10"_ — emitir 1 boleto avulso\n' +
-      '• _"emitir plano Ana"_ — emitir todos os boletos do plano de uma vez (trimestral=3, semestral=6)\n\n' +
-      '*📋 Rescisão:*\n' +
-      '• _"Mara quer rescindir, semestral, pagou 3 meses"_'
+      '*[grafico] Consultas:*\n' +
+      '- _"quem não pagou maio?"_\n' +
+      '- _"quem tem plano vencendo?"_\n' +
+      '- _"resumo financeiro de maio"_\n' +
+      '- _"qual aluna falta mais?"_\n\n' +
+      '*[R$] Lançamentos:*\n' +
+      '- _"custo aluguel 3700 junho"_\n' +
+      '- _"kelly deu 2 aulas hoje"_\n' +
+      '- _"Ana Lima pagou 329"_\n\n' +
+      '*[ok] Check-in de aula:*\n' +
+      '- _"Luiza presente terça 09:00"_ - marcar presença\n' +
+      '- _"Ana faltou hoje 07:00"_ - registrar falta\n' +
+      '- _"Maria repôs quinta 10:00"_ - registrar reposição\n\n' +
+      '*[repos]️ Desfazer:*\n' +
+      '- _"apagar custo aluguel 2026-05"_\n' +
+      '- _"desfazer pagamento Ana maio"_\n' +
+      '- _"remover aula kelly"_\n' +
+      '- _"saldo da conta"_ - saldo Banco Inter\n' +
+      '- _"extrato de hoje"_ / _"extrato do mês"_ - extrato Inter\n' +
+      '- _"boletos em aberto"_ / _"boletos pagos este mês"_ - cobranças\n' +
+      '- _"emitir boleto Ana R$ 329 vence dia 10"_ - emitir 1 boleto avulso\n' +
+      '- _"emitir plano Ana"_ - emitir todos os boletos do plano de uma vez (trimestral=3, semestral=6)\n\n' +
+      '*[lista] Rescisão:*\n' +
+      '- _"Mara quer rescindir, semestral, pagou 3 meses"_'
     );
   }
 
-  // Consultas diretas — sem IA, resposta imediata
+  // Consultas diretas - sem IA, resposta imediata
   if (aiResult.tipo === 'consulta_direta') {
     clearTimeout(_timer);
     const tL3 = texto.toLowerCase();
@@ -1728,33 +1709,33 @@ async function processar(msg) {
         return !(pags[mes]||0);
       });
       resp3 = inads.length
-        ? '*Inadimplentes em '+mes+' ('+inads.length+'):*\n' + inads.map(a=>'• '+a.nome+' ('+a.tipo_plano+')').join('\n')
-        : '✅ Todos os alunos pagaram em '+mes+'.';
+        ? '*Inadimplentes em '+mes+' ('+inads.length+'):*\n' + inads.map(a=>'- '+a.nome+' ('+a.tipo_plano+')').join('\n')
+        : '[ok] Todos os alunos pagaram em '+mes+'.';
     } else if (aiResult.intencao === 'consulta_financeiro') {
       const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});var pr=typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});return s+(p[mes]||0)-(pr[mes]||0);},0);
       const cst = dados.custos.filter(function(c){return c.mes===mes;}).reduce(function(s,c){return s+(c.valor||0);},0);
-      resp3 = '*Resumo '+mes+':*\n💰 Receita: '+brl(rec)+'\n🔴 Custos: '+brl(cst)+'\n📈 Bruto: '+brl(rec-cst);
+      resp3 = '*Resumo '+mes+':*\n[R$] Receita: '+brl(rec)+'\n[inativo] Custos: '+brl(cst)+'\n[alta] Bruto: '+brl(rec-cst);
     } else if (aiResult.intencao === 'consulta_vencendo') {
       const pv = dados._planosVencendo || [];
       resp3 = pv.length
-        ? '*Planos vencendo (próx. 30 dias):*\n' + pv.map(p=>'• '+p.nome+' — '+p.plano+', dia '+p.diaVenc+'/'+p.mesVenc+' ('+p.dias+' dias)').join('\n')
+        ? '*Planos vencendo (próx. 30 dias):*\n' + pv.map(p=>'- '+p.nome+' - '+p.plano+', dia '+p.diaVenc+'/'+p.mesVenc+' ('+p.dias+' dias)').join('\n')
         : 'Nenhum plano vencendo nos próximos 30 dias.';
     }
-    _respondeu=true; return tgSend(chatId, resp3 || '❌ Sem dados.');
+    _respondeu=true; return tgSend(chatId, resp3 || '[erro] Sem dados.');
   }
 
-  // Consulta livre — IA respondeu direto ou fallback estruturado
+  // Consulta livre - IA respondeu direto ou fallback estruturado
   if (aiResult.tipo === 'consulta') {
     clearTimeout(_timer);
     if (aiResult.resposta) return tgSend(chatId, aiResult.resposta);
-    // Fallback estruturado — sem IA
+    // Fallback estruturado - sem IA
     try {
       const tL2 = texto.toLowerCase();
       let fallback = '';
       if (tL2.includes('venc') || tL2.includes('plano')) {
         const pv = (dados._planosVencendo || []);
         fallback = pv.length
-          ? '*Planos vencendo (próx. 30 dias):*\n' + pv.map(p=>'• '+p.nome+' — '+p.plano+', vence '+p.dataVenc+' ('+p.dias+' dias)').join('\n')
+          ? '*Planos vencendo (próx. 30 dias):*\n' + pv.map(p=>'- '+p.nome+' - '+p.plano+', vence '+p.dataVenc+' ('+p.dias+' dias)').join('\n')
           : 'Nenhum plano vencendo nos próximos 30 dias.';
       } else if (tL2.includes('inadim') || tL2.includes('pagou')) {
         const mesAtual = mes;
@@ -1764,26 +1745,26 @@ async function processar(msg) {
           return !pags[mesAtual];
         });
         fallback = inads.length
-          ? '*Inadimplentes em '+mesAtual+':*\n' + inads.map(a=>'• '+a.nome+' ('+a.tipo_plano+')').join('\n')
-          : '✅ Todos pagaram em '+mesAtual+'.';
+          ? '*Inadimplentes em '+mesAtual+':*\n' + inads.map(a=>'- '+a.nome+' ('+a.tipo_plano+')').join('\n')
+          : '[ok] Todos pagaram em '+mesAtual+'.';
       } else if (tL2.includes('result') || tL2.includes('resumo') || tL2.includes('financ')) {
         const mesRes = _mesMatch || mes; // usa mês extraído do texto
         const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});var pr=typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});return s+(p[mesRes]||0)-(pr[mesRes]||0);},0);
         const cst = dados.custos.filter(function(c){return c.mes===mesRes;}).reduce(function(s,c){return s+(c.valor||0);},0);
         const resultado = rec - cst;
-        const resIcon = resultado >= 0 ? '📈 *Resultado: +' : '📉 *Resultado: ';
-        fallback = '*Resumo ' + mesRes + ':*\n💰 Receita: ' + brl(rec) + '\n🔴 Custos: ' + brl(cst) + '\n' + resIcon + brl(Math.abs(resultado)) + '*' + (resultado < 0 ? ' ⚠️ NEGATIVO' : '');
+        const resIcon = resultado >= 0 ? '[alta] *Resultado: +' : '[baixa] *Resultado: ';
+        fallback = '*Resumo ' + mesRes + ':*\n[R$] Receita: ' + brl(rec) + '\n[inativo] Custos: ' + brl(cst) + '\n' + resIcon + brl(Math.abs(resultado)) + '*' + (resultado < 0 ? ' [aviso] NEGATIVO' : '');
       } else {
-        fallback = '⚠️ Gemini indisponível. Tente em 1 minuto.\nOu use comandos diretos — mande *ajuda*.';
+        fallback = '[aviso] Gemini indisponível. Tente em 1 minuto.\nOu use comandos diretos - mande *ajuda*.';
       }
       _respondeu=true; return tgSend(chatId, fallback);
     } catch(err) {
       console.error('Fallback erro:', err.message);
-      _respondeu=true; return tgSend(chatId, '⚠️ Gemini indisponível agora. Tente novamente em 1 minuto.');
+      _respondeu=true; return tgSend(chatId, '[aviso] Gemini indisponível agora. Tente novamente em 1 minuto.');
     }
   }
 
-  // Ação — params já vêm da IA
+  // Ação - params já vêm da IA
   const intencao = aiResult.intencao || 'desconhecido';
   if (!intencao || intencao === 'desconhecido') {
     clearTimeout(_timer);
@@ -1827,11 +1808,9 @@ async function processar(msg) {
   if (_timedOut) return;
   _respondeu=true;
   if (resultado === null) return; // PDF já enviado diretamente
-  return tgSend(chatId, resultado || '❌ Não consegui executar a ação.');
+  return tgSend(chatId, resultado || '[erro] Não consegui executar a ação.');
 }
 
-// ── Loop principal ────────────────────────────────────────────────
-// ── Rotina diária de aniversariantes ─────────────────────────────────────────
 async function enviarAniversariantesHoje() {
   try {
     const dados = await getDados();
@@ -1853,29 +1832,29 @@ async function enviarAniversariantesHoje() {
       const ola = fem ? 'a' : 'o';
       const bem = fem ? 'bem-vinda' : 'bem-vindo';
       const tel = a.telefone ? a.telefone.replace(/[^0-9]/g,'') : '';
-      const telInfo = tel ? '📱 55' + tel : '📵 sem telefone';
-      const status = ativo ? '🟢 Ativa(o)' : '🔴 Inativa(o)';
+      const telInfo = tel ? '[tel] 55' + tel : '[sem tel] sem telefone';
+      const status = ativo ? '[ativo] Ativa(o)' : '[inativo] Inativa(o)';
 
       let msg;
       if (ativo) {
-        msg = '🎂 Feliz aniversário, ' + nome1 + '!\n\n' +
+        msg = '[aniversario] Feliz aniversário, ' + nome1 + '!\n\n' +
           'Que este novo ano de vida seja repleto de saúde, alegria e muita energia! ' +
           'É uma alegria enorme tê-l' + ola + ' aqui no LCA, cuidando do seu corpo e da sua qualidade de vida com tanto carinho e dedicação.\n\n' +
-          'Que os próximos anos sejam cada vez mais leves — no movimento e no coração. 💛\n\n' +
+          'Que os próximos anos sejam cada vez mais leves - no movimento e no coração. [coracao]\n\n' +
           'Com carinho, Equipe LCA Studio de Pilates';
       } else {
-        msg = '🎂 Feliz aniversário, ' + nome1 + '!\n\n' +
+        msg = '[aniversario] Feliz aniversário, ' + nome1 + '!\n\n' +
           'Que este novo ano de vida seja cheio de saúde e momentos especiais. ' +
           'Você faz parte da história do LCA e a gente não esquece disso.\n\n' +
-          'E se um dia quiser voltar, será sempre ' + bem + '. 🌿\n\n' +
+          'E se um dia quiser voltar, será sempre ' + bem + '. [planta]\n\n' +
           'Com carinho, Equipe LCA Studio de Pilates';
       }
 
-      return '👤 *' + a.nome + '* — ' + status + '\n' + telInfo + '\n\n📋 *Mensagem para copiar:*\n```\n' + msg + '\n```';
+      return '[aluno] *' + a.nome + '* - ' + status + '\n' + telInfo + '\n\n[lista] *Mensagem para copiar:*\n```\n' + msg + '\n```';
     });
 
-    const cabecalho = '🎂 *Aniversariantes de hoje (' + dh + '/' + mh + '):*\n\n';
-    // Telegram tem limite de 4096 chars — enviar uma mensagem por aniversariante se necessário
+    const cabecalho = '[aniversario] *Aniversariantes de hoje (' + dh + '/' + mh + '):*\n\n';
+    // Telegram tem limite de 4096 chars - enviar uma mensagem por aniversariante se necessário
     for (const linha of linhas) {
       await tgSend(TELEGRAM_CHAT_ID, cabecalho + linha);
     }
@@ -1902,9 +1881,8 @@ function agendarRotinaAniversarios() {
   console.log('Rotina de aniversários agendada (08:00 BRT diariamente)');
 }
 
-
 async function main() {
-  console.log('LCA Bot v4.16 iniciado ✓');
+  console.log('LCA Bot v4.16 iniciado ok');
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -1922,7 +1900,6 @@ async function main() {
       res.writeHead(200, {'Content-Type':'text/plain'});
       res.end('pong');
 
-    // ── Webhook do Banco Inter ──────────────────────────────────────────────
     } else if (req.url === '/webhook-inter' && req.method === 'POST') {
       let body = '';
       req.on('data', chunk => body += chunk);
@@ -1933,4 +1910,142 @@ async function main() {
 
           // Inter envia evento "PAGO" com o seuNumero que gravamos na emissão
           const evento = payload?.evento || payload?.tipo || '';
-          const seuNum = payload?.seuNumero || payload?.co
+          const seuNum = payload?.seuNumero || payload?.cobranca?.seuNumero || '';
+          const valorPago = parseFloat(payload?.valorTotalRecebido || payload?.valor || 0);
+          const dataPag = payload?.dataLiquidacao || payload?.dataPagamento || new Date().toISOString().slice(0,10);
+
+          // seuNumero formato: "LCA-{id}-{mes}" ex: "LCA-96-2026-06"
+          const match = seuNum.match(/^LCA-(\d+)-(\d{4}-\d{2})$/);
+
+          if (match && valorPago > 0 && (evento.includes('PAGO') || evento.includes('LIQUIDADO') || evento === '')) {
+            const alunoId = parseInt(match[1]);
+            const mes = match[2];
+
+            // Carregar dados do Supabase
+            const [rAlunos] = await Promise.all([
+              sbGet('alunos', 'select=id,nome,pagamentos,pagamentos_pendentes,historico_alteracoes&id=eq.' + alunoId)
+            ]);
+            const aluno = rAlunos?.data?.[0];
+
+            if (aluno) {
+              const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{}));
+              let pend = Object.assign({}, typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{}));
+
+              // Só confirmar se ainda não está pago
+              if (!(pags[mes] > 0)) {
+                pags[mes] = valorPago;
+                const tinhaPend = !!pend[mes];
+                if (tinhaPend) delete pend[mes];
+
+                const hist = Array.isArray(aluno.historico_alteracoes) ? [...aluno.historico_alteracoes] : [];
+                hist.push({ data: new Date(dataPag+'T12:00:00').toLocaleDateString('pt-BR'), tipo: 'pagamento_auto',
+                  desc: 'Pagamento ' + mes + ' via boleto Inter (automático): ' + brl(valorPago) });
+
+                const patch = { pagamentos: pags, historico_alteracoes: hist };
+                if (tinhaPend) patch.pagamentos_pendentes = pend;
+                await sbPatch('alunos', 'id=eq.' + alunoId, patch);
+                // Marcar boleto como pago na tabela
+                try {
+                  await sbPatch('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto',
+                    { status: 'pago', pago_em: new Date().toISOString() });
+                } catch(e) { console.error('[webhook] erro ao marcar boleto pago:', e.message); }
+
+                // Notificar via Telegram
+                const chatId = TELEGRAM_CHAT_ID;
+                if (chatId) {
+                  await logOp('boleto_pago_webhook', aluno.nome + ' - ' + mes, alunoId, valorPago, mes, {dataPagamento: dataPag});
+                await tgSend(chatId, '[banco] *Pagamento confirmado automaticamente!*\n\n[aluno] ' + aluno.nome + '\n[R$] ' + brl(valorPago) + '\n[calendario] ' + mes + ' - pago em ' + dataPag.split('-').reverse().join('/') + '\n_Boleto Inter baixado automaticamente._');
+                }
+                console.log('[WEBHOOK-INTER] Pagamento confirmado: aluno ' + alunoId + ' mes ' + mes + ' valor ' + valorPago);
+              } else {
+                console.log('[WEBHOOK-INTER] Pagamento já existe para aluno ' + alunoId + ' mes ' + mes + ' - ignorado');
+              }
+            } else {
+              console.log('[WEBHOOK-INTER] Aluno ' + alunoId + ' não encontrado');
+            }
+          } else {
+            console.log('[WEBHOOK-INTER] Evento ignorado: evento="' + evento + '" seuNum="' + seuNum + '" valor=' + valorPago);
+          }
+        } catch(e) {
+          console.error('[WEBHOOK-INTER] Erro:', e.message);
+        }
+        res.writeHead(200, {'Content-Type':'application/json'});
+        res.end('{"ok":true}');
+      });
+
+    } else if (req.url === '/cadastrar-webhook-inter' && req.method === 'GET') {
+      try {
+        const token = await interGetToken();
+        const webhookUrl = process.env.RENDER_EXTERNAL_URL + '/webhook-inter';
+        const r = await interReq('/cobranca/v3/cobrancas/webhook', 'PUT',
+          { webhookUrl }, token);
+        res.writeHead(200, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({ ok: true, webhookUrl, resposta: r }));
+      } catch(e) {
+        res.writeHead(500, {'Content-Type':'application/json'});
+        res.end(JSON.stringify({ erro: e.message }));
+      }
+
+    } else if (req.url === '/comando' && req.method === 'POST') {
+      // Verificar CORS para o site no Netlify
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        try {
+          const payload = JSON.parse(body);
+          const chatId = payload.chatId || TELEGRAM_CHAT_ID;
+          const comando = payload.comando || '';
+          const alunoId = payload.aluno_id;
+          console.log('[COMANDO SITE]', comando, 'aluno_id:', alunoId);
+          if (!comando) {
+            res.writeHead(400, {'Content-Type':'application/json'});
+            res.end(JSON.stringify({ ok: false, erro: 'comando não informado' }));
+            return;
+          }
+          // Processar como mensagem do Telegram
+          const msgFake = { text: comando, chat: { id: chatId }, from: { username: 'site' } };
+          processar(msgFake).catch(e => console.error('[COMANDO SITE] erro:', e.message));
+          res.writeHead(200, {'Content-Type':'application/json'});
+          res.end(JSON.stringify({ ok: true, mensagem: 'Comando recebido - verifique o Telegram' }));
+        } catch(e) {
+          res.writeHead(400, {'Content-Type':'application/json'});
+          res.end(JSON.stringify({ ok: false, erro: e.message }));
+        }
+      });
+
+    } else if (req.method === 'OPTIONS') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+      res.writeHead(204);
+      res.end();
+    } else {
+      res.writeHead(200, {'Content-Type':'text/plain'});
+      res.end('LCA Bot v4.16 ok - ' + new Date().toLocaleString('pt-BR'));
+    }
+  }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
+  agendarRotinaAniversarios();
+
+  while (true) {
+    try {
+      const res = await tgUpdates(offset);
+      if (res?.result?.length) {
+        for (const upd of res.result) {
+          offset = upd.update_id+1;
+          if (processados[upd.update_id]) continue;
+          processados[upd.update_id] = true;
+          const ids = Object.keys(processados);
+          if (ids.length > 200) delete processados[ids[0]];
+          if (upd.message?.text) processar(upd.message).catch(e => console.error('Erro:', e.message));
+        }
+      }
+    } catch(e) {
+      console.error('Loop error:', e.message);
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+}
+
+main();
