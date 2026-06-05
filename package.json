@@ -1,12 +1,13 @@
 {
-  "name": "lca-studio-bot",
-  "version": "1.0.0",
-  "description": "Bot Telegram para LCA Studio de Pilates",
+  "name": "lca-bot",
+  "version": "4.17",
+  "description": "LCA Studio Pilates Bot — Telegram + Gemini + Supabase + Banco Inter",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "engines": {
-    "node": ">=18"
-  }
+    "node": "20.x"
+  },
+  "dependencies": {}
 }
