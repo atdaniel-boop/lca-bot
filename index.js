@@ -164,7 +164,7 @@ async function interEmitirBoleto(dados) {
 async function interCancelarBoleto(codigoSolicitacao) {
   if (!codigoSolicitacao) return null;
   const token = await interGetToken();
-  const r = await interReq(`/cobranca/v3/cobrancas/${codigoSolicitacao}/cancelar`, 'POST',
+  const r = await interReq('/cobranca/v3/cobrancas/' + codigoSolicitacao + '/cancelar', 'POST',
     { motivoCancelamento: 'PAGAMENTO_EM_OUTRA_FORMA' }, token);
   return r;
 }
@@ -185,13 +185,13 @@ async function gravarBoleto(alunoId, mes, codigoSolicitacao, seuNumero, valor, v
 
 async function cancelarBoletoPorMes(alunoId, mes) {
   try {
-    const r = await sbGet('boletos', `aluno_id=eq.${alunoId}&mes=eq.${mes}&status=eq.aberto&select=id,codigo_solicitacao`);
+    const r = await sbGet('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto&select=id,codigo_solicitacao');
     const boletos = Array.isArray(r) ? r : (r?.data || []);
     for (const b of boletos) {
       if (b.codigo_solicitacao) {
         await interCancelarBoleto(b.codigo_solicitacao);
-        await sbPatch('boletos', `id=eq.${b.id}`, { status: 'cancelado', cancelado_em: new Date().toISOString() });
-        console.log(`[cancelarBoleto] aluno=${alunoId} mes=${mes} cod=${b.codigo_solicitacao}`);
+        await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+        console.log('[cancelarBoleto] aluno=' + alunoId + ' mes=' + mes + ' cod=' + b.codigo_solicitacao);
       }
     }
     return boletos.length;
@@ -225,7 +225,7 @@ function req(url, method, headers, body, timeoutMs) {
 
 // ── Telegram ──────────────────────────────────────────────────────
 function tgSend(chatId, text) {
-  return req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+  return req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
     'POST', { 'Content-Type': 'application/json' },
     { chat_id: chatId, text, parse_mode: 'Markdown' });
 }
@@ -234,20 +234,20 @@ async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption) {
   const boundary = '----TGBoundary' + Date.now();
   const safeFilename = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
   const parts = [
-    `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}`,
-    `--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown`,
-    `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption||''}`,
-    `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${safeFilename}"\r\nContent-Type: application/pdf\r\n\r\n`
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown',
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="caption"\r\n\r\n' + caption||'',
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="document"; filename="' + safeFilename + '"\r\nContent-Type: application/pdf\r\n\r\n'
   ];
   const header = Buffer.from(parts.join('\r\n'));
-  const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const footer = Buffer.from('\r\n--' + boundary + '--\r\n');
   const body = Buffer.concat([header, pdfBuffer, footer]);
   return new Promise((resolve, reject) => {
     const r = require('https').request({
       hostname: 'api.telegram.org', port: 443,
-      path: `/bot${TELEGRAM_TOKEN}/sendDocument`,
+      path: '/bot' + TELEGRAM_TOKEN + '/sendDocument',
       method: 'POST',
-      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
+      headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': body.length }
     }, res => { let d=''; res.on('data',c=>d+=c); res.on('end',()=>{ try{resolve(JSON.parse(d));}catch{resolve(d);} }); });
     r.on('error', reject); r.write(body); r.end();
   });
@@ -285,23 +285,23 @@ async function tgSendPDF(chatId, pdfUrl, filename, caption) {
   const safeFilename = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
 
   const parts = [
-    `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}`,
-    `--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown`,
-    `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption||''}`,
-    `--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${safeFilename}"\r\nContent-Type: application/pdf\r\n\r\n`
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown',
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="caption"\r\n\r\n' + caption||'',
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="document"; filename="' + safeFilename + '"\r\nContent-Type: application/pdf\r\n\r\n'
   ];
 
   const header = Buffer.from(parts.join('\r\n'));
-  const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const footer = Buffer.from('\r\n--' + boundary + '--\r\n');
   const body = Buffer.concat([header, pdfBuffer, footer]);
 
   return new Promise((resolve, reject) => {
     const r = require('https').request({
       hostname: 'api.telegram.org', port: 443,
-      path: `/bot${TELEGRAM_TOKEN}/sendDocument`,
+      path: '/bot' + TELEGRAM_TOKEN + '/sendDocument',
       method: 'POST',
       headers: {
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Type': 'multipart/form-data; boundary=' + boundary,
         'Content-Length': body.length
       }
     }, res => {
@@ -315,7 +315,7 @@ async function tgSendPDF(chatId, pdfUrl, filename, caption) {
   });
 }
 function tgUpdates(offset) {
-  return req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${offset}&timeout=25`, 'GET', {}, null, 35000);
+  return req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=' + offset + '&timeout=25', 'GET', {}, null, 35000);
 }
 
 // ── Supabase ──────────────────────────────────────────────────────
@@ -359,7 +359,7 @@ async function ai(prompt) {
   for (const model of models) {
     try {
       const r = await aiWithTimeout(req(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`,
+        'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + GEMINI_KEY,
         'POST', { 'Content-Type': 'application/json' },
         { contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 800 } },
         8000
@@ -632,23 +632,17 @@ async function processarComIA(texto, dados, mes) {
 
     let resp = '';
     if (anivHoje.length) {
-      resp += `🎂 *Aniversariantes hoje (${dh4}/${mh4}):*
-`;
+      resp += '\uD83C\uDF82 *Aniversariantes hoje (' + dh4 + '/' + mh4 + '):*\n';
       anivHoje.forEach(a => {
-        resp += `• *${a.nome}* — ${a.ativo === 'SIM' ? '🟢 Ativa(o)' : '🔴 Inativa(o)'} — ${a.telefone||'sem telefone'}
-`;
+        resp += '• *' + a.nome + '* \u2014 ' + (a.ativo === 'SIM' ? '\uD83D\uDFE2 Ativa(o)' : '\uD83D\uDD34 Inativa(o)') + ' \u2014 ' + (a.telefone||'sem telefone') + '\n';
       });
     } else {
-      resp += `Nenhum aniversariante hoje (${dh4}/${mh4}).
-`;
+      resp += 'Nenhum aniversariante hoje (' + dh4 + '/' + mh4 + ').\n';
     }
     if (proximos2.length) {
-      resp += `
-📅 *Próximos aniversários:*
-`;
+      resp += '\n\uD83D\uDCC5 *Próximos aniversários:*\n';
       proximos2.forEach(a => {
-        resp += `• *${a.nome}* — ${a.aniversario} (em ${a.df} dias) ${a.ativo ? '🟢' : '🔴'}
-`;
+        resp += '\u2022 *' + a.nome + '* \u2014 ' + a.aniversario + ' (em ' + a.df + ' dias) ' + (a.ativo ? '\uD83D\uDFE2' : '\uD83D\uDD34') + '\n';
       });
     }
     return { tipo: 'consulta', resposta: resp };
@@ -727,45 +721,41 @@ async function processarComIA(texto, dados, mes) {
     if (keys.length) ultimoValor[a.nome] = pags[keys[keys.length-1]];
   });
 
-  const prompt = `Você é o assistente do LCA Studio de Pilates (Rio de Janeiro, ${ctx.hoje}).
-
-DADOS (${mes}):
-Ativos: ${ctx.estudio.ativos} | Inadimplentes: ${ctx.inadimplentes.map(function(a){return a.nome;}).join(', ')||'Nenhum'}
-Receita: ${brl(ctx.financeiro.receita)} | Professoras: ${brl(ctx.financeiro.professoras)} | Custos: ${brl(ctx.financeiro.custos)} | Resultado: ${brl(ctx.financeiro.resultado)}
-Planos vencendo: ${ctx.planosVencendo.length?ctx.planosVencendo.map(function(p){return p.nome+' ('+p.plano+', dia '+p.diaVenc+'/'+p.mesVenc+', '+p.dias+' dias)';}).join(' | '):'Nenhum'}
-Custos lancados: ${ctx.custosMes.map(function(c){return c.desc+' '+brl(c.valor);}).join(', ')||'Nenhum'}
-Faltas frequentes: ${ctx.faltasFrequentes.join(', ')||'Nenhuma'}
-Professoras este mes: Leda ${brl(ctx.financeiro.paramProf.retLeda)} fixo | Monica ${brl(ctx.financeiro.detalheProfessoras.monica)} (${Math.round(ctx.financeiro.paramProf.pctMonica*100)}% alunos dela) | Kelly ${brl(ctx.financeiro.detalheProfessoras.kelly)} (${ctx.aulasKelly.reduce(function(s,k){return s+(k.horas||0);},0)}h x ${brl(ctx.financeiro.paramProf.vhKelly)})
-Ultimo pagamento por aluno: ${JSON.stringify(ultimoValor)}
-
-REGRAS DE INTENCAO (siga rigorosamente):
-- "saldo da conta/inter/banco", "quanto tem no banco" → inter_saldo
-- "extrato", "movimentação da conta", "transações" → inter_extrato
-- "resumo financeiro", "resultado do mes", "receita do estudio" → consulta
-- "saldo" sem mencao a banco/conta/Inter → consulta sobre o estudio
-
-MENSAGEM: "${texto}"
-
-Retorne JSON (sem markdown):
-{
-  "tipo": "consulta" ou "acao",
-  "resposta": "resposta em Markdown se consulta, null se acao",
-  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos/confirmar_cheque,
-  "params": {
-    "aluno_nome": string ou null,
-    "valor": numero (se pagamento sem valor informado, use o ultimo pagamento do aluno acima) ou null,
-    "mes": "YYYY-MM" ou null (atual ${mes}),
-    "categoria": string ou null,
-    "descricao": string ou null,
-    "professora": string ou null,
-    "horas": numero ou null,
-    "meses_utilizados": numero ou null,
-    "data": "YYYY-MM-DD" ou null (hoje ${new Date().toISOString().slice(0,10)}),
-    "hora": "HH:MM" ou null,
-    "status_checkin": presente ou falta ou repos ou null,
-    "custo_id": numero ou null
-  }
-}`;
+  const prompt = 'Você é o assistente do LCA Studio de Pilates (Rio de Janeiro, ' + ctx.hoje + ').\n\n' +
+    'DADOS (' + mes + '):\n' +
+    'Ativos: ' + ctx.estudio.ativos + ' | Inadimplentes: ' + (ctx.inadimplentes.map(function(a){return a.nome;}).join(', ')||'Nenhum') + '\n' +
+    'Receita: ' + brl(ctx.financeiro.receita) + ' | Professoras: ' + brl(ctx.financeiro.professoras) + ' | Custos: ' + brl(ctx.financeiro.custos) + ' | Resultado: ' + brl(ctx.financeiro.resultado) + '\n' +
+    'Planos vencendo: ' + (ctx.planosVencendo.length?ctx.planosVencendo.map(function(p){return p.nome+' ('+p.plano+', dia '+p.diaVenc+'/'+p.mesVenc+', '+p.dias+' dias)';}).join(' | '):'Nenhum') + '\n' +
+    'Custos lancados: ' + (ctx.custosMes.map(function(c){return c.desc+' '+brl(c.valor);}).join(', ')||'Nenhum') + '\n' +
+    'Faltas frequentes: ' + (ctx.faltasFrequentes.join(', ')||'Nenhuma') + '\n' +
+    'Professoras este mes: Leda ' + brl(ctx.financeiro.paramProf.retLeda) + ' fixo | Monica ' + brl(ctx.financeiro.detalheProfessoras.monica) + ' (' + Math.round(ctx.financeiro.paramProf.pctMonica*100) + '% alunos dela) | Kelly ' + brl(ctx.financeiro.detalheProfessoras.kelly) + ' (' + ctx.aulasKelly.reduce(function(s,k){return s+(k.horas||0);},0) + 'h x ' + brl(ctx.financeiro.paramProf.vhKelly) + ')\n' +
+    'Ultimo pagamento por aluno: ' + JSON.stringify(ultimoValor) + '\n\n' +
+    'REGRAS DE INTENCAO (siga rigorosamente):\n' +
+    '- "saldo da conta/inter/banco", "quanto tem no banco" → inter_saldo\n' +
+    '- "extrato", "movimentação da conta", "transações" → inter_extrato\n' +
+    '- "resumo financeiro", "resultado do mes", "receita do estudio" → consulta\n' +
+    '- "saldo" sem mencao a banco/conta/Inter → consulta sobre o estudio\n\n' +
+    'MENSAGEM: "' + texto + '"\n\n' +
+    'Retorne JSON (sem markdown):\n' +
+    '{\n' +
+    '  "tipo": "consulta" ou "acao",\n' +
+    '  "resposta": "resposta em Markdown se consulta, null se acao",\n' +
+    '  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos/confirmar_cheque,\n' +
+    '  "params": {\n' +
+    '    "aluno_nome": string ou null,\n' +
+    '    "valor": numero (se pagamento sem valor informado, use o ultimo pagamento do aluno acima) ou null,\n' +
+    '    "mes": "YYYY-MM" ou null (atual ' + mes + '),\n' +
+    '    "categoria": string ou null,\n' +
+    '    "descricao": string ou null,\n' +
+    '    "professora": string ou null,\n' +
+    '    "horas": numero ou null,\n' +
+    '    "meses_utilizados": numero ou null,\n' +
+    '    "data": "YYYY-MM-DD" ou null (hoje ' + new Date().toISOString().slice(0,10) + '),\n' +
+    '    "hora": "HH:MM" ou null,\n' +
+    '    "status_checkin": presente ou falta ou repos ou null,\n' +
+    '    "custo_id": numero ou null\n' +
+    '  }\n' +
+    '}'
 
   const raw = await aiJSON(prompt);
   if (!raw) return { tipo: 'consulta', resposta: null };
@@ -776,29 +766,7 @@ Retorne JSON (sem markdown):
 // ── Extrair parâmetros de ação ────────────────────────────────────
 async function extrairParams(intencao, texto, dados) {
   const nomes = dados.alunos.map(a => a.id+'|'+a.nome).join('\n');
-  const prompt = `Extraia os parâmetros da ação "${intencao}" da mensagem abaixo.
-
-ALUNOS (id|nome):
-${nomes}
-
-MENSAGEM: "${texto}"
-
-Retorne JSON com os campos relevantes (use null para campos não mencionados):
-{
-  "aluno_id": número ou null,
-  "aluno_nome": string ou null,
-  "valor": número ou null,
-  "mes": "YYYY-MM" ou null (mês atual: ${new Date().toISOString().slice(0,7)}),
-  "categoria": string ou null,
-  "descricao": string ou null,
-  "professora": string ou null,
-  "horas": número ou null,
-  "meses_utilizados": número ou null,
-  "data": "YYYY-MM-DD" ou null (hoje: ${new Date().toISOString().slice(0,10)}),
-  "hora": "HH:MM" ou null,
-  "status_checkin": "presente" | "falta" | "repos" ou null,
-  "custo_id": número ou null
-}`;
+  const prompt = 'Extraia os parâmetros da ação "\' + intencao + \'" da mensagem abaixo.\n\nALUNOS (id|nome):\n\' + nomes + \'\n\nMENSAGEM: "\' + texto + \'"\n\nRetorne JSON com os campos relevantes (use null para campos não mencionados):\n{\n  "aluno_id": número ou null,\n  "aluno_nome": string ou null,\n  "valor": número ou null,\n  "mes": "YYYY-MM" ou null (mês atual: \' + new Date().toISOString().slice(0,7) + \'),\n  "categoria": string ou null,\n  "descricao": string ou null,\n  "professora": string ou null,\n  "horas": número ou null,\n  "meses_utilizados": número ou null,\n  "data": "YYYY-MM-DD" ou null (hoje: \' + new Date().toISOString().slice(0,10) + \'),\n  "hora": "HH:MM" ou null,\n  "status_checkin": "presente" | "falta" | "repos" ou null,\n  "custo_id": número ou null\n}';
 
   return await aiJSON(prompt);
 }
@@ -813,7 +781,7 @@ async function executar(intencao, p, dados, chatId) {
     await sbPost('custos', { descricao: desc, valor: p.valor, categoria: p.categoria, mes });
     await logOp('custo_lancado', (p.descricao||p.categoria) + ' — ' + mes, null, p.valor, mes, { categoria: p.categoria });
     const cat = p.descricao||p.categoria;
-    return `✅ Custo lançado!\n*${cat}* — ${brl(p.valor)} — ${mes}\n_Para desfazer: "apagar custo ${p.categoria} ${mes}"_`;
+    return '✅ Custo lançado!\n*' + cat + '* — ' + brl(p.valor) + ' — ' + mes + '\n_Para desfazer: "apagar custo ' + p.categoria + ' ' + mes + '"_';
   }
 
   if (intencao === 'lancar_aula') {
@@ -827,13 +795,13 @@ async function executar(intencao, p, dados, chatId) {
     await sbPost('aulas', { prof_id: profId, mes, data, data_fmt: data.split('-').reverse().join('/'),
       horas: p.horas, vh: vhReal, desc_aula: 'Lançado via Bot Telegram — '+p.horas+'h' });
     await logOp('aula_lancada', profId + ' — ' + p.horas + 'h — ' + data, null, p.horas*vhReal, mes, {profId, horas: p.horas});
-    return `✅ Aula lançada!\n*${profId}* — ${p.horas}h × ${brl(vhReal)} = ${brl(p.horas*vhReal)} — ${data}\n_Para desfazer: "remover aula ${profId}"_`;
+    return '✅ Aula lançada!\n*' + profId + '* — ' + p.horas + 'h × ' + brl(vhReal) + ' = ' + brl(p.horas*vhReal) + ' — ' + data + '\n_Para desfazer: "remover aula ' + profId + '"_';
   }
 
   if (intencao === 'confirmar_pagamento') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
-    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
+    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     if (!p?.valor) return '❌ Informe o valor.';
     const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{});
     pags[mes] = p.valor;
@@ -844,36 +812,36 @@ async function executar(intencao, p, dados, chatId) {
     if (pend[mes]) { delete pend[mes]; tinhaPend = true; }
     const hist = (aluno.historico_alteracoes||[]);
     hist.push({ data: new Date().toLocaleDateString('pt-BR'), tipo:'pagamento_bot',
-      desc: `Pagamento ${mes} via Bot Telegram: ${brl(p.valor)}` });
+      desc: 'Pagamento ' + mes + ' via Bot Telegram: ' + brl(p.valor) });
     const patchData = { pagamentos: pags, historico_alteracoes: hist };
     if (tinhaPend) patchData.pagamentos_pendentes = pend;
-    await sbPatch('alunos', `id=eq.${aluno.id}`, patchData);
+    await sbPatch('alunos', 'id=eq.' + aluno.id, patchData);
     await logOp('pagamento_confirmado', aluno.nome + ' — ' + mes, aluno.id, p.valor, mes);
     // Cancelar boleto em aberto no Inter (se houver)
     const nCancelados = await cancelarBoletoPorMes(aluno.id, mes);
     const msgCancelamento = nCancelados > 0 ? '\n_Boleto Inter cancelado automaticamente._' : '';
-    return `✅ Pagamento confirmado!\n*${aluno.nome}* — ${brl(p.valor)} — ${mes}${tinhaPend?'\n_(boleto que estava aguardando foi baixado)_':''}${msgCancelamento}\n_Para desfazer: "desfazer pagamento ${aluno.nome.split(' ')[0]} ${mes}"_`;
+    return '✅ Pagamento confirmado!\n*' + aluno.nome + '* — ' + brl(p.valor) + ' — ' + mes + tinhaPend?'\n_(boleto que estava aguardando foi baixado)_':'' + msgCancelamento + '\n_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mes + '"_';
   }
 
   if (intencao === 'desfazer_pagamento') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
-    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
+    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{});
     const mesD = p?.mes || mes;
-    if (!pags[mesD]) return `⚠️ ${aluno.nome} não tem pagamento em ${mesD}.`;
+    if (!pags[mesD]) return '⚠️ ' + aluno.nome + ' não tem pagamento em ' + mesD + '.';
     const val = pags[mesD];
     delete pags[mesD];
-    await sbPatch('alunos', `id=eq.${aluno.id}`, { pagamentos: pags });
+    await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags });
     await logOp('pagamento_desfeito', aluno.nome + ' — ' + mesD, aluno.id, val, mesD);
-    return `✅ Pagamento desfeito!\n*${aluno.nome}* — ${brl(val)} — ${mesD} removido.`;
+    return '✅ Pagamento desfeito!\n*' + aluno.nome + '* — ' + brl(val) + ' — ' + mesD + ' removido.';
   }
 
   if (intencao === 'remover_custo' || intencao === 'remover_custo_id') {
     let custo;
     if (intencao === 'remover_custo_id' && p?.custo_id) {
       custo = dados.custos.find(c => (c.id||c._id) === p.custo_id);
-      if (!custo) return `❌ Custo ID ${p.custo_id} não encontrado.`;
+      if (!custo) return '❌ Custo ID ' + p.custo_id + ' não encontrado.';
     } else {
       const busca = ((p?.descricao||p?.categoria)||'').toLowerCase();
       const mesR  = p?.mes || mes;
@@ -885,19 +853,19 @@ async function executar(intencao, p, dados, chatId) {
       });
       if (!filtro.length) {
         const doMes = dados.custos.filter(c => c.mes === mesR);
-        const lista = doMes.map(c => `• ${c.descricao||c.categoria} — ${brl(c.valor)}`).join('\n');
-        return `❌ Custo "${busca}" não encontrado em ${mesR}.${lista?'\n\nCustos em '+mesR+':\n'+lista:''}`;
+        const lista = doMes.map(c => '• ' + c.descricao||c.categoria + ' — ' + brl(c.valor)).join('\n');
+        return '❌ Custo "' + busca + '" não encontrado em ' + mesR + '.' + lista?'\n\nCustos em '+mesR+':\n'+lista:'';
       }
       if (filtro.length > 1) {
-        return `⚠️ Encontrei ${filtro.length} registros:\n` +
-          filtro.map(c => `• ID ${c.id||c._id}: ${c.descricao||c.categoria} — ${brl(c.valor)}`).join('\n') +
+        return '⚠️ Encontrei ' + filtro.length + ' registros:\n' +
+          filtro.map(c => '• ID ' + c.id||c._id + ': ' + c.descricao||c.categoria + ' — ' + brl(c.valor)).join('\n') +
           '\n\nMande: "remover custo ID XX"';
       }
       custo = filtro[0];
     }
-    await sbDelete('custos', `id=eq.${custo.id||custo._id}`);
+    await sbDelete('custos', 'id=eq.' + custo.id||custo._id);
     await logOp('custo_removido', (custo.descricao||custo.categoria) + ' — ' + (custo.mes||''), null, custo.valor, custo.mes);
-    return `✅ Custo removido!\n*${(custo.descricao||custo.categoria).replace(' [via Bot Telegram]','')}* — ${brl(custo.valor)}`;
+    return '✅ Custo removido!\n*' + (custo.descricao||custo.categoria).replace(' [via Bot Telegram]','') + '* — ' + brl(custo.valor);
   }
 
   if (intencao === 'desfazer_aula') {
@@ -906,17 +874,17 @@ async function executar(intencao, p, dados, chatId) {
     let filtro = dados.aulas;
     if (profId) filtro = filtro.filter(k => k.prof_id === profId);
     if (p?.mes)  filtro = filtro.filter(k => k.mes === p.mes);
-    if (!filtro.length) return `❌ Nenhuma aula encontrada${profId?' para '+profId:''}.`;
+    if (!filtro.length) return '❌ Nenhuma aula encontrada' + profId?' para '+profId:'' + '.';
     const aula = filtro[0];
-    await sbDelete('aulas', `id=eq.${aula.id}`);
+    await sbDelete('aulas', 'id=eq.' + aula.id);
     await logOp('aula_removida', aula.prof_id + ' — ' + (aula.horas||aula.vh) + 'h — ' + (aula.data_fmt||aula.data), null, null, aula.mes);
-    return `✅ Aula removida!\n*${aula.prof_id}* — ${aula.horas||aula.vh}h — ${aula.data_fmt||aula.data}`;
+    return '✅ Aula removida!\n*' + aula.prof_id + '* — ' + aula.horas||aula.vh + 'h — ' + aula.data_fmt||aula.data;
   }
 
   if (intencao === 'checkin') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
-    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
+    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const status  = p?.status_checkin || 'presente';
     const dataCi  = p?.data || new Date().toISOString().slice(0,10);
     const DIAS_PT = ['Dom','Seg','Ter','Qua','Qui','Sex','Sab'];
@@ -925,7 +893,7 @@ async function executar(intencao, p, dados, chatId) {
     // Verificar se o dia é feriado (marcado na agenda via modal de feriado)
     const agendaFeriados = dados.changes?.feriados || {};
     if (agendaFeriados[dataCi]) {
-      return `🎌 Check-in bloqueado: *${dataCi.split('-').reverse().join('/')}* é feriado (${agendaFeriados[dataCi]||'feriado'}).\nNão é possível registrar presença em dias de feriado.`;
+      return '🎌 Check-in bloqueado: *' + dataCi.split('-').reverse().join('/') + '* é feriado (' + agendaFeriados[dataCi]||'feriado' + ').\nNão é possível registrar presença em dias de feriado.';
     }
     // Buscar horários válidos do aluno neste dia da semana
     const horariosValidos = [];
@@ -938,14 +906,14 @@ async function executar(intencao, p, dados, chatId) {
     // Hora informada: validar contra agenda
     let horaCi = p?.hora || null;
     if (horaCi && horariosValidos.length > 0 && !horariosValidos.includes(horaCi)) {
-      return `⚠️ Horário *${horaCi}* não consta na agenda de *${aluno.nome.split(' ')[0]}* para ${diaKey}.\nHorários cadastrados: ${horariosValidos.join(', ')}\nUse um dos horários acima ou corrija a agenda.`;
+      return '⚠️ Horário *' + horaCi + '* não consta na agenda de *' + aluno.nome.split(' ')[0] + '* para ' + diaKey + '.\nHorários cadastrados: ' + horariosValidos.join(', ') + '\nUse um dos horários acima ou corrija a agenda.';
     }
     // Se não informada, busca o primeiro slot
     if (!horaCi && horariosValidos.length > 0) horaCi = horariosValidos[0];
     if (!horaCi) {
-      return `⚠️ Não consegui identificar o horário da aula de *${aluno.nome}*.\nInforme o horário: _"check-in ${aluno.nome.split(' ')[0]} hoje 10:00"_`;
+      return '⚠️ Não consegui identificar o horário da aula de *' + aluno.nome + '*.\nInforme o horário: _"check-in ' + aluno.nome.split(' ')[0] + ' hoje 10:00"_';
     }
-    const ckKey   = `${dataCi}-${horaCi}`;
+    const ckKey   = dataCi + '-' + horaCi;
     const ch = (dados.changes?.checkins) ? dados.changes.checkins : {};
     if (!ch[ckKey]) ch[ckKey] = { presente:[], falta:[], repos:[] };
     ch[ckKey].presente = (ch[ckKey].presente||[]).filter(x => x!==aluno.id);
@@ -959,13 +927,13 @@ async function executar(intencao, p, dados, chatId) {
     const dow2 = new Date(dataCi+'T12:00:00').getDay();
     const LABEL = { presente:'✅ Presente', falta:'❌ Falta', repos:'🔄 Reposição' };
     await logOp('checkin', aluno.nome + ' — ' + (LABEL[status]||status) + ' — ' + horaCi + ' ' + DIAS[dow2] + ' ' + dataCi, aluno.id, null, dataCi.slice(0,7), {status, hora: horaCi, data: dataCi});
-    return `${LABEL[status]} registrado!\n*${aluno.nome}* — ${DIAS[dow2]} ${dataCi.slice(8)}/${dataCi.slice(5,7)} ${horaCi}\n_Recarregue o site para ver o check-in atualizado._`;
+    return LABEL[status] + ' registrado!\n*' + aluno.nome + '* — ' + DIAS[dow2] + ' ' + dataCi.slice(8) + '/' + dataCi.slice(5,7) + ' ' + horaCi + '\n_Recarregue o site para ver o check-in atualizado._';
   }
 
   if (intencao === 'desfazer_checkin') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
-    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
+    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const dataCi = p?.data || new Date().toISOString().slice(0,10);
     const ch = (dados.changes?.checkins) || {};
     let removidos = 0;
@@ -979,9 +947,9 @@ async function executar(intencao, p, dados, chatId) {
       const depois = ch[ck].presente.length+ch[ck].falta.length+ch[ck].repos.length;
       if (depois<antes) removidos++;
     });
-    if (!removidos) return `⚠️ Nenhum check-in encontrado para *${aluno.nome}* em ${dataCi}.`;
+    if (!removidos) return '⚠️ Nenhum check-in encontrado para *' + aluno.nome + '* em ' + dataCi + '.';
     if (dados.changes) { dados.changes.checkins = ch; await saveChanges(dados.changes); }
-    return `✅ Check-in desfeito!\n*${aluno.nome}* — ${dataCi.slice(8)}/${dataCi.slice(5,7)}`;
+    return '✅ Check-in desfeito!\n*' + aluno.nome + '* — ' + dataCi.slice(8) + '/' + dataCi.slice(5,7);
   }
 
   // ── Banco Inter ────────────────────────────────────────────────
@@ -992,13 +960,13 @@ async function executar(intencao, p, dados, chatId) {
         // Horário em BRT (UTC-3)
         const agora = new Date(Date.now() - 3*60*60*1000);
         const horaStr = agora.toISOString().replace('T',' ').slice(0,16) + ' (BRT)';
-        return `🏦 *Saldo Banco Inter*\n\n` +
-          `💰 Disponível: *${brl(s.disponivel)}*\n` +
-          (s.bloqueadoCheque   ? `🔒 Bloqueado Cheque: ${brl(s.bloqueadoCheque)}\n` : '') +
-          (s.bloqueadoJudicial ? `⚖️ Bloqueado Judicial: ${brl(s.bloqueadoJudicial)}\n` : '') +
-          `\n_Consultado em ${horaStr}_`;
+        return '🏦 *Saldo Banco Inter*\n\n' +
+          '💰 Disponível: *' + brl(s.disponivel) + '*\n' +
+          (s.bloqueadoCheque   ? '🔒 Bloqueado Cheque: ' + brl(s.bloqueadoCheque) + '\n' : '') +
+          (s.bloqueadoJudicial ? '⚖️ Bloqueado Judicial: ' + brl(s.bloqueadoJudicial) + '\n' : '') +
+          '\n_Consultado em ' + horaStr + '_';
       }
-      return `⚠️ Resposta inesperada do Inter: ${JSON.stringify(s)}\n\n_Se o erro for "requested scope is not registered", acesse o Portal Inter → sua aplicação → habilite o escopo "Banking" (extrato e saldo)._`;
+      return '⚠️ Resposta inesperada do Inter: ' + JSON.stringify(s) + '\n\n_Se o erro for "requested scope is not registered", acesse o Portal Inter → sua aplicação → habilite o escopo "Banking" (extrato e saldo)._';
     } catch(e) { return '❌ Erro Inter: ' + e.message; }
   }
 
@@ -1014,7 +982,7 @@ async function executar(intencao, p, dados, chatId) {
       transacoes.filter(t => t.tipoTransacao==='PIX' && t.tipoOperacao==='C' && !(t.descricao||'').includes('Cp:')).slice(0,3).forEach(t => {
       });
       // Log de um boleto para ver campos
-      if (!transacoes.length) return `📄 *Extrato Inter* (${dataInicio} a ${dataFim})\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ${JSON.stringify(ext).slice(0,200)}`;
+      if (!transacoes.length) return '📄 *Extrato Inter* (' + dataInicio + ' a ' + dataFim + ')\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ' + JSON.stringify(ext).slice(0,200);
       // Log completo de uma transação Pix para ver todos os campos disponíveis
 
       // Índice de boletos emitidos por valor para cruzamento
@@ -1092,10 +1060,10 @@ async function executar(intencao, p, dados, chatId) {
         const chequeDevolvido = t.tipoOperacao === 'D' && 
           (descUp.includes('CHEQUE') || descUp.includes('CHQ') || descUp.includes('DEVOLUCAO') || descUp.includes('DEVOLVIDO'));
         const alertCheque = chequeDevolvido ? ' 🚨 *CHEQUE DEVOLVIDO*' : '';
-        return `${sinal} ${data} ${val}${nomeAluno} — ${desc}${alertCheque}`;
+        return sinal + ' ' + data + ' ' + val + nomeAluno + ' — ' + desc + alertCheque;
       }).join('\n');
-      return `📄 *Extrato Inter* (${dataInicio.split('-').reverse().join('/')} a ${dataFim.split('-').reverse().join('/')})\n\n${linhas}` +
-        (transacoes.length > 15 ? `\n\n_...e mais ${transacoes.length - 15} transações._` : '');
+      return '📄 *Extrato Inter* (' + dataInicio.split('-').reverse().join('/') + ' a ' + dataFim.split('-').reverse().join('/') + ')\n\n' + linhas +
+        (transacoes.length > 15 ? '\n\n_...e mais ' + transacoes.length - 15 + ' transações._' : '');
     } catch(e) { return '❌ Erro extrato Inter: ' + e.message; }
   }
 
@@ -1113,7 +1081,7 @@ async function executar(intencao, p, dados, chatId) {
       const emAberto  = (rAberto?.content || rAberto?.cobrancas || [])
         .filter(b => b.dataVencimento && b.dataVencimento < dataFim);
       const lista = [...expirados, ...emAberto];
-      if (!lista.length) return `✅ *Boletos vencidos/em aberto (últimos 15 dias)*\n\n_Nenhum boleto vencido ou em aberto no período._`;
+      if (!lista.length) return '✅ *Boletos vencidos/em aberto (últimos 15 dias)*\n\n_Nenhum boleto vencido ou em aberto no período._';
 
       // Cruzar com alunos pelo nome do pagador ou valor
       const linhas = lista.map(b => {
@@ -1129,10 +1097,10 @@ async function executar(intencao, p, dados, chatId) {
           if (al) nomeAluno = al.nome.split(' ').slice(0,2).join(' ');
         }
         const diasAtraso = Math.round((new Date() - new Date(b.dataVencimento)) / 86400000);
-        return `🔴 ${venc} ${val} — *${nomeAluno||'?'}*${diasAtraso > 0 ? ` _(${diasAtraso}d atraso)_` : ''}`;
+        return '\uD83D\uDD34 ' + venc + ' ' + val + ' \u2014 *' + (nomeAluno||'?') + '*' + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '');
       }).join('\n');
 
-      return `🔴 *Boletos vencidos/em aberto (últimos 15 dias)*\n\n${linhas}\n\n_Total: ${lista.length} boleto(s) — R$ ${brl(lista.reduce((s,b)=>s+(b.valorNominal||0),0))}_`;
+      return '🔴 *Boletos vencidos/em aberto (últimos 15 dias)*\n\n' + linhas + '\n\n_Total: ' + lista.length + ' boleto(s) — R$ ' + brl(lista.reduce((s,b)=>s+(b.valorNominal||0),0)) + '_';
     } catch(e) { return '❌ Erro boletos Inter: ' + e.message; }
   }
 
@@ -1144,16 +1112,16 @@ async function executar(intencao, p, dados, chatId) {
       const situacao = p?.situacao || null;
       const result = await interCobranças(situacao, dataInicio, dataFim);
       const lista = result?.content || result?.cobrancas || [];
-      if (!lista.length) return `📋 *Boletos Inter*\n\n_Nenhuma cobrança encontrada no período_`;
+      if (!lista.length) return '📋 *Boletos Inter*\n\n_Nenhuma cobrança encontrada no período_';
       const linhas = lista.slice(0,15).map(b => {
         const status = b.situacao === 'PAGO' ? '✅' : b.situacao === 'CANCELADO' ? '❌' : '⏳';
         const val = brl(b.valorNominal || 0);
         const nome = (b.pagador?.nome || '').split(' ').slice(0,2).join(' ');
         const venc = (b.dataVencimento||''). split('-').reverse().join('/');
-        return `${status} ${venc} ${val} — ${nome}`;
+        return status + ' ' + venc + ' ' + val + ' — ' + nome;
       }).join('\n');
-      return `📋 *Boletos Inter* (${situacao||'todos'})\n\n${linhas}` +
-        (lista.length > 15 ? `\n\n_...e mais ${lista.length-15}_` : '');
+      return '📋 *Boletos Inter* (' + situacao||'todos' + ')\n\n' + linhas +
+        (lista.length > 15 ? '\n\n_...e mais ' + lista.length-15 + '_' : '');
     } catch(e) { return '❌ Erro boletos Inter: ' + e.message; }
   }
 
@@ -1162,11 +1130,11 @@ async function executar(intencao, p, dados, chatId) {
       (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
-    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
+    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const hoje = new Date();
     const venc = p?.vencimento || new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10).toISOString().slice(0,10);
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
-    if (!cpf) return `⚠️ *${aluno.nome}* não tem CPF cadastrado. Cadastre na ficha antes de emitir o boleto.`;
+    if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir o boleto.';
     // Calcular valor automaticamente
     const _pendB = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
     const _pagsB = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
@@ -1178,7 +1146,7 @@ async function executar(intencao, p, dados, chatId) {
       aluno.valor_referencia || 0;
     if (!valorBoleto) {
       ctx[chatId] = { intencao: 'inter_emitir_boleto', aluno_id: aluno.id, aluno_nome: aluno.nome, aguardando: 'valor', mes };
-      return `⚠️ Não encontrei o valor do plano de *${aluno.nome.split(' ')[0]}*.\nQual o valor? (ex: 329)`;
+      return '⚠️ Não encontrei o valor do plano de *' + aluno.nome.split(' ')[0] + '*.\nQual o valor? (ex: 329)';
     }
     try {
       const result = await interEmitirBoleto({
@@ -1202,8 +1170,8 @@ async function executar(intencao, p, dados, chatId) {
         await gravarBoleto(aluno.id, mes, cod, 'LCA-' + aluno.id + '-' + mes, p.valor, venc);
         const mesNomeAvulso = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt(mes.slice(5,7))-1];
         const anoAvulso = mes.slice(0,4);
-        const nomeArq = `Boleto - ${aluno.nome.split(' ')[0]} - ${mesNomeAvulso} ${anoAvulso}.pdf`;
-        const caption = `✅ *Boleto emitido!*\n\n👤 ${aluno.nome}\n💰 ${brl(p.valor)}\n📅 Vencimento: ${venc.split('-').reverse().join('/')}\n🔑 Código: ${cod}`;
+        const nomeArq = 'Boleto - ' + aluno.nome.split(' ')[0] + ' - ' + mesNomeAvulso + ' ' + anoAvulso + '.pdf';
+        const caption = '✅ *Boleto emitido!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(p.valor) + '\n📅 Vencimento: ' + venc.split('-').reverse().join('/') + '\n🔑 Código: ' + cod;
         if (link) {
           try {
             await tgSendPDF(chatId, link, nomeArq, caption);
@@ -1212,8 +1180,8 @@ async function executar(intencao, p, dados, chatId) {
             console.error('[PDF avulso]', ePdf.message);
           }
         }
-        return caption + (link ? `\n\n[Visualizar boleto](${link})` : '') +
-          `\n\n_Use "confirmar pagamento ${aluno.nome.split(' ')[0]}" quando pagar._`;
+        return caption + (link ? '\n\n[Visualizar boleto](' + link + ')' : '') +
+          '\n\n_Use "confirmar pagamento ' + aluno.nome.split(' ')[0] + '" quando pagar._';
       }
       return '⚠️ Resposta: ' + JSON.stringify(result).slice(0,200);
     } catch(e) { return '❌ Erro emissão boleto: ' + e.message; }
@@ -1226,18 +1194,7 @@ async function executar(intencao, p, dados, chatId) {
 function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   const primeiroNome = aluno.nome.split(' ')[0];
   const vezes = aluno.vezes_semana || 2;
-  return `Olá, ${primeiroNome}! 😊
-
-Seguem os boletos referentes ao seu plano semestral no LCA Studio de Pilates.
-
-📋 *Plano ${planoLabel} — ${vezes}x por semana*
-📅 *Validade: ${periodoPlano}*
-💰 *${brl(valor)}/mês*
-
-Os boletos vencem todo dia ${diaVenc} de cada mês. Você também pode pagar via Pix utilizando o QR Code impresso em cada boleto.
-
-Qualquer dúvida, estamos à disposição! 🌿
-LCA Studio de Pilates`;
+  return 'Olá, ' + primeiroNome + '! 😊\n\nSeguem os boletos referentes ao seu plano semestral no LCA Studio de Pilates.\n\n📋 *Plano ' + planoLabel + ' — ' + vezes + 'x por semana*\n📅 *Validade: ' + periodoPlano + '*\n💰 *' + brl(valor) + '/mês*\n\nOs boletos vencem todo dia ' + diaVenc + ' de cada mês. Você também pode pagar via Pix utilizando o QR Code impresso em cada boleto.\n\nQualquer dúvida, estamos à disposição! 🌿\nLCA Studio de Pilates';
 }
 
   if (intencao === 'inter_emitir_plano') {
@@ -1245,9 +1202,9 @@ LCA Studio de Pilates`;
       (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
-    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
+    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
-    if (!cpf) return `⚠️ *${aluno.nome}* não tem CPF cadastrado. Cadastre na ficha antes de emitir boletos.`;
+    if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir boletos.';
 
     const DURACAO = { mensal:1, trimestral:3, semestral:6 };
     const plano = aluno.tipo_plano || 'mensal';
@@ -1266,7 +1223,7 @@ LCA Studio de Pilates`;
     if (!valorAuto) {
       // Salvar contexto e pedir valor
       ctx[chatId] = { intencao: 'inter_emitir_plano', aluno_id: aluno.id, aluno_nome: aluno.nome, aguardando: 'valor', mes };
-      return `⚠️ Não encontrei o valor do plano de *${aluno.nome.split(' ')[0]}*.\nQual o valor mensal? (ex: 329)`;
+      return '⚠️ Não encontrei o valor do plano de *' + aluno.nome.split(' ')[0] + '*.\nQual o valor mensal? (ex: 329)';
     }
     const valor = valorAuto;
 
@@ -1281,11 +1238,11 @@ LCA Studio de Pilates`;
 
     const diaVenc = aluno.dia_vencimento || 10;
     const MESES_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
-    const fmtData = d => `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+    const fmtData = d => String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear();
 
     const dtInicio = new Date(anoBase, mesBase, diaVenc);
     const dtFimReal = new Date(anoBase, mesBase + dur - 1, diaVenc - 1); // dia anterior ao vencimento do último boleto
-    const periodoPlano = `${fmtData(dtInicio)} a ${fmtData(dtFimReal)}`;
+    const periodoPlano = fmtData(dtInicio) + ' a ' + fmtData(dtFimReal);
     const planoLabel = plano.charAt(0).toUpperCase() + plano.slice(1);
 
     // Montar endereço sem null
@@ -1305,17 +1262,17 @@ LCA Studio de Pilates`;
       const hojeDate = new Date(); hojeDate.setHours(0,0,0,0);
       if (dtVenc < hojeDate) {
         dtVenc = new Date(hojeDate.getTime() + 24*60*60*1000);
-        console.log(`[PLANO] Boleto ${i+1}: data ${new Date(anoBase, mesBase + i, diaVenc).toISOString().slice(0,10)} já passou — usando ${dtVenc.toISOString().slice(0,10)}`);
+        console.log('[PLANO] Boleto ' + i+1 + ': data ' + new Date(anoBase, mesBase + i, diaVenc).toISOString().slice(0,10) + ' já passou — usando ' + dtVenc.toISOString().slice(0,10));
       }
       const anoVenc = dtVenc.getFullYear();
       const mesVenc = String(dtVenc.getMonth()+1).padStart(2,'0');
-      const mesStr  = `${anoVenc}-${mesVenc}`;
+      const mesStr  = anoVenc + '-' + mesVenc;
       const mesNome = MESES_PT[dtVenc.getMonth()];
       const numBoleto = i + 1;
 
       const descricao =
-        `Validade do Plano: ${periodoPlano} ` +
-        `Boleto ${numBoleto} - ${mesNome} ${anoVenc}`;
+        'Validade do Plano: ' + periodoPlano + ' ' +
+        'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc;
 
       try {
         const result = await interEmitirBoleto({
@@ -1329,38 +1286,38 @@ LCA Studio de Pilates`;
           numero: endNumero,
           complemento: endComplemento || undefined,
           descricao,
-          referencia: `Boleto ${numBoleto} - ${mesNome} ${anoVenc}`,
-          seuNumero: `LCA-${aluno.id}-${mesStr}`
+          referencia: 'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc,
+          seuNumero: 'LCA-' + aluno.id + '-' + mesStr
         });
         const cod  = result?.codigoSolicitacao || result?.nossoNumero || '?';
         const link = result?.linkVisualizacaoBoleto || result?.link || '';
         // Gravar boleto na tabela
         if (result?.codigoSolicitacao) {
-          await gravarBoleto(aluno.id, mesStr, result.codigoSolicitacao, `LCA-${aluno.id}-${mesStr}`, valor, dtVenc.toISOString().slice(0,10));
+          await gravarBoleto(aluno.id, mesStr, result.codigoSolicitacao, 'LCA-' + aluno.id + '-' + mesStr, valor, dtVenc.toISOString().slice(0,10));
         }
         // Enviar PDF com nome correto
-        const nomeArq = `Boleto ${numBoleto} - ${mesNome} ${anoVenc} - ${aluno.nome.split(' ')[0]}.pdf`;
+        const nomeArq = 'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc + ' - ' + aluno.nome.split(' ')[0] + '.pdf';
         if (link) {
           try {
             await tgSendPDF(chatId,link, nomeArq,
-              `📄 Boleto ${numBoleto}/${dur} — ${mesNome} ${anoVenc} | vence ${fmtData(dtVenc)} | ${brl(valor)}`);
+              '📄 Boleto ' + numBoleto + '/' + dur + ' — ' + mesNome + ' ' + anoVenc + ' | vence ' + fmtData(dtVenc) + ' | ' + brl(valor));
           } catch(ePdf) {
-            console.error(`[PDF plano ${numBoleto}]`, ePdf.message);
-            resultados.push(`${numBoleto}. *${mesNome} ${anoVenc}* — vence ${fmtData(dtVenc)} — [ver](${link})`);
+            console.error('[PDF plano ' + numBoleto + ']', ePdf.message);
+            resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* — vence ' + fmtData(dtVenc) + ' — [ver](' + link + ')');
           }
         } else {
-          resultados.push(`${numBoleto}. *${mesNome} ${anoVenc}* — vence ${fmtData(dtVenc)} — cod: ${cod}`);
+          resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* — vence ' + fmtData(dtVenc) + ' — cod: ' + cod);
         }
       } catch(e) {
-        resultados.push(`${numBoleto}. *${mesNome} ${anoVenc}* — ❌ ${e.message.slice(0,60)}`);
+        resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* — ❌ ' + e.message.slice(0,60));
         erros++;
       }
       if (i < dur - 1) await new Promise(r => setTimeout(r, 800));
     }
 
     const status = erros === 0 ? '✅' : erros === dur ? '❌' : '⚠️';
-    const resumo = `${status} *Plano ${planoLabel} — ${aluno.nome.split(' ')[0]}*\n` +
-      `📋 ${periodoPlano}\n💰 ${brl(valor)}/mês × ${dur} boletos` +
+    const resumo = status + ' *Plano ' + planoLabel + ' — ' + aluno.nome.split(' ')[0] + '*\n' +
+      '📋 ' + periodoPlano + '\n💰 ' + brl(valor) + '/mês × ' + dur + ' boletos' +
       (resultados.length ? '\n\n' + resultados.join('\n') : '') +
       (erros === 0 ? '\n\n_Baixa automática via webhook quando pagos._' : '');
     // Enviar mensagem para copiar no WhatsApp
@@ -1377,23 +1334,22 @@ LCA Studio de Pilates`;
       (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
-    if (!aluno) return `❌ Informe o nome do aluno.
-Ex: _"cheque compensou Ana"_`;
+    if (!aluno) return '❌ Informe o nome do aluno.\nEx: _"cheque compensou Ana"_';
     const mes = p?.mes || new Date().toISOString().slice(0,7);
     const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
     // Verificar se há cheque pendente
     const hist = aluno.historico_alteracoes || [];
     const eCheque = hist.some(h => h.tipo==='cheque_recebido' && h.desc && h.desc.includes(mes));
-    if (!pend[mes] || !eCheque) return `ℹ️ Nenhum cheque aguardando para *${aluno.nome.split(' ')[0]}* em ${mes}.`;
+    if (!pend[mes] || !eCheque) return 'ℹ️ Nenhum cheque aguardando para *' + aluno.nome.split(' ')[0] + '* em ' + mes + '.';
     const val = pend[mes];
     // Confirmar pagamento
     const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
     pags[mes] = val;
     delete pend[mes];
     const histNovo = [...hist, { data: new Date().toLocaleDateString('pt-BR'), tipo: 'cheque_compensado', desc: 'Cheque compensado — ' + mes + ' — ' + brl(val) }];
-    await sbPatch('alunos', `id=eq.${aluno.id}`, { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: histNovo });
+    await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: histNovo });
     await logOp('cheque_compensado', aluno.nome + ' — ' + mes, aluno.id, val, mes);
-    return `✅ *Cheque compensado!*\n\n👤 ${aluno.nome.split(' ')[0]}\n💰 ${brl(val)}\n📅 ${mes}\n\n_Pagamento confirmado no sistema._`;
+    return '✅ *Cheque compensado!*\n\n👤 ' + aluno.nome.split(' ')[0] + '\n💰 ' + brl(val) + '\n📅 ' + mes + '\n\n_Pagamento confirmado no sistema._';
   }
 
   if (intencao === 'inter_reenviar_boletos') {
@@ -1401,25 +1357,25 @@ Ex: _"cheque compensou Ana"_`;
       (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
-    if (!aluno) return `❌ Informe o nome do aluno.\nEx: _"reenviar boletos Thalita"_`;
+    if (!aluno) return '❌ Informe o nome do aluno.\nEx: _"reenviar boletos Thalita"_';
     try {
       // Buscar na tabela boletos local
-      const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&select=id,mes,valor,codigo_solicitacao,vencimento,status&order=mes.asc`);
+      const r = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&select=id,mes,valor,codigo_solicitacao,vencimento,status&order=mes.asc');
       const rArr = Array.isArray(r) ? r : (r?.data || []);
       let boletos = rArr.filter(b => b.status === 'aberto');
 
       if (!boletos.length) {
         const total = r?.data?.length || 0;
-        if (total > 0) return `ℹ️ *${aluno.nome.split(' ')[0]}* tem ${total} boleto(s) na tabela mas nenhum com status "aberto".\nStatus encontrados: ${[...new Set((r?.data||[]).map(b=>b.status))].join(', ')}`;
+        if (total > 0) return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + total + ' boleto(s) na tabela mas nenhum com status "aberto".\nStatus encontrados: ' + [...new Set((r?.data||[]).map(b=>b.status))].join(', ');
         // Sem nenhum registro — buscar na API Inter
-        await tgSend(chatId, `🔍 Buscando boletos na API Inter para *${aluno.nome.split(' ')[0]}*...`);
+        await tgSend(chatId, '🔍 Buscando boletos na API Inter para *' + aluno.nome.split(' ')[0] + '*...');
         const hoje = new Date();
         const dataFim = new Date(hoje.getFullYear(), hoje.getMonth() + 6, 30).toISOString().slice(0,10);
         const dataInicio = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1).toISOString().slice(0,10);
         const rInter = await interCobranças('A_VENCER', dataInicio, dataFim);
         const cobrancas = rInter?.content || rInter?.cobrancas || [];
         // Filtrar pelo seuNumero que começa com LCA-{id}-
-        const prefixo = `LCA-${aluno.id}-`;
+        const prefixo = 'LCA-' + aluno.id + '-';
         boletos = cobrancas
           .filter(c => (c.seuNumero||'').startsWith(prefixo))
           .map(c => ({
@@ -1431,9 +1387,9 @@ Ex: _"cheque compensou Ana"_`;
           }));
       }
 
-      if (!boletos.length) return `ℹ️ Nenhum boleto encontrado para *${aluno.nome.split(' ')[0]}* na tabela local nem na API Inter.`;
+      if (!boletos.length) return 'ℹ️ Nenhum boleto encontrado para *' + aluno.nome.split(' ')[0] + '* na tabela local nem na API Inter.';
 
-      await tgSend(chatId, `📤 Reenviando ${boletos.length} boleto(s) de *${aluno.nome.split(' ')[0]}*...`);
+      await tgSend(chatId, '📤 Reenviando ' + boletos.length + ' boleto(s) de *' + aluno.nome.split(' ')[0] + '*...');
       const MESES_PT2 = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
       let enviados = 0;
       for (const b of boletos) {
@@ -1442,15 +1398,15 @@ Ex: _"cheque compensou Ana"_`;
           if (!link && b.codigo_solicitacao) {
             const token = await interGetToken('boleto-cobranca.read');
             // Tentar buscar PDF diretamente
-            const pdfResp = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}/pdf`, 'GET', null, token);
+            const pdfResp = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao + '/pdf', 'GET', null, token);
             // O Inter retorna o PDF em base64 no campo 'pdf' ou diretamente como string
             const pdfBase64 = pdfResp?.data?.pdf || pdfResp?.pdf ||
               (typeof pdfResp?.data === 'string' && pdfResp.data.length > 500 ? pdfResp.data : null) ||
               (typeof pdfResp === 'string' && pdfResp.length > 500 ? pdfResp : null);
             if (pdfBase64) {
-              link = `data:application/pdf;base64,${pdfBase64}`;
+              link = 'data:application/pdf;base64,' + pdfBase64;
             } else {
-              const det = await interReq(`/cobranca/v3/cobrancas/${b.codigo_solicitacao}`, 'GET', null, token);
+              const det = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao, 'GET', null, token);
               const cob = det?.cobranca || det?.data?.cobranca || det?.data || det;
               link = cob?.linkVisualizacaoBoleto || cob?.link || cob?.linkBoleto ||
                      det?.linkVisualizacaoBoleto || det?.link || '';
@@ -1458,8 +1414,8 @@ Ex: _"cheque compensou Ana"_`;
           }
           const mesNome = MESES_PT2[parseInt((b.mes||'').slice(5,7))-1] || b.mes;
           const vencFmt = (b.vencimento||'').split('-').reverse().join('/');
-          const nomeArq = `Boleto - ${mesNome} - ${aluno.nome.split(' ')[0]}.pdf`;
-          const caption = `📄 *${mesNome}* | vence ${vencFmt} | ${brl(b.valor||0)}`;
+          const nomeArq = 'Boleto - ' + mesNome + ' - ' + aluno.nome.split(' ')[0] + '.pdf';
+          const caption = '📄 *' + mesNome + '* | vence ' + vencFmt + ' | ' + brl(b.valor||0);
           if (link) {
             if (link.startsWith('data:application/pdf;base64,')) {
               const pdfBuffer = Buffer.from(link.replace('data:application/pdf;base64,', ''), 'base64');
@@ -1469,11 +1425,11 @@ Ex: _"cheque compensou Ana"_`;
             }
             enviados++;
           } else {
-            await tgSend(chatId, `⚠️ ${mesNome}: link não disponível`);
+            await tgSend(chatId, '⚠️ ' + mesNome + ': link não disponível');
           }
           if (boletos.length > 1) await new Promise(r => setTimeout(r, 600));
         } catch(eBol) {
-          await tgSend(chatId, `❌ Erro ${b.mes}: ${eBol.message.slice(0,60)}`);
+          await tgSend(chatId, '❌ Erro ' + b.mes + ': ' + eBol.message.slice(0,60));
         }
       }
       // Enviar mensagem para copiar no WhatsApp
@@ -1489,8 +1445,8 @@ Ex: _"cheque compensou Ana"_`;
         await tgSend(chatId, '✂️ *Copie a mensagem abaixo e envie no WhatsApp da aluna:*');
         await tgSend(chatId, msgWhatsApp(aluno, planoLabelR, periodoR, boletos[0]?.valor||0, aluno.dia_vencimento||10));
       }
-      return enviados > 0 ? null : `⚠️ Não foi possível reenviar. Tente emitir novamente.`;
-    } catch(e) { return `❌ Erro: ${e.message}`; }
+      return enviados > 0 ? null : '⚠️ Não foi possível reenviar. Tente emitir novamente.';
+    } catch(e) { return '❌ Erro: ' + e.message; }
   }
 
   if (intencao === 'inter_cancelar_boleto') {
@@ -1498,29 +1454,29 @@ Ex: _"cheque compensou Ana"_`;
       (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
     );
-    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
+    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const mes = p?.mes || new Date().toISOString().slice(0,7);
     try {
-      const r = await sbGet('boletos', `aluno_id=eq.${aluno.id}&mes=eq.${mes}&status=eq.aberto&select=id,codigo_solicitacao,valor,vencimento`);
+      const r = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&mes=eq.' + mes + '&status=eq.aberto&select=id,codigo_solicitacao,valor,vencimento');
       const boletos = Array.isArray(r) ? r : (r?.data || []);
-      if (!boletos.length) return `ℹ️ Nenhum boleto em aberto para *${aluno.nome.split(' ')[0]}* em ${mes}.`;
+      if (!boletos.length) return 'ℹ️ Nenhum boleto em aberto para *' + aluno.nome.split(' ')[0] + '* em ' + mes + '.';
       let cancelados = 0;
       for (const b of boletos) {
         await interCancelarBoleto(b.codigo_solicitacao);
-        await sbPatch('boletos', `id=eq.${b.id}`, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+        await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
         cancelados++;
       }
-      return `✅ *${cancelados} boleto(s) cancelado(s) no Inter!*\n\n👤 ${aluno.nome}\n📅 Mês: ${mes}\n\n_Pagamento recebido por outro meio._`;
+      return '✅ *' + cancelados + ' boleto(s) cancelado(s) no Inter!*\n\n👤 ' + aluno.nome + '\n📅 Mês: ' + mes + '\n\n_Pagamento recebido por outro meio._';
     } catch(e) {
-      return `❌ Erro ao cancelar boleto: ${e.message}`;
+      return '❌ Erro ao cancelar boleto: ' + e.message;
     }
   }
 
   if (intencao === 'calcular_rescisao') {
     const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
       (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
-    if (!aluno) return `❌ Aluno não encontrado: "${p?.aluno_nome}".`;
-    if (aluno.tipo_plano === 'mensal') return `⚠️ ${aluno.nome} tem plano mensal — não há multa de rescisão. Basta inativar.`;
+    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (aluno.tipo_plano === 'mensal') return '⚠️ ' + aluno.nome + ' tem plano mensal — não há multa de rescisão. Basta inativar.';
     const DUR = { trimestral:3, semestral:6 };
     const dur = DUR[aluno.tipo_plano]||3;
     const pags = Object.entries(typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{})
@@ -1536,7 +1492,7 @@ Ex: _"cheque compensou Ana"_`;
     const diferenca  = deveria - pagosPlanoAtual;
     const multa      = valorMensal * 0.20 * mNaoUsados;
     const saldo      = diferenca + multa;
-    return `📋 *Rescisão — ${aluno.nome}*\n\nPlano: ${aluno.tipo_plano} (${dur} meses)\nValor mensal ref.: ${brl(valorMensal)}\nMeses utilizados: ${mUsados} | Não usados: ${mNaoUsados}\n\nDeveria pagar (mensal × usados): ${brl(deveria)}\nPago no plano atual: ${brl(pagosPlanoAtual)}\nDiferença de plano: ${brl(diferenca)}\nMulta 20% × ${mNaoUsados} meses: ${brl(multa)}\n\n*Saldo a pagar: ${brl(saldo)}*\n\n_Confira o valor mensal. Se estiver errado, mande "${aluno.nome.split(' ')[0]} rescindir, ${mUsados} meses, mensal 329"_\n_Para confirmar e lançar: responda_ *sim*`;
+    return '📋 *Rescisão — ' + aluno.nome + '*\n\nPlano: ' + aluno.tipo_plano + ' (' + dur + ' meses)\nValor mensal ref.: ' + brl(valorMensal) + '\nMeses utilizados: ' + mUsados + ' | Não usados: ' + mNaoUsados + '\n\nDeveria pagar (mensal × usados): ' + brl(deveria) + '\nPago no plano atual: ' + brl(pagosPlanoAtual) + '\nDiferença de plano: ' + brl(diferenca) + '\nMulta 20% × ' + mNaoUsados + ' meses: ' + brl(multa) + '\n\n*Saldo a pagar: ' + brl(saldo) + '*\n\n_Confira o valor mensal. Se estiver errado, mande "' + aluno.nome.split(' ')[0] + ' rescindir, ' + mUsados + ' meses, mensal 329"_\n_Para confirmar e lançar: responda_ *sim*';
   }
 
   return null;
@@ -1567,7 +1523,7 @@ async function processar(msg) {
       }
       try {
         // Buscar o aluno atual no banco
-        const ra = await sbGet('alunos', `id=eq.${conf.calc.aluno_id}&select=*`);
+        const ra = await sbGet('alunos', 'id=eq.' + conf.calc.aluno_id + '&select=*');
         const aluno = Array.isArray(ra) && ra[0];
         if (!aluno) return tgSend(chatId, '❌ Aluno não encontrado no banco.');
 
@@ -1619,7 +1575,7 @@ async function processar(msg) {
         const histTxt = (aluno.historico ? aluno.historico + ' | ' : '') +
           'Rescisão (via bot) em '+dataFmt+': '+aluno.tipo_plano+', '+conf.calc.mUsados+' meses, saldo '+brl(conf.calc.saldo);
 
-        await sbPatch('alunos', `id=eq.${aluno.id}`, {
+        await sbPatch('alunos', 'id=eq.' + aluno.id, {
           ativo: 'NAO',
           historico_alteracoes: hist,
           pagamentos_pendentes: pend,
@@ -1627,9 +1583,9 @@ async function processar(msg) {
           historico: histTxt
         });
 
-        const saldoMsg = conf.calc.saldo > 0.01 ? `\n💰 Saldo a receber lançado: ${brl(conf.calc.saldo)}` :
-          conf.calc.saldo < -0.01 ? `\n↩️ Saldo a restituir: ${brl(Math.abs(conf.calc.saldo))}` : '\n✅ Quitado';
-        return tgSend(chatId, `✅ *Rescisão ${numeroResc} lançada!*\n\n*${aluno.nome}* marcado como inativo.${saldoMsg}\n\n_Emita o termo formal pelo sistema web (botão Rescindir → 2ª via)._`);
+        const saldoMsg = conf.calc.saldo > 0.01 ? '\n💰 Saldo a receber lançado: ' + brl(conf.calc.saldo) :
+          conf.calc.saldo < -0.01 ? '\n↩️ Saldo a restituir: ' + brl(Math.abs(conf.calc.saldo)) : '\n✅ Quitado';
+        return tgSend(chatId, '✅ *Rescisão ' + numeroResc + ' lançada!*\n\n*' + aluno.nome + '* marcado como inativo.' + saldoMsg + '\n\n_Emita o termo formal pelo sistema web (botão Rescindir → 2ª via)._');
       } catch(e) {
         console.error('Lançamento rescisão erro:', e.message);
         return tgSend(chatId, '❌ Erro ao lançar rescisão: '+e.message+'\nTente pelo sistema web.');
@@ -1857,7 +1813,7 @@ async function enviarAniversariantesHoje() {
       const ola = fem ? 'a' : 'o';
       const bem = fem ? 'bem-vinda' : 'bem-vindo';
       const tel = a.telefone ? a.telefone.replace(/[^0-9]/g,'') : '';
-      const telInfo = tel ? `📱 55${tel}` : '📵 sem telefone';
+      const telInfo = tel ? '📱 55' + tel : '📵 sem telefone';
       const status = ativo ? '🟢 Ativa(o)' : '🔴 Inativa(o)';
 
       let msg;
@@ -1875,18 +1831,10 @@ async function enviarAniversariantesHoje() {
           'Com carinho, Equipe LCA Studio de Pilates';
       }
 
-      return `👤 *${a.nome}* — ${status}
-${telInfo}
-
-📋 *Mensagem para copiar:*
-\`\`\`
-${msg}
-\`\`\``;
+      return '👤 *' + a.nome + '* — ' + status + '\n' + telInfo + '\n\n📋 *Mensagem para copiar:*\n```\n' + msg + '\n```';
     });
 
-    const cabecalho = `🎂 *Aniversariantes de hoje (${dh}/${mh}):*
-
-`;
+    const cabecalho = '\uD83C\uDF82 *Aniversariantes de hoje (' + dh + '/' + mh + '):*\n\n';
     // Telegram tem limite de 4096 chars — enviar uma mensagem por aniversariante se necessário
     for (const linha of linhas) {
       await tgSend(TELEGRAM_CHAT_ID, cabecalho + linha);
@@ -1919,9 +1867,9 @@ async function main() {
   console.log('LCA Bot v4.16 iniciado ✓');
   let offset = 0;
   try {
-    const init = await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=-1&limit=1&timeout=0`, 'GET', {}, null);
+    const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
     if (init?.result?.length) offset = init.result[init.result.length-1].update_id+1;
-    await req(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${offset}&limit=1&timeout=0`, 'GET', {}, null);
+    await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=' + offset + '&limit=1&timeout=0', 'GET', {}, null);
     console.log('Fila limpa. Offset:', offset);
   } catch(e) { console.log('Init aviso:', e.message); }
 
@@ -1949,36 +1897,4 @@ async function main() {
           const valorPago = parseFloat(payload?.valorTotalRecebido || payload?.valor || 0);
           const dataPag = payload?.dataLiquidacao || payload?.dataPagamento || new Date().toISOString().slice(0,10);
 
-          // seuNumero formato: "LCA-{id}-{mes}" ex: "LCA-96-2026-06"
-          const match = seuNum.match(/^LCA-(\d+)-(\d{4}-\d{2})$/);
-
-          if (match && valorPago > 0 && (evento.includes('PAGO') || evento.includes('LIQUIDADO') || evento === '')) {
-            const alunoId = parseInt(match[1]);
-            const mes = match[2];
-
-            // Carregar dados do Supabase
-            const [rAlunos] = await Promise.all([
-              sbGet('alunos', `select=id,nome,pagamentos,pagamentos_pendentes,historico_alteracoes&id=eq.${alunoId}`)
-            ]);
-            const aluno = rAlunos?.data?.[0];
-
-            if (aluno) {
-              const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{}));
-              let pend = Object.assign({}, typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{}));
-
-              // Só confirmar se ainda não está pago
-              if (!(pags[mes] > 0)) {
-                pags[mes] = valorPago;
-                const tinhaPend = !!pend[mes];
-                if (tinhaPend) delete pend[mes];
-
-                const hist = Array.isArray(aluno.historico_alteracoes) ? [...aluno.historico_alteracoes] : [];
-                hist.push({ data: new Date(dataPag+'T12:00:00').toLocaleDateString('pt-BR'), tipo: 'pagamento_auto',
-                  desc: `Pagamento ${mes} via boleto Inter (automático): ${brl(valorPago)}` });
-
-                const patch = { pagamentos: pags, historico_alteracoes: hist };
-                if (tinhaPend) patch.pagamentos_pendentes = pend;
-                await sbPatch('alunos', `id=eq.${alunoId}`, patch);
-                // Marcar boleto como pago na tabela
-                try {
-                  
+          // seuNumero formato: "LCA-{id}-{mes}
