@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.17 - ctx movido para escopo global (fix ReferenceError no timeout), emojis restaurados, separadores de seção restaurados, template literals convertidos para compatibilidade Node 20+
+// Versão 4.18 - ctx movido para escopo global (fix ReferenceError no timeout), emojis restaurados, separadores de seção restaurados, template literals convertidos para compatibilidade Node 20+
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -745,7 +745,7 @@ async function processarComIA(texto, dados, mes) {
     '{\n' +
     '  "tipo": "consulta" ou "acao",\n' +
     '  "resposta": "resposta em Markdown se consulta, null se acao",\n' +
-    '  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos/confirmar_cheque,\n' +
+    '  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos/confirmar_cheque/alterar_plano,\n' +
     '  "params": {\n' +
     '    "aluno_nome": string ou null,\n' +
     '    "valor": numero (se pagamento sem valor informado, use o ultimo pagamento do aluno acima) ou null,\n' +
@@ -1477,6 +1477,109 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     } catch(e) { return '❌ Erro: ' + e.message; }
   }
 
+
+  if (intencao === 'alterar_plano') {
+    // Parâmetros: aluno_id/aluno_nome, plano_novo, freq_nova, valor, meses_cancelar (array CSV), meses_emitir (array CSV), pro_rata
+    const aluno = dados.alunos.find(a =>
+      (p?.aluno_id && a.id===p.aluno_id) ||
+      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
+    );
+    if (!aluno) return '❌ Aluno não encontrado.';
+
+    const novoPlano  = p?.plano_novo || aluno.tipo_plano;
+    const novoFreq   = parseInt(p?.freq_nova) || aluno.vezes_semana || 2;
+    const novoValor  = parseFloat(p?.valor) || 0;
+    const mesesCancelar = p?.meses_cancelar ? String(p.meses_cancelar).split(',').map(s=>s.trim()).filter(Boolean) : [];
+    const mesesEmitir   = p?.meses_emitir   ? String(p.meses_emitir).split(',').map(s=>s.trim()).filter(Boolean)   : [];
+    const proRata       = parseFloat(p?.pro_rata) || 0;
+
+    if (!novoValor) return '❌ Informe o novo valor mensal.';
+    if (!mesesEmitir.length) return '❌ Informe os meses para os novos boletos.';
+
+    let msgBot = '🔄 *Alteração de Plano — ' + aluno.nome.split(' ')[0] + '*\n\n';
+    msgBot += '📋 ' + aluno.tipo_plano + ' ' + (aluno.vezes_semana||2) + 'x → ' + novoPlano + ' ' + novoFreq + 'x/sem\n';
+    msgBot += '💰 Novo valor: R$' + brl(novoValor).replace('R$','') + '/mês\n\n';
+
+    // 1. Cancelar boletos Inter em aberto
+    let cancelados = 0, errosCancelamento = [];
+    for (const mes of mesesCancelar) {
+      try {
+        const boletos = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&mes=eq.' + mes + '&status=eq.aberto&select=id,codigo_solicitacao,valor');
+        const lista = Array.isArray(boletos) ? boletos : [];
+        for (const b of lista) {
+          await interCancelarBoleto(b.codigo_solicitacao);
+          await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+          cancelados++;
+        }
+      } catch(e) { errosCancelamento.push(mes + ': ' + e.message); }
+    }
+    if (cancelados > 0) msgBot += '🗑️ ' + cancelados + ' boleto(s) cancelado(s): ' + mesesCancelar.join(', ') + '\n';
+    if (errosCancelamento.length) msgBot += '⚠️ Erros cancelamento: ' + errosCancelamento.join(' | ') + '\n';
+
+    // 2. Emitir pró-rata se houver
+    if (proRata > 0) {
+      const mesProRata = mesesCancelar[0] || new Date().toISOString().slice(0,7);
+      try {
+        const diaVenc = aluno.dia_vencimento || 10;
+        const [ano, mes2] = mesProRata.split('-').map(Number);
+        const dtVenc = new Date(ano, mes2-1, diaVenc);
+        const seuNum = 'LCA-' + aluno.id + '-' + mesProRata + '-PR';
+        const descPR = 'LCA Pilates - Pró-rata ' + (aluno.nome.split(' ')[0]) + ' ' + (mes2+'/'+ano);
+        await interEmitirBoleto({
+          seuNumero: seuNum, valor: proRata,
+          vencimento: dtVenc.toISOString().slice(0,10),
+          nomePagador: aluno.nome, cpfCnpj: (aluno.cpf||'00000000000').replace(/\D/g,''),
+          email: aluno.email||'', descricao: descPR,
+          logradouro: aluno.logradouro||'Nao informado', numero: aluno.numero||'S/N',
+          complemento: aluno.complemento||'', bairro: aluno.bairro||'',
+          cidade: aluno.cidade||'Rio de Janeiro', cep: (aluno.cep||'20000000').replace(/\D/g,'')
+        });
+        msgBot += '📊 Pró-rata emitido: R$' + brl(proRata).replace('R$','') + ' — venc. ' + dtVenc.toLocaleDateString('pt-BR') + '\n';
+      } catch(e) { msgBot += '⚠️ Erro ao emitir pró-rata: ' + e.message + '\n'; }
+    }
+
+    // 3. Emitir novos boletos
+    let emitidos = 0, errosEmissao = [];
+    const diaVencNovo = aluno.dia_vencimento || 10;
+    const DUR_LABEL = { mensal:'Mensal', trimestral:'Trimestral', semestral:'Semestral' };
+
+    for (const mes of mesesEmitir) {
+      try {
+        const [ano, mesN] = mes.split('-').map(Number);
+        const dtVenc = new Date(ano, mesN-1, diaVencNovo);
+        const seuNum = 'LCA-' + aluno.id + '-' + mes;
+        const desc = 'LCA Pilates - ' + DUR_LABEL[novoPlano] + ' ' + novoFreq + 'x - ' + aluno.nome.split(' ')[0];
+        await interEmitirBoleto({
+          seuNumero: seuNum, valor: novoValor,
+          vencimento: dtVenc.toISOString().slice(0,10),
+          nomePagador: aluno.nome, cpfCnpj: (aluno.cpf||'00000000000').replace(/\D/g,''),
+          email: aluno.email||'', descricao: desc,
+          logradouro: aluno.logradouro||'Nao informado', numero: aluno.numero||'S/N',
+          complemento: aluno.complemento||'', bairro: aluno.bairro||'',
+          cidade: aluno.cidade||'Rio de Janeiro', cep: (aluno.cep||'20000000').replace(/\D/g,'')
+        });
+
+        // Registrar na tabela boletos
+        await sbPost('boletos', {
+          aluno_id: aluno.id, mes: mes, valor: novoValor,
+          vencimento: dtVenc.toISOString().slice(0,10),
+          status: 'aberto', descricao: desc, seu_numero: seuNum
+        });
+        emitidos++;
+      } catch(e) { errosEmissao.push(mes + ': ' + e.message); }
+    }
+
+    if (emitidos > 0) msgBot += '\n📄 ' + emitidos + ' novo(s) boleto(s) emitido(s):\n' +
+      mesesEmitir.map(function(m){ var p=m.split('-'); return '  • ' + p[1]+'/'+p[0] + ' — R$' + brl(novoValor).replace('R$',''); }).join('\n') + '\n';
+    if (errosEmissao.length) msgBot += '⚠️ Erros emissão: ' + errosEmissao.join(' | ') + '\n';
+
+    // 4. Log
+    await logOp('alterar_plano', aluno.nome + ' — ' + aluno.tipo_plano + '→' + novoPlano + ' R$' + novoValor + '/mês', aluno.id, novoValor, new Date().toISOString().slice(0,7), { cancelados: mesesCancelar, emitidos: mesesEmitir, proRata });
+
+    msgBot += '\n✅ Alteração concluída!';
+    return msgBot;
+  }
+
   if (intencao === 'inter_cancelar_boleto') {
     const aluno = dados.alunos.find(a =>
       (p?.aluno_id && a.id===p.aluno_id) ||
@@ -1903,7 +2006,7 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v4.17 iniciado ✓');
+  console.log('LCA Bot v4.18 iniciado ✓');
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
