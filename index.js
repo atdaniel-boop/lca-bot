@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.19 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.20 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1114,39 +1114,61 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'inter_boletos_vencidos') {
     try {
-      const hoje = new Date();
+      const hoje = new Date(Date.now() - 3*60*60*1000); // BRT
       const dataFim = hoje.toISOString().slice(0,10);
-      const dataInicio = new Date(hoje.getTime() - 15*24*60*60*1000).toISOString().slice(0,10);
-      // Buscar boletos vencidos (EXPIRADO) e em aberto (A_VENCER que já passaram)
-      const [rExp, rAberto] = await Promise.all([
-        interCobranças('EXPIRADO', dataInicio, dataFim),
-        interCobranças('A_VENCER', dataInicio, dataFim)
-      ]);
-      const expirados = rExp?.content || rExp?.cobrancas || [];
-      const emAberto  = (rAberto?.content || rAberto?.cobrancas || [])
-        .filter(b => b.dataVencimento && b.dataVencimento < dataFim);
-      const lista = [...expirados, ...emAberto];
-      if (!lista.length) return '✅ *Boletos vencidos/em aberto (últimos 15 dias)*\n\n_Nenhum boleto vencido ou em aberto no período._';
+      // Últimos 90 dias para pegar todos os atrasados
+      const dataInicio = new Date(hoje.getTime() - 90*24*60*60*1000).toISOString().slice(0,10);
 
-      // Cruzar com alunos pelo nome do pagador ou valor
+      // API Inter: buscar ATRASADO, EXPIRADO e A_VENCER já vencidos
+      const [rAtr, rExp, rAberto] = await Promise.all([
+        interCobranças('ATRASADO', dataInicio, dataFim).catch(() => null),
+        interCobranças('EXPIRADO', dataInicio, dataFim).catch(() => null),
+        interCobranças('A_VENCER', dataInicio, dataFim).catch(() => null)
+      ]);
+
+      const atrasados  = rAtr?.content    || rAtr?.cobrancas    || [];
+      const expirados  = rExp?.content    || rExp?.cobrancas    || [];
+      const emAberto   = (rAberto?.content || rAberto?.cobrancas || [])
+        .filter(b => b.dataVencimento && b.dataVencimento < dataFim);
+
+      // Unificar e deduplicar pelo código
+      const vistosId = new Set();
+      const lista = [...atrasados, ...expirados, ...emAberto].filter(b => {
+        const id = b.codigoCobranca || b.nossoNumero || b.seuNumero || JSON.stringify(b);
+        if (vistosId.has(id)) return false;
+        vistosId.add(id);
+        return true;
+      }).sort((a,b) => (a.dataVencimento||'').localeCompare(b.dataVencimento||''));
+
+      if (!lista.length) return '✅ *Boletos vencidos e não pagos*\n\n_Nenhum boleto atrasado encontrado nos últimos 90 dias._';
+
       const linhas = lista.map(b => {
         const venc = (b.dataVencimento||'').split('-').reverse().join('/');
-        const val = brl(b.valorNominal || 0);
+        const val  = brl(b.valorNominal || 0);
         const nomePagador = b.pagador?.nome || b.nomePagador || '';
-        // Tentar identificar o aluno
-        let nomeAluno = nomePagador.split(' ').slice(0,2).join(' ');
-        if (!nomeAluno) {
-          const al = dados.alunos.find(a =>
-            a.pagamentos_pendentes && Object.values(typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes):a.pagamentos_pendentes).some(v => Math.round(v) === Math.round(b.valorNominal||0))
-          );
+        // Cruzar com aluno: primeiro por seuNumero (LCA-id-mes), depois por nome
+        let nomeAluno = '';
+        const seuNum = b.seuNumero || '';
+        const matchSeuNum = seuNum.match(/^LCA-(\d+)-/);
+        if (matchSeuNum) {
+          const al = dados.alunos.find(a => a.id === parseInt(matchSeuNum[1]));
           if (al) nomeAluno = al.nome.split(' ').slice(0,2).join(' ');
         }
-        const diasAtraso = Math.round((new Date() - new Date(b.dataVencimento)) / 86400000);
-        return '🔴 ' + venc + ' ' + val + ' • *' + (nomeAluno||'?') + '*' + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '');
+        if (!nomeAluno && nomePagador) {
+          const al = dados.alunos.find(a =>
+            a.nome.toLowerCase().includes(nomePagador.split(' ')[0].toLowerCase())
+          );
+          nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePagador.split(' ').slice(0,2).join(' ');
+        }
+        const diasAtraso = Math.max(0, Math.round((hoje - new Date(b.dataVencimento + 'T12:00:00')) / 86400000));
+        const sit = b.situacao || 'ATRASADO';
+        return '🔴 *' + (nomeAluno||'?') + '* — ' + val + ' — venc. ' + venc + ' _(' + diasAtraso + 'd atraso)_ [' + sit + ']';
       }).join('\n');
 
-      return '🔴 *Boletos vencidos/em aberto (últimos 15 dias)*\n\n' + linhas + '\n\n_Total: ' + lista.length + ' boleto(s) - R$ ' + brl(lista.reduce((s,b)=>s+(b.valorNominal||0),0)) + '_';
-    } catch(e) { return '❌ Erro boletos Inter: ' + e.message; }
+      const total = lista.reduce((s,b) => s + (b.valorNominal||0), 0);
+      return '🔴 *Boletos vencidos e não pagos (' + lista.length + ')*\n\n' + linhas +
+        '\n\n💰 *Total em aberto: ' + brl(total) + '*';
+    } catch(e) { return '❌ Erro ao buscar boletos Inter: ' + e.message; }
   }
 
   if (intencao === 'inter_boletos') {
@@ -1788,7 +1810,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.19*\n\n' +
+      '👋 *LCA Studio Bot v4.20*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2006,7 +2028,7 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v4.19 iniciado ✓');
+  console.log('LCA Bot v4.20 iniciado ✓');
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2146,7 +2168,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.19 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.20 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
