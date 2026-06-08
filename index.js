@@ -1142,27 +1142,34 @@ async function executar(intencao, p, dados, chatId) {
 
       if (!lista.length) return '✅ *Boletos vencidos e não pagos*\n\n_Nenhum boleto atrasado encontrado nos últimos 90 dias._';
 
+      // Log para diagnóstico (remover após confirmar estrutura)
+      if (lista.length > 0) console.log('[inter_boletos_vencidos] estrutura primeiro item:', JSON.stringify(lista[0]).slice(0, 500));
+
       const linhas = lista.map(b => {
-        const venc = (b.dataVencimento||'').split('-').reverse().join('/');
-        const val  = brl(b.valorNominal || 0);
-        const nomePagador = b.pagador?.nome || b.nomePagador || '';
-        // Cruzar com aluno: primeiro por seuNumero (LCA-id-mes), depois por nome
+        // API Inter v3 — campos podem variar entre versões
+        const dataVenc = b.dataVencimento || b.vencimento || b.dtVencimento || '';
+        const valor    = b.valorNominal   || b.valor      || b.valorTotal   || b.vlNominal || 0;
+        const nomePag  = b.pagador?.nome  || b.nomePagador || b.sacado?.nome || b.nome || '';
+        const seuNum   = b.seuNumero      || b.numeroTitulo || b.codigoSolicitacao || b.codigoCobranca || '';
+        const sit      = b.situacao       || b.status      || 'ATRASADO';
+
+        // Cruzar com aluno: primeiro por seuNumero (LCA-id-mes), depois por nome do pagador
         let nomeAluno = '';
-        const seuNum = b.seuNumero || '';
-        const matchSeuNum = seuNum.match(/^LCA-(\d+)-/);
-        if (matchSeuNum) {
-          const al = dados.alunos.find(a => a.id === parseInt(matchSeuNum[1]));
+        const matchSN = seuNum.match(/LCA-(\d+)-/);
+        if (matchSN) {
+          const al = dados.alunos.find(a => a.id === parseInt(matchSN[1]));
           if (al) nomeAluno = al.nome.split(' ').slice(0,2).join(' ');
         }
-        if (!nomeAluno && nomePagador) {
-          const al = dados.alunos.find(a =>
-            a.nome.toLowerCase().includes(nomePagador.split(' ')[0].toLowerCase())
-          );
-          nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePagador.split(' ').slice(0,2).join(' ');
+        if (!nomeAluno && nomePag) {
+          const prim = nomePag.split(' ')[0].toLowerCase();
+          const al = dados.alunos.find(a => a.nome.toLowerCase().includes(prim) && prim.length > 3);
+          nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePag.split(' ').slice(0,2).join(' ');
         }
-        const diasAtraso = Math.max(0, Math.round((hoje - new Date(b.dataVencimento + 'T12:00:00')) / 86400000));
-        const sit = b.situacao || 'ATRASADO';
-        return '🔴 *' + (nomeAluno||'?') + '* — ' + val + ' — venc. ' + venc + ' _(' + diasAtraso + 'd atraso)_ [' + sit + ']';
+
+        const vencFmt = dataVenc ? dataVenc.slice(0,10).split('-').reverse().join('/') : '?';
+        const valFmt  = brl(parseFloat(valor) || 0);
+        const diasAtraso = dataVenc ? Math.max(0, Math.round((hoje - new Date(dataVenc.slice(0,10) + 'T12:00:00')) / 86400000)) : 0;
+        return '🔴 *' + (nomeAluno || nomePag.split(' ').slice(0,2).join(' ') || '?') + '* — ' + valFmt + ' — venc. ' + vencFmt + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '') + ' [' + sit + ']';
       }).join('\n');
 
       const total = lista.reduce((s,b) => s + (b.valorNominal||0), 0);
