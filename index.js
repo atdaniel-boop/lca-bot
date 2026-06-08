@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.24 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.25 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1126,11 +1126,16 @@ async function executar(intencao, p, dados, chatId) {
       // Últimos 90 dias para pegar todos os atrasados
       const dataInicio = new Date(hoje.getTime() - 90*24*60*60*1000).toISOString().slice(0,10);
 
-      // API Inter: buscar ATRASADO, EXPIRADO e A_VENCER já vencidos
+      // Timeout global de 25s por chamada para não travar o bot
+      const withTimeout = (p, ms, label) =>
+        Promise.race([p, new Promise((_,r) => setTimeout(() => r(new Error('Timeout ' + label)), ms))]);
+
+      console.log('[inter_boletos_vencidos] buscando...');
       const [rAtr, rAberto] = await Promise.all([
-        interCobranças('ATRASADO', dataInicio, dataFim).catch(() => null),
-        interCobranças('A_VENCER', dataInicio, dataFim).catch(() => null)
+        withTimeout(interCobranças('ATRASADO', dataInicio, dataFim), 25000, 'ATRASADO').catch(e => { console.error('rAtr:', e.message); return null; }),
+        withTimeout(interCobranças('A_VENCER',  dataInicio, dataFim), 25000, 'A_VENCER' ).catch(e => { console.error('rAberto:', e.message); return null; })
       ]);
+      console.log('[inter_boletos_vencidos] rAtr:', rAtr ? JSON.stringify(rAtr).slice(0,100) : 'null');
 
       const atrasados  = rAtr?.content    || rAtr?.cobrancas    || [];
       const emAberto   = (rAberto?.content || rAberto?.cobrancas || [])
@@ -1832,7 +1837,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.24*\n\n' +
+      '👋 *LCA Studio Bot v4.25*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2055,7 +2060,7 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v4.24 iniciado ✓');
+  console.log('LCA Bot v4.25 iniciado ✓');
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2195,7 +2200,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.24 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.25 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
