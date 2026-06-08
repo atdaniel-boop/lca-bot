@@ -336,6 +336,18 @@ function nowBRT() {
   return new Date(Date.now() - 3*60*60*1000).toISOString().replace('Z', '-03:00');
 }
 
+
+// Busca aluno por id ou nome — prioriza ativos quando há duplicidade de nome
+function encontrarAluno(dados, p) {
+  if (p?.aluno_id) return dados.alunos.find(a => a.id === p.aluno_id);
+  if (!p?.aluno_nome) return null;
+  const termo = p.aluno_nome.toLowerCase();
+  const matches = dados.alunos.filter(a => a.nome.toLowerCase().includes(termo));
+  if (!matches.length) return null;
+  // Preferir ativo; se todos inativos, retornar o primeiro
+  return matches.find(a => a.ativo === 'SIM') || matches[0];
+}
+
 async function logOp(tipo, descricao, alunoId, valor, mes, extra) {
   try {
     await sbPost('log_operacoes', {
@@ -830,8 +842,7 @@ async function executar(intencao, p, dados, chatId) {
   }
 
   if (intencao === 'confirmar_pagamento') {
-    const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     if (!p?.valor) return '❌ Informe o valor.';
     const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{});
@@ -862,8 +873,7 @@ async function executar(intencao, p, dados, chatId) {
   }
 
   if (intencao === 'desfazer_pagamento') {
-    const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{});
     const mesD = p?.mes || mes;
@@ -920,8 +930,7 @@ async function executar(intencao, p, dados, chatId) {
   }
 
   if (intencao === 'checkin') {
-    const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const status  = p?.status_checkin || 'presente';
     const dataCi  = p?.data || new Date().toISOString().slice(0,10);
@@ -969,8 +978,7 @@ async function executar(intencao, p, dados, chatId) {
   }
 
   if (intencao === 'desfazer_checkin') {
-    const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const dataCi = p?.data || new Date().toISOString().slice(0,10);
     const ch = (dados.changes?.checkins) || {};
@@ -1163,10 +1171,7 @@ async function executar(intencao, p, dados, chatId) {
   }
 
   if (intencao === 'inter_emitir_boleto') {
-    const aluno = dados.alunos.find(a =>
-      (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
-    );
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const hoje = new Date();
     const venc = p?.vencimento || new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10).toISOString().slice(0,10);
@@ -1239,10 +1244,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 }
 
   if (intencao === 'inter_emitir_plano') {
-    const aluno = dados.alunos.find(a =>
-      (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
-    );
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
     if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir boletos.';
@@ -1370,10 +1372,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   }
 
   if (intencao === 'confirmar_cheque') {
-    const aluno = dados.alunos.find(a =>
-      (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
-    );
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Informe o nome do aluno.\nEx: _"cheque compensou Ana"_';
     const mes = p?.mes || new Date().toISOString().slice(0,7);
     const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
@@ -1393,10 +1392,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   }
 
   if (intencao === 'inter_reenviar_boletos') {
-    const aluno = dados.alunos.find(a =>
-      (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
-    );
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Informe o nome do aluno.\nEx: _"reenviar boletos Thalita"_';
     try {
       // Buscar na tabela boletos local
@@ -1492,10 +1488,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 
   if (intencao === 'alterar_plano') {
     // Parâmetros: aluno_id/aluno_nome, plano_novo, freq_nova, valor, meses_cancelar (array CSV), meses_emitir (array CSV), pro_rata
-    const aluno = dados.alunos.find(a =>
-      (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
-    );
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado.';
 
     const novoPlano  = p?.plano_novo || aluno.tipo_plano;
@@ -1593,10 +1586,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   }
 
   if (intencao === 'inter_cancelar_boleto') {
-    const aluno = dados.alunos.find(a =>
-      (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase()))
-    );
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const mes = p?.mes || new Date().toISOString().slice(0,7);
     try {
@@ -1616,8 +1606,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   }
 
   if (intencao === 'calcular_rescisao') {
-    const aluno = dados.alunos.find(a => (p?.aluno_id && a.id===p.aluno_id) ||
-      (p?.aluno_nome && a.nome.toLowerCase().includes(p.aluno_nome.toLowerCase())));
+    const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     if (aluno.tipo_plano === 'mensal') return '⚠️ ' + aluno.nome + ' tem plano mensal - não há multa de rescisão. Basta inativar.';
     const DUR = { trimestral:3, semestral:6 };
@@ -1914,8 +1903,7 @@ async function processar(msg) {
     clearTimeout(_timer);
     if (preview) {
       // Recalcular os dados estruturados para o lançamento (mesma fórmula do preview)
-      const aluno = dados.alunos.find(a => (params?.aluno_id && a.id===params.aluno_id) ||
-        (params?.aluno_nome && a.nome.toLowerCase().includes(params.aluno_nome.toLowerCase())));
+      const aluno = encontrarAluno(dados, params);
       if (aluno && aluno.tipo_plano !== 'mensal') {
         const DUR = { trimestral:3, semestral:6 };
         const dur = DUR[aluno.tipo_plano]||3;
