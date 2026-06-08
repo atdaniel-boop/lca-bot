@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.22 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.24 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1127,20 +1127,18 @@ async function executar(intencao, p, dados, chatId) {
       const dataInicio = new Date(hoje.getTime() - 90*24*60*60*1000).toISOString().slice(0,10);
 
       // API Inter: buscar ATRASADO, EXPIRADO e A_VENCER já vencidos
-      const [rAtr, rExp, rAberto] = await Promise.all([
+      const [rAtr, rAberto] = await Promise.all([
         interCobranças('ATRASADO', dataInicio, dataFim).catch(() => null),
-        interCobranças('EXPIRADO', dataInicio, dataFim).catch(() => null),
         interCobranças('A_VENCER', dataInicio, dataFim).catch(() => null)
       ]);
 
       const atrasados  = rAtr?.content    || rAtr?.cobrancas    || [];
-      const expirados  = rExp?.content    || rExp?.cobrancas    || [];
       const emAberto   = (rAberto?.content || rAberto?.cobrancas || [])
-        .filter(b => b.dataVencimento && b.dataVencimento < dataFim);
+        .filter(b => (b.cobranca||b).dataVencimento && (b.cobranca||b).dataVencimento < dataFim);
 
-      // Unificar e deduplicar pelo código
+      // Unificar e deduplicar pelo código (sem EXPIRADO — boletos pagos por Pix ficam nesse status)
       const vistosId = new Set();
-      const lista = [...atrasados, ...expirados, ...emAberto].filter(b => {
+      const lista = [...atrasados, ...emAberto].filter(b => {
         const bc = b.cobranca || b;
         const id = bc.codigoSolicitacao || bc.seuNumero || JSON.stringify(bc);
         if (vistosId.has(id)) return false;
@@ -1168,8 +1166,19 @@ async function executar(intencao, p, dados, chatId) {
           if (al) nomeAluno = al.nome.split(' ').slice(0,2).join(' ');
         }
         if (!nomeAluno && nomePag) {
-          const prim = nomePag.split(' ')[0].toLowerCase();
-          const al = dados.alunos.find(a => a.nome.toLowerCase().includes(prim) && prim.length > 3);
+          // Tentar match pelo nome completo do pagador (mais preciso)
+          const nomePagLow = nomePag.toLowerCase();
+          let al = dados.alunos.find(a => nomePagLow.includes(a.nome.split(' ')[0].toLowerCase()) &&
+            nomePagLow.includes((a.nome.split(' ')[1]||'').toLowerCase()) &&
+            a.ativo === 'SIM');
+          // Fallback: primeiro nome, priorizando ativos
+          if (!al) {
+            const prim = nomePag.split(' ')[0].toLowerCase();
+            if (prim.length > 3) {
+              const matches = dados.alunos.filter(a => a.nome.toLowerCase().includes(prim));
+              al = matches.find(a => a.ativo === 'SIM') || matches[0];
+            }
+          }
           nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePag.split(' ').slice(0,2).join(' ');
         }
 
@@ -1823,7 +1832,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.22*\n\n' +
+      '👋 *LCA Studio Bot v4.24*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2046,7 +2055,7 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v4.22 iniciado ✓');
+  console.log('LCA Bot v4.24 iniciado ✓');
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2186,7 +2195,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.22 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.24 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
