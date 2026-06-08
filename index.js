@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.20 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.22 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -720,11 +720,18 @@ async function processarComIA(texto, dados, mes) {
       : {};
     return { tipo: 'acao', intencao: 'inter_emitir_plano', params: paramsPlano };
   }
-  if (temInter && (tL.includes('boleto') || tL.includes('cobrança') || tL.includes('cobranca')) && !tL.includes('emitir') && !tL.includes('gerar') && !tL.includes('criar')) {
-    // Vencidos/inadimplentes
-    if (tL.includes('vencido') || tL.includes('inadim') || tL.includes('atrasado') || tL.includes('em aberto') || tL.includes('nao pago') || tL.includes('não pago') || tL.includes('pendente')) {
-      return { tipo: 'acao', intencao: 'inter_boletos_vencidos', params: {} };
-    }
+  // Boletos vencidos/atrasados — detectar independente de mencionar "inter"
+  const temBoleto = tL.includes('boleto') || tL.includes('cobrança') || tL.includes('cobranca');
+  const temVencido = tL.includes('vencido') || tL.includes('inadim') || tL.includes('atrasado') ||
+    tL.includes('em aberto') || tL.includes('nao pago') || tL.includes('não pago') || tL.includes('pendente');
+  if (temVencido && (temBoleto || temInter)) {
+    return { tipo: 'acao', intencao: 'inter_boletos_vencidos', params: {} };
+  }
+  // Pergunta genérica sobre inadimplência (sem mencionar boleto)
+  if (temVencido && (tL.includes('aluno') || tL.includes('pag') || tL.includes('devend'))) {
+    return { tipo: 'acao', intencao: 'inter_boletos_vencidos', params: {} };
+  }
+  if (temInter && temBoleto && !tL.includes('emitir') && !tL.includes('gerar') && !tL.includes('criar')) {
     return { tipo: 'acao', intencao: 'inter_boletos', params: {} };
   }
   // Despedidas e respostas curtas não-acionáveis
@@ -1134,7 +1141,8 @@ async function executar(intencao, p, dados, chatId) {
       // Unificar e deduplicar pelo código
       const vistosId = new Set();
       const lista = [...atrasados, ...expirados, ...emAberto].filter(b => {
-        const id = b.codigoCobranca || b.nossoNumero || b.seuNumero || JSON.stringify(b);
+        const bc = b.cobranca || b;
+        const id = bc.codigoSolicitacao || bc.seuNumero || JSON.stringify(bc);
         if (vistosId.has(id)) return false;
         vistosId.add(id);
         return true;
@@ -1142,18 +1150,17 @@ async function executar(intencao, p, dados, chatId) {
 
       if (!lista.length) return '✅ *Boletos vencidos e não pagos*\n\n_Nenhum boleto atrasado encontrado nos últimos 90 dias._';
 
-      // Log para diagnóstico (remover após confirmar estrutura)
-      if (lista.length > 0) console.log('[inter_boletos_vencidos] estrutura primeiro item:', JSON.stringify(lista[0]).slice(0, 500));
+      // Estrutura real da API Inter v3: campos dentro de "cobranca", valor como string
+      const linhas = lista.map(item => {
+        // API retorna { cobranca: {...}, boleto: {...} } — acessar via cobranca
+        const b = item.cobranca || item;
+        const dataVenc = b.dataVencimento || '';
+        const valor    = parseFloat(b.valorNominal || b.valor || 0);
+        const nomePag  = b.pagador?.nome || b.nomePagador || '';
+        const seuNum   = b.seuNumero || item.boleto?.nossoNumero || '';
+        const sit      = b.situacao || 'ATRASADO';
 
-      const linhas = lista.map(b => {
-        // API Inter v3 — campos podem variar entre versões
-        const dataVenc = b.dataVencimento || b.vencimento || b.dtVencimento || '';
-        const valor    = b.valorNominal   || b.valor      || b.valorTotal   || b.vlNominal || 0;
-        const nomePag  = b.pagador?.nome  || b.nomePagador || b.sacado?.nome || b.nome || '';
-        const seuNum   = b.seuNumero      || b.numeroTitulo || b.codigoSolicitacao || b.codigoCobranca || '';
-        const sit      = b.situacao       || b.status      || 'ATRASADO';
-
-        // Cruzar com aluno: primeiro por seuNumero (LCA-id-mes), depois por nome do pagador
+        // Cruzar com aluno: seuNumero formato LCA-id-mes, depois por nome do pagador
         let nomeAluno = '';
         const matchSN = seuNum.match(/LCA-(\d+)-/);
         if (matchSN) {
@@ -1166,13 +1173,12 @@ async function executar(intencao, p, dados, chatId) {
           nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePag.split(' ').slice(0,2).join(' ');
         }
 
-        const vencFmt = dataVenc ? dataVenc.slice(0,10).split('-').reverse().join('/') : '?';
-        const valFmt  = brl(parseFloat(valor) || 0);
+        const vencFmt   = dataVenc ? dataVenc.slice(0,10).split('-').reverse().join('/') : '?';
         const diasAtraso = dataVenc ? Math.max(0, Math.round((hoje - new Date(dataVenc.slice(0,10) + 'T12:00:00')) / 86400000)) : 0;
-        return '🔴 *' + (nomeAluno || nomePag.split(' ').slice(0,2).join(' ') || '?') + '* — ' + valFmt + ' — venc. ' + vencFmt + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '') + ' [' + sit + ']';
+        return '🔴 *' + (nomeAluno || nomePag.split(' ').slice(0,2).join(' ') || '?') + '* — ' + brl(valor) + ' — venc. ' + vencFmt + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '') + ' [' + sit + ']';
       }).join('\n');
 
-      const total = lista.reduce((s,b) => s + (b.valorNominal||0), 0);
+      const total = lista.reduce((s,item) => s + parseFloat((item.cobranca||item).valorNominal || 0), 0);
       return '🔴 *Boletos vencidos e não pagos (' + lista.length + ')*\n\n' + linhas +
         '\n\n💰 *Total em aberto: ' + brl(total) + '*';
     } catch(e) { return '❌ Erro ao buscar boletos Inter: ' + e.message; }
@@ -1817,7 +1823,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.20*\n\n' +
+      '👋 *LCA Studio Bot v4.22*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -1871,6 +1877,11 @@ async function processar(msg) {
         : 'Nenhum plano vencendo nos próximos 30 dias.';
     }
     _respondeu=true; return tgSend(chatId, resp3 || '❌ Sem dados.');
+  }
+
+  // Se Gemini retornou tipo consulta mas com intenção Inter, forçar execução real
+  if (aiResult.tipo === 'consulta' && aiResult.intencao && aiResult.intencao.startsWith('inter_')) {
+    aiResult.tipo = 'acao';
   }
 
   // Consulta livre - IA respondeu direto ou fallback estruturado
@@ -2035,7 +2046,7 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v4.20 iniciado ✓');
+  console.log('LCA Bot v4.22 iniciado ✓');
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2175,7 +2186,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.20 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.22 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
