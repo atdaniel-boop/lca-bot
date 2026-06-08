@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.28 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.29 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1849,7 +1849,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.28*\n\n' +
+      '👋 *LCA Studio Bot v4.29*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2072,7 +2072,7 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.28 iniciado ✓ ===');
+  console.log('=== LCA Bot v4.29 iniciado ✓ ===');
   console.log('Versão: 4.28 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
@@ -2098,63 +2098,77 @@ async function main() {
           const payload = JSON.parse(body);
           console.log('[WEBHOOK-INTER]', JSON.stringify(payload).slice(0, 300));
 
-          // Inter envia evento "PAGO" com o seuNumero que gravamos na emissão
-          const evento = payload?.evento || payload?.tipo || '';
-          const seuNum = payload?.seuNumero || payload?.cobranca?.seuNumero || '';
-          const valorPago = parseFloat(payload?.valorTotalRecebido || payload?.valor || 0);
-          const dataPag = payload?.dataLiquidacao || payload?.dataPagamento || new Date().toISOString().slice(0,10);
+          // Payload do Inter: campos na raiz ou em cobranca/pagamento
+          const evento   = payload?.evento || payload?.tipo || payload?.situacao || '';
+          const seuNum   = payload?.seuNumero || payload?.cobranca?.seuNumero || '';
+          const nossoNum = payload?.nossoNumero || payload?.boleto?.nossoNumero || '';
+          const valorPago = parseFloat(
+            payload?.valorTotalRecebido || payload?.valor || payload?.valorPago ||
+            payload?.cobranca?.valorNominal || payload?.pagamento?.valorPago || 0
+          );
+          const dataPag = payload?.dataLiquidacao || payload?.dataPagamento ||
+            (payload?.dataHoraSituacao || '').slice(0,10) || new Date().toISOString().slice(0,10);
 
-          // seuNumero formato: "LCA-{id}-{mes}" ex: "LCA-96-2026-06"
+          // seuNumero formato LCA-{id}-{mes}
           const match = seuNum.match(/^LCA-(\d+)-(\d{4}-\d{2})$/);
+          const eventoValido = !evento || evento.includes('PAGO') || evento.includes('LIQUIDADO') || evento.includes('RECEBIDO');
 
-          if (match && valorPago > 0 && (evento.includes('PAGO') || evento.includes('LIQUIDADO') || evento === '')) {
+          if (!match) {
+            console.log('[WEBHOOK-INTER] seuNum não reconhecido:', seuNum, '| nossoNum:', nossoNum);
+          } else if (!eventoValido) {
+            console.log('[WEBHOOK-INTER] Evento ignorado:', evento);
+          } else {
             const alunoId = parseInt(match[1]);
             const mes = match[2];
 
-            // Carregar dados do Supabase
-            const [rAlunos] = await Promise.all([
-              sbGet('alunos', 'select=id,nome,pagamentos,pagamentos_pendentes,historico_alteracoes&id=eq.' + alunoId)
-            ]);
-            const aluno = rAlunos?.data?.[0];
-
-            if (aluno) {
-              const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{}));
-              let pend = Object.assign({}, typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{}));
-
-              // Só confirmar se ainda não está pago
-              if (!(pags[mes] > 0)) {
-                pags[mes] = valorPago;
-                const tinhaPend = !!pend[mes];
-                if (tinhaPend) delete pend[mes];
-
-                const hist = Array.isArray(aluno.historico_alteracoes) ? [...aluno.historico_alteracoes] : [];
-                hist.push({ data: new Date(dataPag+'T12:00:00').toLocaleDateString('pt-BR'), tipo: 'pagamento_auto',
-                  desc: 'Pagamento ' + mes + ' via boleto Inter (automático): ' + brl(valorPago) });
-
-                const patch = { pagamentos: pags, historico_alteracoes: hist };
-                if (tinhaPend) patch.pagamentos_pendentes = pend;
-                await sbPatch('alunos', 'id=eq.' + alunoId, patch);
-                // Marcar boleto como pago na tabela
-                try {
-                  await sbPatch('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto',
-                    { status: 'pago', pago_em: new Date().toISOString() });
-                } catch(e) { console.error('[webhook] erro ao marcar boleto pago:', e.message); }
-
-                // Notificar via Telegram
-                const chatId = TELEGRAM_CHAT_ID;
-                if (chatId) {
-                  await logOp('boleto_pago_webhook', aluno.nome + ' - ' + mes, alunoId, valorPago, mes, {dataPagamento: dataPag});
-                await tgSend(chatId, '🏦 *Pagamento confirmado automaticamente!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorPago) + '\n📅 ' + mes + ' - pago em ' + dataPag.split('-').reverse().join('/') + '\n_Boleto Inter baixado automaticamente._');
-                }
-                console.log('[WEBHOOK-INTER] Pagamento confirmado: aluno ' + alunoId + ' mes ' + mes + ' valor ' + valorPago);
-              } else {
-                console.log('[WEBHOOK-INTER] Pagamento já existe para aluno ' + alunoId + ' mes ' + mes + ' - ignorado');
-              }
-            } else {
-              console.log('[WEBHOOK-INTER] Aluno ' + alunoId + ' não encontrado');
+            // Se valor não veio no webhook, buscar na API Inter
+            let valorFinal = valorPago;
+            if (!valorFinal) {
+              try {
+                const token = await interGetToken('boleto-cobranca.read');
+                const det = await interReq('/cobranca/v3/cobrancas/' + seuNum, 'GET', null, token);
+                valorFinal = parseFloat(det?.cobranca?.valorNominal || det?.valorNominal || 0);
+                console.log('[WEBHOOK-INTER] Valor buscado na API:', valorFinal);
+              } catch(e) { console.log('[WEBHOOK] erro ao buscar valor:', e.message); }
             }
-          } else {
-            console.log('[WEBHOOK-INTER] Evento ignorado: evento="' + evento + '" seuNum="' + seuNum + '" valor=' + valorPago);
+
+            if (!valorFinal) {
+              console.log('[WEBHOOK-INTER] Sem valor — ignorado. seuNum=' + seuNum);
+            } else {
+              const [rAlunos] = await Promise.all([
+                sbGet('alunos', 'select=id,nome,pagamentos,pagamentos_pendentes,historico_alteracoes&id=eq.' + alunoId)
+              ]);
+              const aluno = rAlunos?.data?.[0];
+              if (!aluno) {
+                console.log('[WEBHOOK-INTER] Aluno ' + alunoId + ' não encontrado');
+              } else {
+                const pags = typeof aluno.pagamentos === 'string' ? JSON.parse(aluno.pagamentos || '{}') : (aluno.pagamentos || {});
+                if (pags[mes] && pags[mes] > 0) {
+                  console.log('[WEBHOOK-INTER] Pagamento já existe para aluno ' + alunoId + ' mes ' + mes + ' - ignorado');
+                } else {
+                  pags[mes] = valorFinal;
+                  const pend = typeof aluno.pagamentos_pendentes === 'string' ? JSON.parse(aluno.pagamentos_pendentes || '{}') : (aluno.pagamentos_pendentes || {});
+                  const tinhaPend = (pend[mes] || 0) > 0;
+                  if (tinhaPend) delete pend[mes];
+                  const hist = aluno.historico_alteracoes || [];
+                  hist.push({ data: new Date().toLocaleDateString('pt-BR'), tipo: 'pagamento',
+                    desc: 'Pagamento ' + mes + ' via boleto Inter (automático): ' + brl(valorFinal) });
+                  const patch = { pagamentos: pags, historico_alteracoes: hist };
+                  if (tinhaPend) patch.pagamentos_pendentes = pend;
+                  await sbPatch('alunos', 'id=eq.' + alunoId, patch);
+                  try {
+                    await sbPatch('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto',
+                      { status: 'pago', pago_em: new Date().toISOString() });
+                  } catch(e) { console.error('[webhook] erro ao marcar boleto pago:', e.message); }
+                  const chatId = TELEGRAM_CHAT_ID;
+                  if (chatId) {
+                    await logOp('boleto_pago_webhook', aluno.nome + ' - ' + mes, alunoId, valorFinal, mes, {dataPagamento: dataPag});
+                    await tgSend(chatId, '🏦 *Pagamento confirmado automaticamente!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorFinal) + '\n📅 ' + mes + ' - pago em ' + dataPag.split('-').reverse().join('/') + '\n_Boleto Inter baixado automaticamente._');
+                  }
+                  console.log('[WEBHOOK-INTER] Pagamento confirmado: aluno ' + alunoId + ' mes ' + mes + ' valor ' + valorFinal);
+                }
+              }
+            }
           }
         } catch(e) {
           console.error('[WEBHOOK-INTER] Erro:', e.message);
@@ -2213,7 +2227,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.28 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.29 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
