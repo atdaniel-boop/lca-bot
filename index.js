@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.18 - ctx movido para escopo global (fix ReferenceError no timeout), emojis restaurados, separadores de seção restaurados, template literals convertidos para compatibilidade Node 20+
+// Versão 4.19 - ctx movido para escopo global (fix ReferenceError no timeout), emojis restaurados, separadores de seção restaurados, template literals convertidos para compatibilidade Node 20+
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -331,6 +331,11 @@ const sbPatch = (t, q, b) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'PATCH', sbHe
 const sbDelete= (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'DELETE', sbHeaders(), null);
 
 // ── Log de operações ────────────────────────────────────────────────────────────
+// Retorna datetime atual em BRT (UTC-3) no formato ISO
+function nowBRT() {
+  return new Date(Date.now() - 3*60*60*1000).toISOString().replace('Z', '-03:00');
+}
+
 async function logOp(tipo, descricao, alunoId, valor, mes, extra) {
   try {
     await sbPost('log_operacoes', {
@@ -341,7 +346,7 @@ async function logOp(tipo, descricao, alunoId, valor, mes, extra) {
       mes: mes || null,
       extra: extra ? JSON.stringify(extra) : null,
       origem: 'bot',
-      criado_em: new Date().toISOString()
+      criado_em: nowBRT()
     });
   } catch(e) {
     console.error('[logOp] erro:', e.message);
@@ -843,10 +848,17 @@ async function executar(intencao, p, dados, chatId) {
     if (tinhaPend) patchData.pagamentos_pendentes = pend;
     await sbPatch('alunos', 'id=eq.' + aluno.id, patchData);
     await logOp('pagamento_confirmado', aluno.nome + ' - ' + mes, aluno.id, p.valor, mes);
-    // Cancelar boleto em aberto no Inter (se houver)
-    const nCancelados = await cancelarBoletoPorMes(aluno.id, mes);
-    const msgCancelamento = nCancelados > 0 ? '\n_Boleto Inter cancelado automaticamente._' : '';
-    return '✅ Pagamento confirmado!\n*' + aluno.nome + '* - ' + brl(p.valor) + ' - ' + mes + tinhaPend?'\n_(boleto que estava aguardando foi baixado)_':'' + msgCancelamento + '\n_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mes + '"_';
+    // Cancelar boleto Inter apenas se aluno usa boleto
+    const usaBoleto = aluno.forma_pagamento === 'boleto';
+    let msgCancelamento = '';
+    if (usaBoleto) {
+      const nCancelados = await cancelarBoletoPorMes(aluno.id, mes);
+      if (nCancelados > 0) msgCancelamento = '\n_Boleto Inter cancelado automaticamente._';
+    }
+    // Mensagem de pendente só se era realmente boleto/pendência financeira
+    const msgPend = tinhaPend && usaBoleto ? '\n_(boleto que estava aguardando foi baixado)_' : '';
+    const formaLabel = aluno.forma_pagamento ? ' (' + aluno.forma_pagamento + ')' : '';
+    return '✅ Pagamento confirmado!\n*' + aluno.nome + '* - ' + brl(p.valor) + ' - ' + mes + formaLabel + msgPend + msgCancelamento + '\n_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mes + '"_';
   }
 
   if (intencao === 'desfazer_pagamento') {
@@ -2006,7 +2018,7 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v4.18 iniciado ✓');
+  console.log('LCA Bot v4.19 iniciado ✓');
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
