@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.19 - ctx movido para escopo global (fix ReferenceError no timeout), emojis restaurados, separadores de seção restaurados, template literals convertidos para compatibilidade Node 20+
+// Versão 4.19 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -358,7 +358,7 @@ async function logOp(tipo, descricao, alunoId, valor, mes, extra) {
       mes: mes || null,
       extra: extra ? JSON.stringify(extra) : null,
       origem: 'bot',
-      criado_em: nowBRT()
+      criado_em: new Date().toISOString()
     });
   } catch(e) {
     console.error('[logOp] erro:', e.message);
@@ -1788,7 +1788,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.17*\n\n' +
+      '👋 *LCA Studio Bot v4.19*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2146,7 +2146,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.17 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.19 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
