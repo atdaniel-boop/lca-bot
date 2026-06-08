@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.25 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.26 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1131,22 +1131,26 @@ async function executar(intencao, p, dados, chatId) {
         Promise.race([p, new Promise((_,r) => setTimeout(() => r(new Error('Timeout ' + label)), ms))]);
 
       console.log('[inter_boletos_vencidos] buscando...');
+      // A_VENCER: janela menor (30 dias) para não puxar centenas de boletos futuros
+      const dataInicioAberto = new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
       const [rAtr, rAberto] = await Promise.all([
         withTimeout(interCobranças('ATRASADO', dataInicio, dataFim), 25000, 'ATRASADO').catch(e => { console.error('rAtr:', e.message); return null; }),
-        withTimeout(interCobranças('A_VENCER',  dataInicio, dataFim), 25000, 'A_VENCER' ).catch(e => { console.error('rAberto:', e.message); return null; })
+        withTimeout(interCobranças('A_VENCER', dataInicioAberto, dataFim), 25000, 'A_VENCER').catch(e => { console.error('rAberto:', e.message); return null; })
       ]);
       // Log completo para ver todos os campos disponíveis
       console.log('[inter_boletos_vencidos] rAtr keys:', rAtr ? Object.keys(rAtr).join(',') : 'null');
       console.log('[inter_boletos_vencidos] rAtr sample:', rAtr ? JSON.stringify(rAtr).slice(0,300) : 'null');
 
-      // API Inter v3 retorna lista em vários campos possíveis
-      const atrasados = rAtr?.content || rAtr?.cobrancas || rAtr?.itens || rAtr?.items ||
-        (rAtr?.data && (rAtr.data.content || rAtr.data.cobrancas)) || [];
-      const emAberto  = (rAberto?.content || rAberto?.cobrancas || rAberto?.itens || rAberto?.items ||
-        (rAberto?.data && (rAberto.data.content || rAberto.data.cobrancas)) || [])
-        .filter(b => (b.cobranca||b).dataVencimento && (b.cobranca||b).dataVencimento < dataFim);
+      // rAtr.cobrancas é a lista (confirmado pelo log)
+      const atrasados = rAtr?.cobrancas || [];
+      // emAberto: apenas A_VENCER que já passaram da data de hoje (vencidos não marcados ainda)
+      const emAberto  = (rAberto?.cobrancas || [])
+        .filter(b => {
+          const dv = (b.cobranca||b).dataVencimento || '';
+          return dv && dv < dataFim;
+        });
 
-      console.log('[inter_boletos_vencidos] atrasados:', atrasados.length, '| emAberto:', emAberto.length);
+      console.log('[inter_boletos_vencidos] atrasados:', atrasados.length, '| emAberto filtrado:', emAberto.length);
 
       // Unificar e deduplicar pelo código (sem EXPIRADO — boletos pagos por Pix ficam nesse status)
       const vistosId = new Set();
@@ -1844,7 +1848,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.25*\n\n' +
+      '👋 *LCA Studio Bot v4.26*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2067,7 +2071,7 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('LCA Bot v4.25 iniciado ✓');
+  console.log('LCA Bot v4.26 iniciado ✓');
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2207,7 +2211,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.25 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.26 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
