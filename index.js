@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.29 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.30 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1197,9 +1197,7 @@ async function executar(intencao, p, dados, chatId) {
             }
           }
           nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePag.split(' ').slice(0,2).join(' ');
-        }
-
-        const vencFmt   = dataVenc ? dataVenc.slice(0,10).split('-').reverse().join('/') : '?';
+        }const vencFmt   = dataVenc ? dataVenc.slice(0,10).split('-').reverse().join('/') : '?';
         const diasAtraso = dataVenc ? Math.max(0, Math.round((hoje - new Date(dataVenc.slice(0,10) + 'T12:00:00')) / 86400000)) : 0;
         return '🔴 *' + (nomeAluno || nomePag.split(' ').slice(0,2).join(' ') || '?') + '* — ' + brl(valor) + ' — venc. ' + vencFmt + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '') + ' [' + sit + ']';
       }).join('\n');
@@ -1849,7 +1847,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.29*\n\n' +
+      '👋 *LCA Studio Bot v4.30*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2050,6 +2048,56 @@ async function enviarAniversariantesHoje() {
 }
 
 // ── Agendamento da rotina ───────────────────────────────────────────────────────
+
+// ── Fila de emissão automática de boletos ─────────────────────────────────────
+async function processarFilaBoletos() {
+  try {
+    // Buscar pedidos pendentes
+    const r = await sbGet('fila_boletos', 'status=eq.pendente&select=*&order=criado_em.asc&limit=5');
+    const fila = r?.data || [];
+    if (!fila.length) return;
+
+    console.log('[fila_boletos] ' + fila.length + ' pedido(s) pendente(s)');
+    const dados = await getDados();
+
+    for (const pedido of fila) {
+      try {
+        const aluno = dados.alunos.find(a => a.id === pedido.aluno_id);
+        if (!aluno) {
+          await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'aluno não encontrado' });
+          continue;
+        }
+        if (!aluno.cpf) {
+          await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'sem CPF' });
+          await tgSend(TELEGRAM_CHAT_ID, '⚠️ Não foi possível emitir boletos de *' + aluno.nome + '* automaticamente: CPF não cadastrado.\nCadastre o CPF e emita manualmente: _"emitir plano ' + aluno.nome.split(' ')[0] + '"_');
+          continue;
+        }
+
+        // Marcar como processando
+        await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'processando' });
+
+        // Emitir via intenção inter_emitir_plano
+        const resultado = await executar(
+          'inter_emitir_plano',
+          { aluno_id: aluno.id, aluno_nome: aluno.nome },
+          dados,
+          TELEGRAM_CHAT_ID,
+          new Date().toISOString().slice(0,7)
+        );
+
+        await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: 'emitido automaticamente' });
+        console.log('[fila_boletos] Boletos emitidos para', aluno.nome);
+      } catch(e) {
+        console.error('[fila_boletos] erro no pedido', pedido.id, e.message);
+        await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: e.message.slice(0,200) });
+        await tgSend(TELEGRAM_CHAT_ID, '❌ Erro ao emitir boletos de *' + (pedido.aluno_nome||'?') + '* automaticamente: ' + e.message.slice(0,100));
+      }
+    }
+  } catch(e) {
+    console.error('[fila_boletos] erro geral:', e.message);
+  }
+}
+
 function agendarRotinaAniversarios() {
   // Verificar a cada hora se chegou às 8h (horário de Brasília = UTC-3)
   async function checar() {
@@ -2072,7 +2120,7 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.29 iniciado ✓ ===');
+  console.log('=== LCA Bot v4.30 iniciado ✓ ===');
   console.log('Versão: 4.28 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
@@ -2227,10 +2275,13 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.29 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.30 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
+  // Verificar fila de boletos a cada 2 minutos
+  setInterval(processarFilaBoletos, 2 * 60 * 1000);
+  processarFilaBoletos(); // verificar imediatamente na inicialização
 
   while (true) {
     try {
