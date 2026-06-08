@@ -1135,11 +1135,18 @@ async function executar(intencao, p, dados, chatId) {
         withTimeout(interCobranças('ATRASADO', dataInicio, dataFim), 25000, 'ATRASADO').catch(e => { console.error('rAtr:', e.message); return null; }),
         withTimeout(interCobranças('A_VENCER',  dataInicio, dataFim), 25000, 'A_VENCER' ).catch(e => { console.error('rAberto:', e.message); return null; })
       ]);
-      console.log('[inter_boletos_vencidos] rAtr:', rAtr ? JSON.stringify(rAtr).slice(0,100) : 'null');
+      // Log completo para ver todos os campos disponíveis
+      console.log('[inter_boletos_vencidos] rAtr keys:', rAtr ? Object.keys(rAtr).join(',') : 'null');
+      console.log('[inter_boletos_vencidos] rAtr sample:', rAtr ? JSON.stringify(rAtr).slice(0,300) : 'null');
 
-      const atrasados  = rAtr?.content    || rAtr?.cobrancas    || [];
-      const emAberto   = (rAberto?.content || rAberto?.cobrancas || [])
+      // API Inter v3 retorna lista em vários campos possíveis
+      const atrasados = rAtr?.content || rAtr?.cobrancas || rAtr?.itens || rAtr?.items ||
+        (rAtr?.data && (rAtr.data.content || rAtr.data.cobrancas)) || [];
+      const emAberto  = (rAberto?.content || rAberto?.cobrancas || rAberto?.itens || rAberto?.items ||
+        (rAberto?.data && (rAberto.data.content || rAberto.data.cobrancas)) || [])
         .filter(b => (b.cobranca||b).dataVencimento && (b.cobranca||b).dataVencimento < dataFim);
+
+      console.log('[inter_boletos_vencidos] atrasados:', atrasados.length, '| emAberto:', emAberto.length);
 
       // Unificar e deduplicar pelo código (sem EXPIRADO — boletos pagos por Pix ficam nesse status)
       const vistosId = new Set();
