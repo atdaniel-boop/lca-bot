@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.37 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.38 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1260,16 +1260,26 @@ async function executar(intencao, p, dados, chatId) {
         });
       }
       if (!lista.length) return '📋 *Boletos Inter*' + (filtroAluno ? ' — ' + filtroAluno.nome.split(' ')[0] : '') + '\n\n_Nenhuma cobrança encontrada no período._';
-      const linhas = lista.slice(0,15).map(item => {
+      // Ordenar por data de vencimento
+      lista.sort((a,b) => {
+        const da = (a.cobranca||a).dataVencimento || '';
+        const db = (b.cobranca||b).dataVencimento || '';
+        return da.localeCompare(db);
+      });
+      const linhas = lista.slice(0,20).map(item => {
         const bc = item.cobranca || item;
         const status = bc.situacao === 'PAGO' ? '✅' : bc.situacao === 'CANCELADO' ? '❌' : bc.situacao === 'ATRASADO' ? '🔴' : '⏳';
         const val = brl(parseFloat(bc.valorNominal) || 0);
-        const nome = (bc.pagador?.nome || '').split(' ').slice(0,2).join(' ');
+        const nome = filtroAluno ? '' : ' - ' + (bc.pagador?.nome || '').split(' ').slice(0,2).join(' ');
         const venc = (bc.dataVencimento||'').split('-').reverse().join('/');
-        return status + ' ' + venc + ' ' + val + ' - ' + nome;
+        const seuN = bc.seuNumero ? ' _[' + bc.seuNumero + ']_' : '';
+        return status + ' ' + venc + ' ' + val + nome + seuN;
       }).join('\n');
-      return '📋 *Boletos Inter* (' + (situacao||'todos') + ')\n\n' + linhas +
-        (lista.length > 15 ? '\n\n_...e mais ' + (lista.length-15) + '_' : '');
+      const titulo = filtroAluno
+        ? '📋 *Boletos Inter — ' + filtroAluno.nome.split(' ').slice(0,2).join(' ') + '*'
+        : '📋 *Boletos Inter* (' + (situacao||'todos') + ')';
+      return titulo + '\n\n' + linhas +
+        (lista.length > 20 ? '\n\n_...e mais ' + (lista.length-20) + '_' : '');
     } catch(e) { return '❌ Erro boletos Inter: ' + e.message; }
   }
 
@@ -1907,7 +1917,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.37*\n\n' +
+      '👋 *LCA Studio Bot v4.38*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2180,8 +2190,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.37 iniciado ✓ ===');
-  console.log('Versão: 4.37 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.38 iniciado ✓ ===');
+  console.log('Versão: 4.38 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2335,7 +2345,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.37 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.38 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
