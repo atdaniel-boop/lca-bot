@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.34 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.35 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -733,7 +733,14 @@ async function processarComIA(texto, dados, mes) {
     return { tipo: 'acao', intencao: 'inter_boletos_vencidos', params: {} };
   }
   if (temInter && temBoleto && !tL.includes('emitir') && !tL.includes('gerar') && !tL.includes('criar')) {
-    return { tipo: 'acao', intencao: 'inter_boletos', params: {} };
+    // Se mencionou aluno específico, passar como parâmetro
+    const alunoMencB = dados.alunos.find(a => tL.includes(a.nome.split(' ')[0].toLowerCase()) && a.nome.split(' ')[0].length > 3);
+    return { tipo: 'acao', intencao: 'inter_boletos', params: alunoMencB ? { aluno_id: alunoMencB.id, aluno_nome: alunoMencB.nome } : {} };
+  }
+  // Situação financeira de aluno específico
+  if (tL.includes('situação') || tL.includes('situacao') || tL.includes('financeira') || tL.includes('financeiro')) {
+    const alunoMencF = dados.alunos.find(a => tL.includes(a.nome.split(' ')[0].toLowerCase()) && a.nome.split(' ')[0].length > 3);
+    if (alunoMencF) return { tipo: 'acao', intencao: 'consulta_aluno', params: { aluno_id: alunoMencF.id, aluno_nome: alunoMencF.nome } };
   }
   // Despedidas e respostas curtas não-acionáveis
   const despedidas = ['obrigado','obrigada','valeu','tchau','até','flw','ok','entendi','certo','legal','perfeito','ótimo','otimo','show','blz','beleza'];
@@ -1191,7 +1198,7 @@ async function executar(intencao, p, dados, chatId) {
             }
           }
           nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePag.split(' ').slice(0,2).join(' ');
-        }
+          }
 
         const vencFmt   = dataVenc ? dataVenc.slice(0,10).split('-').reverse().join('/') : '?';
         const diasAtraso = dataVenc ? Math.max(0, Math.round((hoje - new Date(dataVenc.slice(0,10) + 'T12:00:00')) / 86400000)) : 0;
@@ -1204,6 +1211,26 @@ async function executar(intencao, p, dados, chatId) {
     } catch(e) { return '❌ Erro ao buscar boletos Inter: ' + e.message; }
   }
 
+  if (intencao === 'consulta_aluno') {
+    const aluno = encontrarAluno(dados, p);
+    if (!aluno) return '❌ Aluno não encontrado.';
+    const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
+    const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
+    const todosM = [...new Set([...Object.keys(pags),...Object.keys(pend)])].sort().slice(-12);
+    if (!todosM.length) return '📋 *' + aluno.nome.split(' ')[0] + '* — nenhum registro financeiro encontrado.';
+    const MESES_PT2 = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+    const linhas = todosM.reverse().map(m => {
+      const v = pags[m]||0;
+      const vp = pend[m]||0;
+      const label = MESES_PT2[parseInt(m.split('-')[1])-1]+'/'+m.split('-')[0];
+      if (v > 0) return '✅ ' + label + ' — ' + brl(v) + ' (pago)';
+      if (vp > 0) return '⏳ ' + label + ' — ' + brl(vp) + ' (aguardando)';
+      return '🔴 ' + label + ' — pendente';
+    }).join('\n');
+    return '📋 *Situação financeira — ' + aluno.nome.split(' ')[0] + '*\n' +
+      'Plano: ' + aluno.tipo_plano + ' | ' + (aluno.vezes_semana||2) + 'x/sem | ' + aluno.forma_pagamento + '\n\n' + linhas;
+  }
+
   if (intencao === 'inter_boletos') {
     try {
       const hoje = new Date();
@@ -1211,17 +1238,31 @@ async function executar(intencao, p, dados, chatId) {
       const dataInicio = p?.data_inicio || new Date(hoje.getFullYear(), hoje.getMonth(), 1).toISOString().slice(0,10);
       const situacao = p?.situacao || null;
       const result = await interCobranças(situacao, dataInicio, dataFim);
-      const lista = result?.content || result?.cobrancas || [];
-      if (!lista.length) return '📋 *Boletos Inter*\n\n_Nenhuma cobrança encontrada no período_';
-      const linhas = lista.slice(0,15).map(b => {
-        const status = b.situacao === 'PAGO' ? '✅' : b.situacao === 'CANCELADO' ? '❌' : '⏳';
-        const val = brl(b.valorNominal || 0);
-        const nome = (b.pagador?.nome || '').split(' ').slice(0,2).join(' ');
-        const venc = (b.dataVencimento||''). split('-').reverse().join('/');
+      let lista = result?.content || result?.cobrancas || [];
+      // Filtrar por aluno se mencionado
+      const filtroAluno = encontrarAluno(dados, p);
+      if (filtroAluno) {
+        const nomeFirst = filtroAluno.nome.split(' ')[0].toLowerCase();
+        lista = lista.filter(item => {
+          const bc = item.cobranca || item;
+          const nomePag = (bc.pagador?.nome || '').toLowerCase();
+          const seuNum = bc.seuNumero || '';
+          const matchId = seuNum.match(/^LCA-(\d+)-/);
+          return (matchId && parseInt(matchId[1]) === filtroAluno.id) ||
+            nomePag.includes(nomeFirst);
+        });
+      }
+      if (!lista.length) return '📋 *Boletos Inter*' + (filtroAluno ? ' — ' + filtroAluno.nome.split(' ')[0] : '') + '\n\n_Nenhuma cobrança encontrada no período._';
+      const linhas = lista.slice(0,15).map(item => {
+        const bc = item.cobranca || item;
+        const status = bc.situacao === 'PAGO' ? '✅' : bc.situacao === 'CANCELADO' ? '❌' : bc.situacao === 'ATRASADO' ? '🔴' : '⏳';
+        const val = brl(parseFloat(bc.valorNominal) || 0);
+        const nome = (bc.pagador?.nome || '').split(' ').slice(0,2).join(' ');
+        const venc = (bc.dataVencimento||'').split('-').reverse().join('/');
         return status + ' ' + venc + ' ' + val + ' - ' + nome;
       }).join('\n');
-      return '📋 *Boletos Inter* (' + situacao||'todos' + ')\n\n' + linhas +
-        (lista.length > 15 ? '\n\n_...e mais ' + lista.length-15 + '_' : '');
+      return '📋 *Boletos Inter* (' + (situacao||'todos') + ')\n\n' + linhas +
+        (lista.length > 15 ? '\n\n_...e mais ' + (lista.length-15) + '_' : '');
     } catch(e) { return '❌ Erro boletos Inter: ' + e.message; }
   }
 
@@ -1393,10 +1434,22 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         });
         const cod  = result?.codigoSolicitacao || result?.nossoNumero || '?';
         const link = result?.linkVisualizacaoBoleto || result?.link || '';
-        // Gravar boleto na tabela
+        // Gravar boleto na tabela e em pagamentos_pendentes do aluno
         if (result?.codigoSolicitacao) {
           await gravarBoleto(aluno.id, mesStr, result.codigoSolicitacao, 'LCA-' + aluno.id + '-' + mesStr, valor, dtVenc.toISOString().slice(0,10));
         }
+        // Registrar em pagamentos_pendentes para aparecer no histórico financeiro
+        try {
+          const rAl = await sbGet('alunos', 'select=pagamentos_pendentes,pagamentos&id=eq.' + aluno.id);
+          const alAtual = (Array.isArray(rAl) ? rAl[0] : rAl?.data?.[0]) || {};
+          const pagAtual = typeof alAtual.pagamentos==='string'?JSON.parse(alAtual.pagamentos||'{}'):(alAtual.pagamentos||{});
+          const pendAtual = typeof alAtual.pagamentos_pendentes==='string'?JSON.parse(alAtual.pagamentos_pendentes||'{}'):(alAtual.pagamentos_pendentes||{});
+          // Só lançar como pendente se ainda não foi pago
+          if (!(pagAtual[mesStr] > 0)) {
+            pendAtual[mesStr] = valor;
+            await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos_pendentes: pendAtual });
+          }
+        } catch(ePend) { console.error('[emitir_plano] erro ao gravar pendente:', ePend.message); }
         // Enviar PDF com nome correto
         const nomeArq = 'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc + ' - ' + aluno.nome.split(' ')[0] + '.pdf';
         if (link) {
@@ -1847,7 +1900,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.34*\n\n' +
+      '👋 *LCA Studio Bot v4.35*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2120,8 +2173,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.34 iniciado ✓ ===');
-  console.log('Versão: 4.34 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.35 iniciado ✓ ===');
+  console.log('Versão: 4.35 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2275,7 +2328,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.34 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.35 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
