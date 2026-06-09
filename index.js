@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.31 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.32 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1025,11 +1025,15 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'inter_extrato') {
     try {
-      const hoje = new Date();
+      const hoje = new Date(Date.now() - 3*60*60*1000); // BRT
       const dataFim = hoje.toISOString().slice(0,10);
-      // Extrato dos últimos 30 dias por padrão (não só mês corrente)
       const dataInicio = p?.data_inicio || new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
-      const ext = await interExtrato(dataInicio, dataFim);
+      console.log('[inter_extrato] buscando', dataInicio, 'a', dataFim);
+      const ext = await Promise.race([
+        interExtrato(dataInicio, dataFim),
+        new Promise((_,r) => setTimeout(() => r(new Error('Timeout extrato 25s')), 25000))
+      ]);
+      console.log('[inter_extrato] ok, keys:', ext ? Object.keys(ext).join(',') : 'null');
       const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
       // Log diagnóstico: Pix sem padrão Cp:
       transacoes.filter(t => t.tipoTransacao==='PIX' && t.tipoOperacao==='C' && !(t.descricao||'').includes('Cp:')).slice(0,3).forEach(t => {
@@ -1854,7 +1858,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.31*\n\n' +
+      '👋 *LCA Studio Bot v4.32*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2127,8 +2131,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.31 iniciado ✓ ===');
-  console.log('Versão: 4.28 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.32 iniciado ✓ ===');
+  console.log('Versão: 4.32 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2282,7 +2286,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.31 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.32 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
