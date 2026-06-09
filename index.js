@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.30 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.31 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -149,7 +149,8 @@ async function interEmitirBoleto(dados) {
       uf:         dados.uf || 'RJ',
       cep:        dados.cep || '20000000',
       numero:     dados.numero || 'S/N',
-      complemento: dados.complemento || undefined
+      complemento: dados.complemento || undefined,
+      bairro: dados.bairro || undefined
     },
     mensagem: {
       linha1: dados.descricao || 'Mensalidade Pilates LCA Studio',
@@ -1197,7 +1198,9 @@ async function executar(intencao, p, dados, chatId) {
             }
           }
           nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePag.split(' ').slice(0,2).join(' ');
-        }const vencFmt   = dataVenc ? dataVenc.slice(0,10).split('-').reverse().join('/') : '?';
+        }
+
+        const vencFmt   = dataVenc ? dataVenc.slice(0,10).split('-').reverse().join('/') : '?';
         const diasAtraso = dataVenc ? Math.max(0, Math.round((hoje - new Date(dataVenc.slice(0,10) + 'T12:00:00')) / 86400000)) : 0;
         return '🔴 *' + (nomeAluno || nomePag.split(' ').slice(0,2).join(' ') || '?') + '* — ' + brl(valor) + ' — venc. ' + vencFmt + (diasAtraso > 0 ? ' _(' + diasAtraso + 'd atraso)_' : '') + ' [' + sit + ']';
       }).join('\n');
@@ -1348,12 +1351,15 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const planoLabel = plano.charAt(0).toUpperCase() + plano.slice(1);
 
     // Montar endereço sem null
-    const endLogradouro = aluno.logradouro || aluno.endereco || 'Nao informado';
-    const endNumero = aluno.numero || 'S/N';
-    const endComplemento = aluno.complemento && aluno.complemento !== 'null' ? aluno.complemento : '';
-    const endCidade = aluno.cidade ? aluno.cidade.split('-')[0].trim() : 'Rio de Janeiro';
-    const endUF = aluno.cidade ? (aluno.cidade.split('-')[1]||'RJ').trim() : 'RJ';
-    const endCEP = aluno.cep ? aluno.cep.replace(/\D/g,'').slice(0,8) : '20000000';
+    const _limpo = v => (!v || v === 'null' || v === 'undefined') ? '' : String(v).trim();
+    const endLogradouro = _limpo(aluno.logradouro) || _limpo(aluno.endereco) || 'Nao informado';
+    const endNumero     = _limpo(aluno.numero) || 'S/N';
+    const endComplemento = _limpo(aluno.complemento);
+    const endBairro     = _limpo(aluno.bairro);
+    const endCidadeRaw  = _limpo(aluno.cidade) || 'Rio de Janeiro-RJ';
+    const endCidade     = endCidadeRaw.split('-')[0].trim();
+    const endUF         = (endCidadeRaw.split('-')[1]||'RJ').trim();
+    const endCEP        = aluno.cep ? aluno.cep.replace(/\D/g,'').slice(0,8) : '20000000';
 
     const resultados = [];
     let erros = 0;
@@ -1387,6 +1393,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           cep: endCEP,
           numero: endNumero,
           complemento: endComplemento || undefined,
+          bairro: endBairro || undefined,
           descricao,
           referencia: 'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc,
           seuNumero: 'LCA-' + aluno.id + '-' + mesStr
@@ -1847,7 +1854,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.30*\n\n' +
+      '👋 *LCA Studio Bot v4.31*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2120,7 +2127,7 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.30 iniciado ✓ ===');
+  console.log('=== LCA Bot v4.31 iniciado ✓ ===');
   console.log('Versão: 4.28 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
@@ -2275,7 +2282,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.30 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.31 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
