@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.36 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.37 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -732,10 +732,13 @@ async function processarComIA(texto, dados, mes) {
   if (temVencido && (tL.includes('aluno') || tL.includes('pag') || tL.includes('devend'))) {
     return { tipo: 'acao', intencao: 'inter_boletos_vencidos', params: {} };
   }
-  if (temInter && temBoleto && !tL.includes('emitir') && !tL.includes('gerar') && !tL.includes('criar')) {
+  if (temBoleto && !tL.includes('emitir') && !tL.includes('gerar') && !tL.includes('criar')) {
     // Se mencionou aluno específico, passar como parâmetro
     const alunoMencB = dados.alunos.find(a => tL.includes(a.nome.split(' ')[0].toLowerCase()) && a.nome.split(' ')[0].length > 3);
-    return { tipo: 'acao', intencao: 'inter_boletos', params: alunoMencB ? { aluno_id: alunoMencB.id, aluno_nome: alunoMencB.nome } : {} };
+    // Só disparar sem "inter" se houver aluno mencionado — senão exige "inter" para não confundir
+    if (alunoMencB || temInter) {
+      return { tipo: 'acao', intencao: 'inter_boletos', params: alunoMencB ? { aluno_id: alunoMencB.id, aluno_nome: alunoMencB.nome } : {} };
+    }
   }
   // Situação financeira de aluno específico
   if (tL.includes('situação') || tL.includes('situacao') || tL.includes('financeira') || tL.includes('financeiro')) {
@@ -1904,7 +1907,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.36*\n\n' +
+      '👋 *LCA Studio Bot v4.37*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2177,8 +2180,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.36 iniciado ✓ ===');
-  console.log('Versão: 4.36 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.37 iniciado ✓ ===');
+  console.log('Versão: 4.37 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2332,7 +2335,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.36 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.37 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
