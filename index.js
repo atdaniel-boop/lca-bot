@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.32 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.34 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1038,18 +1038,9 @@ async function executar(intencao, p, dados, chatId) {
       // Log diagnóstico: Pix sem padrão Cp:
       transacoes.filter(t => t.tipoTransacao==='PIX' && t.tipoOperacao==='C' && !(t.descricao||'').includes('Cp:')).slice(0,3).forEach(t => {
       });
-      // Log de um boleto para ver campos
-      if (!transacoes.length) return '📄 *Extrato Inter* (' + dataInicio + ' a ' + dataFim + ')\n\n_Nenhuma transação encontrada._\n\nResposta bruta: ' + JSON.stringify(ext).slice(0,200);
-      // Log completo de uma transação Pix para ver todos os campos disponíveis
+      if (!transacoes.length) return '📄 *Extrato Inter* (' + dataInicio + ' a ' + dataFim + ')\n\n_Nenhuma transação encontrada._';
 
-      // Índice de boletos emitidos por valor para cruzamento
-      let boletosEmitidos = [];
-      try {
-        const rb = await sbGet('boletos', 'select=aluno_id,valor,vencimento,mes&status=in.(aberto,pago,cancelado,cancelado_manual)');
-        boletosEmitidos = Array.isArray(rb) ? rb : (rb?.data || []);
-      } catch(e) {}
-
-      // Índice de alunos por valor+mês para cruzamento mais preciso
+      // Índice de alunos por valor+mês (sem busca extra no Supabase)
       const valorMesParaAlunos = {};
       dados.alunos.forEach(a => {
         const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
@@ -1059,9 +1050,8 @@ async function executar(intencao, p, dados, chatId) {
             if (v > 0) {
               const key = Math.round(parseFloat(v)) + '-' + m;
               if (!valorMesParaAlunos[key]) valorMesParaAlunos[key] = [];
-              const primeiroNome = a.nome.split(' ')[0];
-              if (!valorMesParaAlunos[key].includes(primeiroNome))
-                valorMesParaAlunos[key].push(primeiroNome);
+              const pN = a.nome.split(' ')[0];
+              if (!valorMesParaAlunos[key].includes(pN)) valorMesParaAlunos[key].push(pN);
             }
           });
         });
@@ -1097,12 +1087,11 @@ async function executar(intencao, p, dados, chatId) {
                 : ' _(' + nomeFormatado.split(' ')[0] + ')_';
             }
           } else if (t.tipoTransacao === 'BOLETO_COBRANCA') {
-            // Boleto: cruzar com tabela boletos pelo valor e mês
-            const boleto = boletosEmitidos.find(b => Math.round(parseFloat(b.valor)) === Math.round(valNum) && b.mes === mes);
-            if (boleto) {
-              const alunoB = dados.alunos.find(a => a.id === boleto.aluno_id);
-              if (alunoB) nomeAluno = ' _(' + alunoB.nome.split(' ')[0] + ')_';
-            }
+            // Boleto: cruzar por valor+mês nos pagamentos dos alunos
+            const keyB = Math.round(valNum) + '-' + mes;
+            const cands = valorMesParaAlunos[keyB] || [];
+            if (cands.length === 1) nomeAluno = ' _(' + cands[0] + ')_';
+            else if (cands.length > 1) nomeAluno = ' _(~' + cands.slice(0,2).join('/')+ ')_';
           }
           // Fallback para qualquer tipo sem nome: valor+mês
           if (!nomeAluno) {
@@ -1120,7 +1109,7 @@ async function executar(intencao, p, dados, chatId) {
         return sinal + ' ' + data + ' ' + val + nomeAluno + ' - ' + desc + alertCheque;
       }).join('\n');
       return '📄 *Extrato Inter* (' + dataInicio.split('-').reverse().join('/') + ' a ' + dataFim.split('-').reverse().join('/') + ')\n\n' + linhas +
-        (transacoes.length > 15 ? '\n\n_...e mais ' + transacoes.length - 15 + ' transações._' : '');
+        (transacoes.length > 15 ? '\n\n_...e mais ' + (transacoes.length - 15) + ' transações._' : '');
     } catch(e) { return '❌ Erro extrato Inter: ' + e.message; }
   }
 
@@ -1858,7 +1847,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.32*\n\n' +
+      '👋 *LCA Studio Bot v4.34*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2131,8 +2120,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.32 iniciado ✓ ===');
-  console.log('Versão: 4.32 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.34 iniciado ✓ ===');
+  console.log('Versão: 4.34 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2286,7 +2275,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.32 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.34 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
