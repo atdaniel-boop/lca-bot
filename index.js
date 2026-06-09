@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.35 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.36 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1198,7 +1198,7 @@ async function executar(intencao, p, dados, chatId) {
             }
           }
           nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePag.split(' ').slice(0,2).join(' ');
-          }
+        }
 
         const vencFmt   = dataVenc ? dataVenc.slice(0,10).split('-').reverse().join('/') : '?';
         const diasAtraso = dataVenc ? Math.max(0, Math.round((hoje - new Date(dataVenc.slice(0,10) + 'T12:00:00')) / 86400000)) : 0;
@@ -1234,8 +1234,12 @@ async function executar(intencao, p, dados, chatId) {
   if (intencao === 'inter_boletos') {
     try {
       const hoje = new Date();
-      const dataFim = hoje.toISOString().slice(0,10);
-      const dataInicio = p?.data_inicio || new Date(hoje.getFullYear(), hoje.getMonth(), 1).toISOString().slice(0,10);
+      const filtroAlunoCheck = encontrarAluno(dados, p);
+      // Se filtrando por aluno, ampliar período para cobrir plano completo (até 6 meses à frente)
+      const dataFim = filtroAlunoCheck
+        ? new Date(hoje.getFullYear(), hoje.getMonth() + 7, 0).toISOString().slice(0,10)
+        : hoje.toISOString().slice(0,10);
+      const dataInicio = p?.data_inicio || new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1).toISOString().slice(0,10);
       const situacao = p?.situacao || null;
       const result = await interCobranças(situacao, dataInicio, dataFim);
       let lista = result?.content || result?.cobrancas || [];
@@ -1900,7 +1904,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.35*\n\n' +
+      '👋 *LCA Studio Bot v4.36*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2173,8 +2177,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.35 iniciado ✓ ===');
-  console.log('Versão: 4.35 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.36 iniciado ✓ ===');
+  console.log('Versão: 4.36 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2328,7 +2332,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.35 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.36 ✓ — ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
