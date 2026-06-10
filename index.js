@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.38 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.39 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1198,7 +1198,7 @@ async function executar(intencao, p, dados, chatId) {
             if (prim.length > 3) {
               const matches = dados.alunos.filter(a => a.nome.toLowerCase().includes(prim));
               al = matches.find(a => a.ativo === 'SIM') || matches[0];
-            }
+              }
           }
           nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePag.split(' ').slice(0,2).join(' ');
         }
@@ -1917,7 +1917,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.38*\n\n' +
+      '👋 *LCA Studio Bot v4.39*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2168,6 +2168,78 @@ async function processarFilaBoletos() {
   }
 }
 
+
+// ── Rotina proativa: detectar boletos pagos no Inter ─────────────────────────
+async function verificarBoletosPagosInter() {
+  try {
+    const hoje = new Date(Date.now() - 3*60*60*1000);
+    const dataFim = hoje.toISOString().slice(0,10);
+    const dataInicio = new Date(hoje.getTime() - 5*24*60*60*1000).toISOString().slice(0,10);
+
+    // Buscar boletos MARCADO_RECEBIDO e RECEBIDO nos últimos 5 dias
+    const [rMR, rRec] = await Promise.all([
+      interCobranças('MARCADO_RECEBIDO', dataInicio, dataFim).catch(() => null),
+      interCobranças('RECEBIDO', dataInicio, dataFim).catch(() => null)
+    ]);
+
+    const lista = [
+      ...(rMR?.cobrancas || []),
+      ...(rRec?.cobrancas || [])
+    ];
+
+    if (!lista.length) return;
+
+    const dados = await getDados();
+    let confirmados = 0;
+
+    for (const item of lista) {
+      const bc = item.cobranca || item;
+      const seuNum = bc.seuNumero || '';
+      const match = seuNum.match(/^LCA-(\d+)-(\d{4}-\d{2})$/);
+      if (!match) continue;
+
+      const alunoId = parseInt(match[1]);
+      const mes = match[2];
+      const valor = parseFloat(bc.valorNominal || 0);
+      if (!valor) continue;
+
+      // Verificar se já está confirmado
+      const aluno = dados.alunos.find(a => a.id === alunoId);
+      if (!aluno) continue;
+      const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
+      if ((pags[mes]||0) > 0) continue; // já confirmado
+
+      // Confirmar pagamento
+      try {
+        pags[mes] = valor;
+        const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
+        const tinhaPend = (pend[mes]||0) > 0;
+        if (tinhaPend) delete pend[mes];
+        const hist = aluno.historico_alteracoes || [];
+        hist.push({ data: new Date().toLocaleDateString('pt-BR'), tipo: 'pagamento',
+          desc: 'Pagamento ' + mes + ' via boleto Inter (rotina automática): ' + brl(valor) });
+        const patch = { pagamentos: pags, historico_alteracoes: hist };
+        if (tinhaPend) patch.pagamentos_pendentes = pend;
+        await sbPatch('alunos', 'id=eq.' + alunoId, patch);
+        await logOp('boleto_pago_rotina', aluno.nome + ' - ' + mes, alunoId, valor, mes);
+        await tgSend(TELEGRAM_CHAT_ID,
+          '🏦 *Pagamento confirmado automaticamente!*\n\n' +
+          '👤 ' + aluno.nome + '\n' +
+          '💰 ' + brl(valor) + '\n' +
+          '📅 ' + mes + ' — boleto Inter baixado.\n' +
+          '_Detectado pela rotina automática._');
+        confirmados++;
+        console.log('[rotina-inter] Pagamento confirmado:', aluno.nome, mes, valor);
+      } catch(e) {
+        console.error('[rotina-inter] erro ao confirmar:', aluno.nome, e.message);
+      }
+    }
+    if (confirmados > 0) console.log('[rotina-inter] Total confirmados:', confirmados);
+  } catch(e) {
+    console.error('[rotina-inter] erro geral:', e.message);
+  }
+}
+
 function agendarRotinaAniversarios() {
   // Verificar a cada hora se chegou às 8h (horário de Brasília = UTC-3)
   async function checar() {
@@ -2190,8 +2262,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.38 iniciado ✓ ===');
-  console.log('Versão: 4.38 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.39 iniciado ✓ ===');
+  console.log('Versão: 4.39 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2345,13 +2417,16 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.38 ✓ — ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.39 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
   // Verificar fila de boletos a cada 2 minutos
   setInterval(processarFilaBoletos, 2 * 60 * 1000);
   processarFilaBoletos(); // verificar imediatamente na inicialização
+  // Verificar boletos pagos no Inter a cada 5 minutos (independente do webhook)
+  setInterval(verificarBoletosPagosInter, 5 * 60 * 1000);
+  setTimeout(verificarBoletosPagosInter, 30000); // primeira verificação 30s após iniciar
 
   while (true) {
     try {
