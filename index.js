@@ -1187,7 +1187,18 @@ async function executar(intencao, p, dados, chatId) {
           if (al) nomeAluno = al.nome.split(' ').slice(0,2).join(' ');
         }
         if (!nomeAluno && nomePag) {
-                   }
+          // Tentar match pelo nome completo do pagador (mais preciso)
+          const nomePagLow = nomePag.toLowerCase();
+          let al = dados.alunos.find(a => nomePagLow.includes(a.nome.split(' ')[0].toLowerCase()) &&
+            nomePagLow.includes((a.nome.split(' ')[1]||'').toLowerCase()) &&
+            a.ativo === 'SIM');
+          // Fallback: primeiro nome, priorizando ativos
+          if (!al) {
+            const prim = nomePag.split(' ')[0].toLowerCase();
+            if (prim.length > 3) {
+              const matches = dados.alunos.filter(a => a.nome.toLowerCase().includes(prim));
+              al = matches.find(a => a.ativo === 'SIM') || matches[0];
+            }
           }
           nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePag.split(' ').slice(0,2).join(' ');
         }
@@ -2467,14 +2478,3 @@ async function main() {
 }
 
 main();
-   // Tentar match pelo nome completo do pagador (mais preciso)
-          const nomePagLow = nomePag.toLowerCase();
-          let al = dados.alunos.find(a => nomePagLow.includes(a.nome.split(' ')[0].toLowerCase()) &&
-            nomePagLow.includes((a.nome.split(' ')[1]||'').toLowerCase()) &&
-            a.ativo === 'SIM');
-          // Fallback: primeiro nome, priorizando ativos
-          if (!al) {
-            const prim = nomePag.split(' ')[0].toLowerCase();
-            if (prim.length > 3) {
-              const matches = dados.alunos.filter(a => a.nome.toLowerCase().includes(prim));
-              al = matches.find(a => a.ativo === 'SIM') || matches[0];
