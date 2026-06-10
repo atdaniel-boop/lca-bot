@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.39 - nowBRT revertido para UTC puro em logOp (horário correto na aba API Inter), encontrarAluno prioriza ativos (fix Solange errada), detecção de forma de pagamento em confirmar_pagamento
+// Versão 4.39 - rotina automática de detecção de boletos pagos (5 min), timeouts em todas as chamadas Inter, estrutura cobranca corrigida em reenviar/sort, encoding health check
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1165,7 +1165,7 @@ async function executar(intencao, p, dados, chatId) {
         if (vistosId.has(id)) return false;
         vistosId.add(id);
         return true;
-      }).sort((a,b) => (a.dataVencimento||'').localeCompare(b.dataVencimento||''));
+      }).sort((a,b) => (((a.cobranca||a).dataVencimento)||'').localeCompare(((b.cobranca||b).dataVencimento)||''));
 
       if (!lista.length) return '✅ *Boletos vencidos e não pagos*\n\n_Nenhum boleto atrasado encontrado nos últimos 90 dias._';
 
@@ -1187,18 +1187,7 @@ async function executar(intencao, p, dados, chatId) {
           if (al) nomeAluno = al.nome.split(' ').slice(0,2).join(' ');
         }
         if (!nomeAluno && nomePag) {
-          // Tentar match pelo nome completo do pagador (mais preciso)
-          const nomePagLow = nomePag.toLowerCase();
-          let al = dados.alunos.find(a => nomePagLow.includes(a.nome.split(' ')[0].toLowerCase()) &&
-            nomePagLow.includes((a.nome.split(' ')[1]||'').toLowerCase()) &&
-            a.ativo === 'SIM');
-          // Fallback: primeiro nome, priorizando ativos
-          if (!al) {
-            const prim = nomePag.split(' ')[0].toLowerCase();
-            if (prim.length > 3) {
-              const matches = dados.alunos.filter(a => a.nome.toLowerCase().includes(prim));
-              al = matches.find(a => a.ativo === 'SIM') || matches[0];
-              }
+                   }
           }
           nomeAluno = al ? al.nome.split(' ').slice(0,2).join(' ') : nomePag.split(' ').slice(0,2).join(' ');
         }
@@ -1244,7 +1233,10 @@ async function executar(intencao, p, dados, chatId) {
         : hoje.toISOString().slice(0,10);
       const dataInicio = p?.data_inicio || new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1).toISOString().slice(0,10);
       const situacao = p?.situacao || null;
-      const result = await interCobranças(situacao, dataInicio, dataFim);
+      const result = await Promise.race([
+        interCobranças(situacao, dataInicio, dataFim),
+        new Promise((_,r) => setTimeout(() => r(new Error('Timeout Inter 25s')), 25000))
+      ]);
       let lista = result?.content || result?.cobrancas || [];
       // Filtrar por aluno se mencionado
       const filtroAluno = encontrarAluno(dados, p);
@@ -1537,19 +1529,26 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         const hoje = new Date();
         const dataFim = new Date(hoje.getFullYear(), hoje.getMonth() + 6, 30).toISOString().slice(0,10);
         const dataInicio = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1).toISOString().slice(0,10);
-        const rInter = await interCobranças('A_VENCER', dataInicio, dataFim);
+        const rInter = await Promise.race([
+          interCobranças('A_VENCER', dataInicio, dataFim),
+          new Promise((_,r) => setTimeout(() => r(new Error('Timeout Inter 25s')), 25000))
+        ]);
         const cobrancas = rInter?.content || rInter?.cobrancas || [];
-        // Filtrar pelo seuNumero que começa com LCA-{id}-
+        // Filtrar pelo seuNumero que começa com LCA-{id}- (campos dentro de .cobranca)
         const prefixo = 'LCA-' + aluno.id + '-';
         boletos = cobrancas
-          .filter(c => (c.seuNumero||'').startsWith(prefixo))
-          .map(c => ({
-            codigo_solicitacao: c.codigoSolicitacao,
-            mes: c.seuNumero.replace(prefixo, ''),
-            valor: c.valorNominal,
-            vencimento: c.dataVencimento,
-            linkVisualizacaoBoleto: c.linkVisualizacaoBoleto || c.link || ''
-          }));
+          .filter(c => ((c.cobranca||c).seuNumero||'').startsWith(prefixo))
+          .map(c => {
+            const bc = c.cobranca || c;
+            const bb = c.boleto || {};
+            return {
+              codigo_solicitacao: bc.codigoSolicitacao,
+              mes: (bc.seuNumero||'').replace(prefixo, ''),
+              valor: bc.valorNominal,
+              vencimento: bc.dataVencimento,
+              linkVisualizacaoBoleto: bc.linkVisualizacaoBoleto || bb.linkVisualizacaoBoleto || ''
+            };
+          });
       }
 
       if (!boletos.length) return 'ℹ️ Nenhum boleto encontrado para *' + aluno.nome.split(' ')[0] + '* na tabela local nem na API Inter.';
@@ -2146,16 +2145,35 @@ async function processarFilaBoletos() {
         // Marcar como processando
         await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'processando' });
 
-        // Emitir via intenção inter_emitir_plano
-        const resultado = await executar(
-          'inter_emitir_plano',
-          { aluno_id: aluno.id, aluno_nome: aluno.nome },
-          dados,
-          TELEGRAM_CHAT_ID,
-          new Date().toISOString().slice(0,7)
-        );
+        let resultado;
+        if (pedido.obs && pedido.obs.startsWith('alteracao_plano|')) {
+          // Pedido de alteração de plano: cancelar e emitir conforme parâmetros
+          const partes = {};
+          pedido.obs.split('|').slice(1).forEach(s => {
+            const [k, v] = s.split(':');
+            partes[k] = v || '';
+          });
+          resultado = await executar(
+            'alterar_plano',
+            { aluno_id: aluno.id, aluno_nome: aluno.nome,
+              plano_novo: pedido.tipo_plano, valor: pedido.valor,
+              meses_cancelar: partes.cancelar, meses_emitir: partes.emitir,
+              pro_rata: partes.prorata },
+            dados, TELEGRAM_CHAT_ID
+          );
+          if (resultado) await tgSend(TELEGRAM_CHAT_ID, resultado);
+        } else {
+          // Pedido normal: emitir plano completo
+          resultado = await executar(
+            'inter_emitir_plano',
+            { aluno_id: aluno.id, aluno_nome: aluno.nome },
+            dados,
+            TELEGRAM_CHAT_ID,
+            new Date().toISOString().slice(0,7)
+          );
+        }
 
-        await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: 'emitido automaticamente' });
+        await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: (pedido.obs||'') + ' [processado]' });
         console.log('[fila_boletos] Boletos emitidos para', aluno.nome);
       } catch(e) {
         console.error('[fila_boletos] erro no pedido', pedido.id, e.message);
@@ -2449,3 +2467,14 @@ async function main() {
 }
 
 main();
+   // Tentar match pelo nome completo do pagador (mais preciso)
+          const nomePagLow = nomePag.toLowerCase();
+          let al = dados.alunos.find(a => nomePagLow.includes(a.nome.split(' ')[0].toLowerCase()) &&
+            nomePagLow.includes((a.nome.split(' ')[1]||'').toLowerCase()) &&
+            a.ativo === 'SIM');
+          // Fallback: primeiro nome, priorizando ativos
+          if (!al) {
+            const prim = nomePag.split(' ')[0].toLowerCase();
+            if (prim.length > 3) {
+              const matches = dados.alunos.filter(a => a.nome.toLowerCase().includes(prim));
+              al = matches.find(a => a.ativo === 'SIM') || matches[0];
