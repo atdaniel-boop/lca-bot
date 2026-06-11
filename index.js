@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.39 - rotina automática de detecção de boletos pagos (5 min), timeouts em todas as chamadas Inter, estrutura cobranca corrigida em reenviar/sort, encoding health check
+// Versão 4.40 - rotinas automáticas: alerta inadimplência (9h), planos vencendo 7/3/0 dias (9h), abandono silencioso (seg 9h), resumo semanal com saldo (sex 20h), fechamento mensal (dia 1º 9h)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1927,7 +1927,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.39*\n\n' +
+      '👋 *LCA Studio Bot v4.40*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2269,6 +2269,253 @@ async function verificarBoletosPagosInter() {
   }
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── Rotinas automáticas agendadas ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Controle de execução única por dia (evita duplicar se bot reiniciar)
+const _rotinasExecutadas = {}; // chave: 'nomeRotina-YYYY-MM-DD'
+function _jaExecutouHoje(nome) {
+  const hojeBR = new Date(Date.now() - 3*60*60*1000).toISOString().slice(0,10);
+  const chave = nome + '-' + hojeBR;
+  if (_rotinasExecutadas[chave]) return true;
+  _rotinasExecutadas[chave] = true;
+  // Limpar chaves antigas (manter só 7 dias)
+  Object.keys(_rotinasExecutadas).forEach(k => {
+    const dt = k.slice(-10);
+    if ((Date.now() - new Date(dt).getTime()) > 7*86400000) delete _rotinasExecutadas[k];
+  });
+  return false;
+}
+
+// ── 2. Alerta diário de inadimplência (09:00 BRT) ──────────────────────────
+async function rotinaAlertaInadimplencia() {
+  try {
+    const hoje = new Date(Date.now() - 3*60*60*1000);
+    const ontem = new Date(hoje.getTime() - 86400000);
+    const diaOntem = ontem.getDate();
+    const mesAtualStr = hoje.toISOString().slice(0,7);
+    const dados = await getDados();
+
+    // Alunos ativos cujo dia de vencimento foi ontem e não pagaram o mês atual
+    const vencidosOntem = dados.alunos.filter(a => {
+      if (a.ativo !== 'SIM') return false;
+      if (parseInt(a.dia_vencimento||0) !== diaOntem) return false;
+      const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+      return !(pags[mesAtualStr] > 0);
+    });
+
+    if (!vencidosOntem.length) return;
+
+    const linhas = vencidosOntem.map(a => {
+      const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
+      const temBoleto = (pend[mesAtualStr]||0) > 0;
+      return '🔴 *' + a.nome.split(' ').slice(0,2).join(' ') + '* — ' + a.tipo_plano + ' (' + a.forma_pagamento + ')' +
+        (temBoleto ? ' — boleto emitido aguardando' : '');
+    }).join('\n');
+
+    await tgSend(TELEGRAM_CHAT_ID,
+      '⚠️ *Vencimentos de ontem sem pagamento (' + vencidosOntem.length + ')*\n\n' + linhas +
+      '\n\n_Para confirmar: "Fulana pagou"_');
+    console.log('[rotina-inadimplencia] alertados:', vencidosOntem.length);
+  } catch(e) { console.error('[rotina-inadimplencia] erro:', e.message); }
+}
+
+// ── 5. Alerta de planos vencendo em 7 dias (09:00 BRT) ─────────────────────
+async function rotinaPlanosVencendo() {
+  try {
+    const dados = await getDados();
+    const mesAtual = new Date(Date.now() - 3*60*60*1000).toISOString().slice(0,7);
+    buildContexto(dados, mesAtual); // popula dados._planosVencendo
+    const pv = (dados._planosVencendo || []).filter(p => p.dias === 7 || p.dias === 3 || p.dias === 0);
+    if (!pv.length) return;
+
+    const linhas = pv.map(p => {
+      const quando = p.dias === 0 ? 'VENCE HOJE' : 'vence em ' + p.dias + ' dias';
+      return '📋 *' + p.nome.split(' ').slice(0,2).join(' ') + '* — ' + p.plano + ' ' + quando + ' (' + p.dataVenc + ')';
+    }).join('\n');
+
+    await tgSend(TELEGRAM_CHAT_ID,
+      '🔔 *Planos vencendo*\n\n' + linhas +
+      '\n\n_Entre em contato para renovação._');
+    console.log('[rotina-planos-vencendo] alertados:', pv.length);
+  } catch(e) { console.error('[rotina-planos-vencendo] erro:', e.message); }
+}
+
+// ── 6. Detecção de abandono silencioso (segundas 09:00 BRT) ────────────────
+async function rotinaAbandonoSilencioso() {
+  try {
+    const hoje = new Date(Date.now() - 3*60*60*1000);
+    const mesAtualStr = hoje.toISOString().slice(0,7);
+    const mesAnterior = new Date(hoje.getFullYear(), hoje.getMonth()-1, 1).toISOString().slice(0,7);
+    const dados = await getDados();
+
+    const abandonos = dados.alunos.filter(a => {
+      if (a.ativo !== 'SIM' || a.tipo_plano !== 'mensal') return false;
+      const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+      // Sem pagamento no mês atual E no anterior
+      return !(pags[mesAtualStr] > 0) && !(pags[mesAnterior] > 0);
+    });
+
+    if (!abandonos.length) return;
+
+    const linhas = abandonos.map(a =>
+      '👻 *' + a.nome.split(' ').slice(0,2).join(' ') + '* — sem pagamento há 2+ meses'
+    ).join('\n');
+
+    await tgSend(TELEGRAM_CHAT_ID,
+      '👻 *Possível abandono silencioso (' + abandonos.length + ')*\n\n' + linhas +
+      '\n\n_Alunos mensais ativos sem pagamento em ' + mesAnterior + ' e ' + mesAtualStr + '. Considere contato ou inativação._');
+    console.log('[rotina-abandono] detectados:', abandonos.length);
+  } catch(e) { console.error('[rotina-abandono] erro:', e.message); }
+}
+
+// ── 3. Resumo semanal (sextas 20:00 BRT) com saldo ──────────────────────────
+async function rotinaResumoSemanal() {
+  try {
+    const hoje = new Date(Date.now() - 3*60*60*1000);
+    const mesAtualStr = hoje.toISOString().slice(0,7);
+    const dados = await getDados();
+    const ativos = dados.alunos.filter(a => a.ativo === 'SIM');
+
+    // Receita do mês até agora
+    let recMesTotal = 0, nPagos = 0;
+    ativos.forEach(a => {
+      const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+      if (pags[mesAtualStr] > 0) { recMesTotal += pags[mesAtualStr]; nPagos++; }
+    });
+
+    // Pagamentos dos últimos 7 dias (via historico_alteracoes tipo pagamento)
+    const seteDiasAtras = new Date(hoje.getTime() - 7*86400000);
+    let recebidosSemana = [];
+    ativos.forEach(a => {
+      (a.historico_alteracoes||[]).forEach(h => {
+        if (h.tipo !== 'pagamento' || !h.data) return;
+        const dp = h.data.split('/');
+        if (dp.length !== 3) return;
+        const dt = new Date(parseInt(dp[2]), parseInt(dp[1])-1, parseInt(dp[0]));
+        if (dt >= seteDiasAtras) recebidosSemana.push(a.nome.split(' ')[0]);
+      });
+    });
+
+    // Inadimplentes do mês
+    const inadimplentes = ativos.filter(a => {
+      const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+      const diaV = parseInt(a.dia_vencimento||31);
+      return !(pags[mesAtualStr] > 0) && diaV < hoje.getDate();
+    });
+
+    // Saldo Inter
+    let saldoStr = '_indisponível_';
+    try {
+      const s = await Promise.race([
+        interSaldo(),
+        new Promise((_,r) => setTimeout(() => r(new Error('timeout')), 20000))
+      ]);
+      const disp = s?.disponivel ?? s?.saldoDisponivel ?? s?.disponível;
+      if (disp !== undefined) saldoStr = brl(parseFloat(disp));
+    } catch(e) { console.log('[resumo-semanal] saldo indisponível:', e.message); }
+
+    await tgSend(TELEGRAM_CHAT_ID,
+      '📊 *Resumo semanal — ' + hoje.toLocaleDateString('pt-BR') + '*\n\n' +
+      '🏦 Saldo Inter: *' + saldoStr + '*\n' +
+      '💰 Receita ' + mesAtualStr + ': *' + brl(recMesTotal) + '* (' + nPagos + '/' + ativos.length + ' pagos)\n' +
+      '📥 Pagamentos na semana: ' + (recebidosSemana.length ? recebidosSemana.length + ' (' + [...new Set(recebidosSemana)].slice(0,8).join(', ') + ')' : 'nenhum') + '\n' +
+      '🔴 Inadimplentes (venc. passado): ' + inadimplentes.length +
+      (inadimplentes.length ? '\n   ' + inadimplentes.slice(0,10).map(a=>a.nome.split(' ')[0]).join(', ') : '') +
+      '\n\n_Bom fim de semana!_ 🙌');
+    console.log('[resumo-semanal] enviado');
+  } catch(e) { console.error('[resumo-semanal] erro:', e.message); }
+}
+
+// ── 4. Fechamento mensal (dia 1º às 09:00 BRT) ──────────────────────────────
+async function rotinaFechamentoMensal() {
+  try {
+    const hoje = new Date(Date.now() - 3*60*60*1000);
+    const mesFechado = new Date(hoje.getFullYear(), hoje.getMonth()-1, 1);
+    const mesFechadoStr = mesFechado.toISOString().slice(0,7);
+    const mesAnterior2 = new Date(hoje.getFullYear(), hoje.getMonth()-2, 1).toISOString().slice(0,7);
+    const dados = await getDados();
+    const MESES_PT3 = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+
+    // Receita do mês fechado e do anterior
+    let recFechado = 0, recAnt = 0, nPagFechado = 0, inadimplentes = [];
+    dados.alunos.forEach(a => {
+      const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+      if (pags[mesFechadoStr] > 0) { recFechado += pags[mesFechadoStr]; nPagFechado++; }
+      if (pags[mesAnterior2] > 0) recAnt += pags[mesAnterior2];
+      if (a.ativo === 'SIM' && !(pags[mesFechadoStr] > 0)) inadimplentes.push(a.nome.split(' ')[0]);
+    });
+
+    // Custos do mês fechado
+    let custosTotal = 0;
+    (dados.custos||[]).forEach(cu => {
+      if ((cu.mes||'') === mesFechadoStr) custosTotal += parseFloat(cu.valor||0);
+    });
+
+    // Aulas Kelly do mês (horas x valor/hora)
+    let kellyTotal = 0;
+    const profKelly = (dados.professoras||[]).find(pr => (pr.nome||'').toLowerCase().includes('kelly'));
+    const vhKelly = parseFloat(profKelly?.valor_hora || 35);
+    (dados.aulas||[]).forEach(au => {
+      if (au.prof_id === 'kelly' && (au.mes||'') === mesFechadoStr) {
+        kellyTotal += (parseFloat(au.horas||au.vh||0)) * vhKelly;
+      }
+    });
+
+    const varPct = recAnt > 0 ? Math.round(((recFechado-recAnt)/recAnt)*100) : 0;
+    const varStr = varPct > 0 ? '+' + varPct + '%' : varPct + '%';
+    const mesNome = MESES_PT3[mesFechado.getMonth()] + '/' + mesFechado.getFullYear();
+
+    await tgSend(TELEGRAM_CHAT_ID,
+      '📈 *Fechamento mensal — ' + mesNome + '*\n\n' +
+      '💰 Receita: *' + brl(recFechado) + '* (' + varStr + ' vs mês anterior)\n' +
+      '👥 Pagantes: ' + nPagFechado + '\n' +
+      '💸 Custos lançados: ' + brl(custosTotal) + '\n' +
+      '🧘 Aulas Kelly: ' + brl(kellyTotal) + '\n' +
+      '🔴 Não pagaram: ' + inadimplentes.length +
+      (inadimplentes.length ? ' (' + inadimplentes.slice(0,10).join(', ') + (inadimplentes.length>10?'...':'') + ')' : '') +
+      '\n\n_Use o Relatório Contábil no site para detalhes completos._');
+    console.log('[fechamento-mensal] enviado:', mesNome);
+  } catch(e) { console.error('[fechamento-mensal] erro:', e.message); }
+}
+
+// ── Agendador central das rotinas ────────────────────────────────────────────
+function agendarRotinasAutomaticas() {
+  async function checarRotinas() {
+    const brNow = new Date(Date.now() - 3*60*60*1000);
+    const hora = brNow.getHours();
+    const min = brNow.getMinutes();
+    const diaSemana = brNow.getDay(); // 0=dom, 5=sexta, 1=segunda
+    const diaMes = brNow.getDate();
+
+    // 09:00 — alerta de inadimplência (diário)
+    if (hora === 9 && min < 5 && !_jaExecutouHoje('inadimplencia')) {
+      await rotinaAlertaInadimplencia();
+    }
+    // 09:00 — planos vencendo (diário, alerta em 7/3/0 dias)
+    if (hora === 9 && min < 5 && !_jaExecutouHoje('planosVencendo')) {
+      await rotinaPlanosVencendo();
+    }
+    // 09:00 segundas — abandono silencioso (semanal)
+    if (hora === 9 && min < 5 && diaSemana === 1 && !_jaExecutouHoje('abandono')) {
+      await rotinaAbandonoSilencioso();
+    }
+    // 20:00 sextas — resumo semanal com saldo
+    if (hora === 20 && min < 5 && diaSemana === 5 && !_jaExecutouHoje('resumoSemanal')) {
+      await rotinaResumoSemanal();
+    }
+    // 09:00 dia 1º — fechamento mensal
+    if (hora === 9 && min < 5 && diaMes === 1 && !_jaExecutouHoje('fechamentoMensal')) {
+      await rotinaFechamentoMensal();
+    }
+  }
+  setInterval(checarRotinas, 4 * 60 * 1000); // a cada 4 min
+  console.log('Rotinas automáticas agendadas: inadimplência (9h), planos vencendo (9h), abandono (seg 9h), resumo semanal (sex 20h), fechamento (dia 1º 9h)');
+}
+
+
 function agendarRotinaAniversarios() {
   // Verificar a cada hora se chegou às 8h (horário de Brasília = UTC-3)
   async function checar() {
@@ -2291,8 +2538,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.39 iniciado ✓ ===');
-  console.log('Versão: 4.39 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.40 iniciado ✓ ===');
+  console.log('Versão: 4.40 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2446,7 +2693,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.39 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.40 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
@@ -2456,6 +2703,8 @@ async function main() {
   // Verificar boletos pagos no Inter a cada 5 minutos (independente do webhook)
   setInterval(verificarBoletosPagosInter, 5 * 60 * 1000);
   setTimeout(verificarBoletosPagosInter, 30000); // primeira verificação 30s após iniciar
+  // Rotinas automáticas: inadimplência, planos vencendo, abandono, resumo semanal, fechamento mensal
+  agendarRotinasAutomaticas();
 
   while (true) {
     try {
