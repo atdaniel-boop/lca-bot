@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.43 - receita do resumo semanal e fechamento mensal alinhada ao site: todos os alunos menos rescisões (fix divergência R$658)
+// Versão 4.44 - tgSend com fallback: Markdown malformado do Gemini era rejeitado pelo Telegram causando silêncio; agora reenvia sem formatação
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -226,10 +226,18 @@ function req(url, method, headers, body, timeoutMs) {
 }
 
 // ── Telegram ────────────────────────────────────────────────────────────────────
-function tgSend(chatId, text) {
-  return req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
+async function tgSend(chatId, text) {
+  const r = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
     'POST', { 'Content-Type': 'application/json' },
     { chat_id: chatId, text, parse_mode: 'Markdown' });
+  // Telegram rejeita Markdown malformado (400 can't parse entities) — reenviar sem formatação
+  if (r && r.ok === false) {
+    console.log('[tgSend] Markdown rejeitado (' + (r.description||'').slice(0,60) + '), reenviando sem parse_mode');
+    return req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
+      'POST', { 'Content-Type': 'application/json' },
+      { chat_id: chatId, text });
+  }
+  return r;
 }
 
 async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption) {
@@ -1947,7 +1955,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.43*\n\n' +
+      '👋 *LCA Studio Bot v4.44*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2645,8 +2653,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.43 iniciado ✓ ===');
-  console.log('Versão: 4.43 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.44 iniciado ✓ ===');
+  console.log('Versão: 4.44 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2800,7 +2808,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.43 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.44 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
