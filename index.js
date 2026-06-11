@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.40 - rotinas automáticas: alerta inadimplência (9h), planos vencendo 7/3/0 dias (9h), abandono silencioso (seg 9h), resumo semanal com saldo (sex 20h), fechamento mensal (dia 1º 9h)
+// Versão 4.41 - comandos "resumo" e "backup" sob demanda; backup semanal automático via Telegram (dom 20h) com JSON completo incluindo agenda/checkins/planos
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -683,6 +683,14 @@ async function processarComIA(texto, dados, mes) {
   const temInter = tL.includes('inter') || tL.includes('banco') || tL.includes('conta');
   if (tL.includes('extrato') || tL.includes('movimentação') || tL.includes('transaç')) {
     return { tipo: 'acao', intencao: 'inter_extrato', params: {} };
+  }
+  // Comando "resumo" sob demanda — mesma mensagem do resumo semanal
+  if (tL === 'resumo' || tL === 'resumo semanal' || tL === 'resumo da semana') {
+    return { tipo: 'acao', intencao: 'resumo_semanal', params: {} };
+  }
+  // Comando "backup" sob demanda
+  if (tL === 'backup' || tL === 'fazer backup' || tL === 'exportar backup') {
+    return { tipo: 'acao', intencao: 'backup_agora', params: {} };
   }
   if (temInter && (tL.includes('saldo') || tL.includes('quanto tem'))) {
     return { tipo: 'acao', intencao: 'inter_saldo', params: {} };
@@ -1744,6 +1752,17 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     }
   }
 
+  if (intencao === 'resumo_semanal') {
+    await rotinaResumoSemanal();
+    return null; // mensagem já enviada pela rotina
+  }
+
+  if (intencao === 'backup_agora') {
+    await tgSend(chatId, '💾 Gerando backup...');
+    await rotinaBackupSemanal();
+    return null;
+  }
+
   if (intencao === 'calcular_rescisao') {
     const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
@@ -1927,12 +1946,14 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.40*\n\n' +
+      '👋 *LCA Studio Bot v4.41*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
       '- _"quem tem plano vencendo?"_\n' +
       '- _"resumo financeiro de maio"_\n' +
+      '- _"resumo"_ - resumo semanal com saldo, na hora\n' +
+      '- _"backup"_ - exporta JSON completo agora\n' +
       '- _"qual aluna falta mais?"_\n\n' +
       '*💰 Lançamentos:*\n' +
       '- _"custo aluguel 3700 junho"_\n' +
@@ -2481,6 +2502,77 @@ async function rotinaFechamentoMensal() {
   } catch(e) { console.error('[fechamento-mensal] erro:', e.message); }
 }
 
+
+// ── Backup semanal: exporta JSON completo e envia no Telegram (dom 20h) ─────
+async function tgSendJSONBuffer(chatId, jsonBuffer, filename, caption) {
+  const https = require('https');
+  const boundary = '----TGBoundary' + Date.now();
+  const safeFilename = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+  const parts = [
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="caption"\r\n\r\n' + (caption||''),
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="document"; filename="' + safeFilename + '"\r\nContent-Type: application/json\r\n\r\n'
+  ];
+  const header = Buffer.from(parts.join('\r\n'));
+  const footer = Buffer.from('\r\n--' + boundary + '--\r\n');
+  const body = Buffer.concat([header, jsonBuffer, footer]);
+  return new Promise((resolve, reject) => {
+    const reqq = https.request({
+      hostname: 'api.telegram.org',
+      path: '/bot' + TELEGRAM_TOKEN + '/sendDocument',
+      method: 'POST',
+      headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary, 'Content-Length': body.length }
+    }, res => {
+      let d = '';
+      res.on('data', ch => d += ch);
+      res.on('end', () => resolve(d));
+    });
+    reqq.on('error', reject);
+    reqq.write(body);
+    reqq.end();
+  });
+}
+
+async function rotinaBackupSemanal() {
+  try {
+    const dados = await getDados();
+    // Buscar também a tabela changes (agenda, checkins, planos)
+    let changes = {};
+    try {
+      const rCh = await sbGet('changes', 'select=data&id=eq.1');
+      let chData = Array.isArray(rCh) && rCh[0] && rCh[0].data;
+      if (typeof chData === 'string') { try { chData = JSON.parse(chData); } catch { chData = {}; } }
+      changes = chData || {};
+    } catch(e) { console.log('[backup] changes indisponível:', e.message); }
+
+    const backup = {
+      versao: 'bot-4.41',
+      exportado: new Date().toISOString(),
+      alunos: dados.alunos,
+      custos: dados.custos,
+      aulas: dados.aulas,
+      professoras: dados.professoras || [],
+      agenda: changes.agenda || {},
+      checkins: changes.checkins || {},
+      planos: changes.planos || {},
+      planos_historico: changes.planos_historico || [],
+      rescisao_seq: changes.rescisao_seq || 0
+    };
+
+    const json = Buffer.from(JSON.stringify(backup, null, 1));
+    const dataStr = new Date(Date.now() - 3*60*60*1000).toISOString().slice(0,10);
+    const nome = 'LCA_backup_' + dataStr + '.json';
+    const tamanhoKB = Math.round(json.length / 1024);
+
+    await tgSendJSONBuffer(TELEGRAM_CHAT_ID, json, nome,
+      '💾 Backup semanal automático — ' + dataStr + ' (' + dados.alunos.length + ' alunos, ' + tamanhoKB + ' KB)');
+    console.log('[backup-semanal] enviado:', nome, tamanhoKB + 'KB');
+  } catch(e) {
+    console.error('[backup-semanal] erro:', e.message);
+    try { await tgSend(TELEGRAM_CHAT_ID, '⚠️ Falha no backup semanal automático: ' + e.message.slice(0,100)); } catch {}
+  }
+}
+
 // ── Agendador central das rotinas ────────────────────────────────────────────
 function agendarRotinasAutomaticas() {
   async function checarRotinas() {
@@ -2510,9 +2602,13 @@ function agendarRotinasAutomaticas() {
     if (hora === 9 && min < 5 && diaMes === 1 && !_jaExecutouHoje('fechamentoMensal')) {
       await rotinaFechamentoMensal();
     }
+    // 20:00 domingos — backup semanal via Telegram
+    if (hora === 20 && min < 5 && diaSemana === 0 && !_jaExecutouHoje('backupSemanal')) {
+      await rotinaBackupSemanal();
+    }
   }
   setInterval(checarRotinas, 4 * 60 * 1000); // a cada 4 min
-  console.log('Rotinas automáticas agendadas: inadimplência (9h), planos vencendo (9h), abandono (seg 9h), resumo semanal (sex 20h), fechamento (dia 1º 9h)');
+  console.log('Rotinas automáticas agendadas: inadimplência (9h), planos vencendo (9h), abandono (seg 9h), resumo semanal (sex 20h), fechamento (dia 1º 9h), backup (dom 20h)');
 }
 
 
@@ -2538,8 +2634,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.40 iniciado ✓ ===');
-  console.log('Versão: 4.40 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.41 iniciado ✓ ===');
+  console.log('Versão: 4.41 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2693,7 +2789,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.40 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.41 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
