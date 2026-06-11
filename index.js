@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.41 - comandos "resumo" e "backup" sob demanda; backup semanal automático via Telegram (dom 20h) com JSON completo incluindo agenda/checkins/planos
+// Versão 4.42 - fix: intenção desconhecida avisava com silêncio (return null); "financeiro" não intercepta mais "resumo financeiro"; acao consulta_* redirecionada
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -748,8 +748,8 @@ async function processarComIA(texto, dados, mes) {
       return { tipo: 'acao', intencao: 'inter_boletos', params: alunoMencB ? { aluno_id: alunoMencB.id, aluno_nome: alunoMencB.nome } : {} };
     }
   }
-  // Situação financeira de aluno específico
-  if (tL.includes('situação') || tL.includes('situacao') || tL.includes('financeira') || tL.includes('financeiro')) {
+  // Situação financeira de aluno específico (não intercepta "resumo financeiro" geral)
+  if ((tL.includes('situação') || tL.includes('situacao') || tL.includes('financeira') || tL.includes('financeiro')) && !tL.includes('resumo') && !tL.includes('resultado')) {
     const alunoMencF = dados.alunos.find(a => tL.includes(a.nome.split(' ')[0].toLowerCase()) && a.nome.split(' ')[0].length > 3);
     if (alunoMencF) return { tipo: 'acao', intencao: 'consulta_aluno', params: { aluno_id: alunoMencF.id, aluno_nome: alunoMencF.nome } };
   }
@@ -1795,7 +1795,8 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       '_Para confirmar e lançar: responda_ *sim*';
   }
 
-  return null;
+  // Intenção não reconhecida — avisar em vez de silêncio
+  return '🤔 Não consegui executar "' + intencao + '". Mande *ajuda* para ver os comandos disponíveis.';
 }
 
 const pendente = {};
@@ -1946,7 +1947,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.41*\n\n' +
+      '👋 *LCA Studio Bot v4.42*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -1975,6 +1976,11 @@ async function processar(msg) {
       '*📋 Rescisão:*\n' +
       '- _"Mara quer rescindir, semestral, pagou 3 meses"_'
     );
+  }
+
+  // Se Gemini retornou acao com intenção de consulta, redirecionar para consulta_direta
+  if (aiResult.tipo === 'acao' && aiResult.intencao && aiResult.intencao.startsWith('consulta_') && aiResult.intencao !== 'consulta_aluno') {
+    aiResult.tipo = 'consulta_direta';
   }
 
   // Consultas diretas - sem IA, resposta imediata
@@ -2008,7 +2014,6 @@ async function processar(msg) {
   if (aiResult.tipo === 'consulta' && aiResult.intencao && aiResult.intencao.startsWith('inter_')) {
     aiResult.tipo = 'acao';
   }
-
   // Consulta livre - IA respondeu direto ou fallback estruturado
   if (aiResult.tipo === 'consulta') {
     clearTimeout(_timer);
@@ -2634,8 +2639,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.41 iniciado ✓ ===');
-  console.log('Versão: 4.41 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.42 iniciado ✓ ===');
+  console.log('Versão: 4.42 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2789,7 +2794,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.41 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.42 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
