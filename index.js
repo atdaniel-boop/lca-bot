@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.42 - fix: intenção desconhecida avisava com silêncio (return null); "financeiro" não intercepta mais "resumo financeiro"; acao consulta_* redirecionada
+// Versão 4.43 - receita do resumo semanal e fechamento mensal alinhada ao site: todos os alunos menos rescisões (fix divergência R$658)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1947,7 +1947,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.42*\n\n' +
+      '👋 *LCA Studio Bot v4.43*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2405,11 +2405,16 @@ async function rotinaResumoSemanal() {
     const dados = await getDados();
     const ativos = dados.alunos.filter(a => a.ativo === 'SIM');
 
-    // Receita do mês até agora
+    // Receita do mês até agora — mesmo cálculo do site/buildContexto:
+    // todos os alunos (inclui inativos que pagaram) menos rescisões do mês
     let recMesTotal = 0, nPagos = 0;
-    ativos.forEach(a => {
+    dados.alunos.forEach(a => {
       const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
-      if (pags[mesAtualStr] > 0) { recMesTotal += pags[mesAtualStr]; nPagos++; }
+      const pr = typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});
+      if (pags[mesAtualStr] > 0) {
+        recMesTotal += pags[mesAtualStr] - (pr[mesAtualStr]||0);
+        if (a.ativo === 'SIM') nPagos++; // contador X/Y continua sobre ativos
+      }
     });
 
     // Pagamentos dos últimos 7 dias (via historico_alteracoes tipo pagamento)
@@ -2469,8 +2474,9 @@ async function rotinaFechamentoMensal() {
     let recFechado = 0, recAnt = 0, nPagFechado = 0, inadimplentes = [];
     dados.alunos.forEach(a => {
       const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
-      if (pags[mesFechadoStr] > 0) { recFechado += pags[mesFechadoStr]; nPagFechado++; }
-      if (pags[mesAnterior2] > 0) recAnt += pags[mesAnterior2];
+      const pr = typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});
+      if (pags[mesFechadoStr] > 0) { recFechado += pags[mesFechadoStr] - (pr[mesFechadoStr]||0); nPagFechado++; }
+      if (pags[mesAnterior2] > 0) recAnt += pags[mesAnterior2] - (pr[mesAnterior2]||0);
       if (a.ativo === 'SIM' && !(pags[mesFechadoStr] > 0)) inadimplentes.push(a.nome.split(' ')[0]);
     });
 
@@ -2639,8 +2645,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.42 iniciado ✓ ===');
-  console.log('Versão: 4.42 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.43 iniciado ✓ ===');
+  console.log('Versão: 4.43 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2794,7 +2800,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.42 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.43 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
