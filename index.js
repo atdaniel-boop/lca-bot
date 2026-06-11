@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.44 - tgSend com fallback: Markdown malformado do Gemini era rejeitado pelo Telegram causando silêncio; agora reenvia sem formatação
+// Versão 4.45 - validação anti-alucinação: valor extraído pela IA deve existir no texto digitado (fix Gemini trocando 359 por 329 histórico)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -799,7 +799,7 @@ async function processarComIA(texto, dados, mes) {
     '  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos/confirmar_cheque/alterar_plano,\n' +
     '  "params": {\n' +
     '    "aluno_nome": string ou null,\n' +
-    '    "valor": numero (se pagamento sem valor informado, use o ultimo pagamento do aluno acima) ou null,\n' +
+    '    "valor": numero — PRIORIDADE ABSOLUTA: se o usuario digitou um numero no texto, use EXATAMENTE esse numero, mesmo que diferente do historico. Apenas se NENHUM numero foi digitado, use o ultimo pagamento do aluno. Ou null,\n' +
     '    "mes": "YYYY-MM" ou null (atual ' + mes + '),\n' +
     '    "categoria": string ou null,\n' +
     '    "descricao": string ou null,\n' +
@@ -1955,7 +1955,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.44*\n\n' +
+      '👋 *LCA Studio Bot v4.45*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2069,10 +2069,44 @@ async function processar(msg) {
     _respondeu=true; return tgSend(chatId, '🤔 Não entendi. Mande *ajuda* para ver exemplos.');
   }
   const params = aiResult.params || {};
+
+  // Validação anti-alucinação: o valor extraído pela IA deve existir no texto original.
+  // (Gemini às vezes troca o valor digitado pelo valor histórico do aluno)
+  const intencoesComValor = ['confirmar_pagamento', 'lancar_custo', 'inter_emitir_boleto', 'confirmar_cheque'];
+  if (intencoesComValor.includes(intencao) && params.valor) {
+    // Números do texto: aceita 359, 1.234,56, 329,00 — exclui anos (20xx) e formatos de mês (2026-06)
+    const textoLimpo = texto.replace(/\d{4}-\d{2}/g, ' ');
+    // Captura formato brasileiro completo: 1.250,50 | 359 | 329,00
+    const nums = (textoLimpo.match(/\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?/g) || [])
+      .map(s => parseFloat(s.replace(/\./g, '').replace(',', '.')))
+      .filter(n => !isNaN(n) && !(n >= 2020 && n <= 2035));
+    if (nums.length && !nums.includes(parseFloat(params.valor))) {
+      // IA inventou um valor que não está no texto — usar o maior número do texto (valor monetário)
+      const corrigido = Math.max(...nums);
+      console.log('[anti-alucinacao] valor IA', params.valor, '→ texto', corrigido, '|', texto.slice(0,50));
+      params.valor = corrigido;
+    }
+  }
+
   // Tentar encontrar aluno_id pelo nome se não veio
   if (params.aluno_nome && !params.aluno_id) {
     const al = dados.alunos.find(function(a){ return a.nome.toLowerCase().includes((params.aluno_nome||'').toLowerCase()); });
     if (al) params.aluno_id = al.id;
+  }
+
+  // Blindagem: valor numérico explícito no texto prevalece sobre extração da IA
+  // (Gemini às vezes ignora o valor digitado e usa o valor de referência do contexto)
+  if (intencao === 'confirmar_pagamento' || intencao === 'confirmar_cheque') {
+    const numsTexto = (texto.replace(/\d{4}-\d{2}/g, ' ').match(/\d+(?:[.,]\d{1,2})?/g) || [])
+      .map(n => parseFloat(n.replace(',', '.')))
+      .filter(n => n >= 20 && n <= 10000 && Math.floor(n) !== 2026 && Math.floor(n) !== 2027);
+    if (numsTexto.length) {
+      const vTexto = numsTexto[numsTexto.length - 1];
+      if (!params.valor || Math.abs(params.valor - vTexto) > 0.009) {
+        console.log('[valor-texto] sobrescrevendo valor da IA', params.valor, '→', vTexto);
+        params.valor = vTexto;
+      }
+    }
   }
 
   // Rescisão: mostrar cálculo e aguardar confirmação
@@ -2653,8 +2687,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.44 iniciado ✓ ===');
-  console.log('Versão: 4.44 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.45 iniciado ✓ ===');
+  console.log('Versão: 4.45 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2808,7 +2842,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.44 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.45 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
