@@ -1955,7 +1955,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.45*\n\n' +
+      '👋 *LCA Studio Bot v4.46*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2265,6 +2265,87 @@ async function processarFilaBoletos() {
   }
 }
 
+
+
+// ── Rotina: detectar Pix recebidos de alunos no extrato (a cada 30 min) ─────
+const _pixProcessados = new Set(); // chave: data|valor|nome (evita duplicar no mesmo processo)
+async function rotinaDetectarPixAlunos() {
+  try {
+    const hojeBR = new Date(Date.now() - 3*60*60*1000);
+    const hojeStr = hojeBR.toISOString().slice(0,10);
+    const mesAtualStr = hojeStr.slice(0,7);
+
+    const ext = await Promise.race([
+      interExtrato(hojeStr, hojeStr),
+      new Promise((_,r) => setTimeout(() => r(new Error('Timeout extrato 25s')), 25000))
+    ]);
+    const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
+    if (!transacoes.length) return;
+
+    // Pix de crédito (recebidos)
+    const pixRecebidos = transacoes.filter(t =>
+      t.tipoTransacao === 'PIX' && t.tipoOperacao === 'C' && parseFloat(t.valor||0) > 0
+    );
+    if (!pixRecebidos.length) return;
+
+    const dados = await getDados();
+    const preposicoes = ['de','da','do','das','dos','e'];
+
+    for (const t of pixRecebidos) {
+      const valor = parseFloat(t.valor||0);
+      // Extrair nome do pagador: "PIX RECEBIDO - Cp :XXXXXXXX-NOME COMPLETO"
+      const mPix = (t.descricao||'').match(/Cp\s*:\s*\d+-(.+)/i);
+      if (!mPix || !mPix[1] || mPix[1].trim().length < 3) continue;
+      const nomePagador = mPix[1].trim().toLowerCase();
+      const partesPag = nomePagador.split(/\s+/).filter(p => !preposicoes.includes(p));
+
+      const chave = hojeStr + '|' + valor + '|' + nomePagador;
+      if (_pixProcessados.has(chave)) continue;
+
+      // Match: primeiro E segundo nome do aluno presentes no nome do pagador
+      const candidatos = dados.alunos.filter(a => {
+        if (a.ativo !== 'SIM') return false;
+        const partesAluno = a.nome.toLowerCase().split(/\s+/).filter(p => !preposicoes.includes(p));
+        if (partesAluno.length < 2) return false;
+        return partesPag.includes(partesAluno[0]) && partesPag.includes(partesAluno[1]);
+      });
+
+      if (candidatos.length !== 1) continue; // sem match único e seguro, ignorar
+      const aluno = candidatos[0];
+
+      // Já pagou o mês? pular (evita duplicar com rotina de boletos e lançamentos manuais)
+      const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
+      if ((pags[mesAtualStr]||0) > 0) { _pixProcessados.add(chave); continue; }
+
+      // Lançar pagamento automaticamente
+      _pixProcessados.add(chave);
+      try {
+        pags[mesAtualStr] = valor;
+        const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
+        const tinhaPend = (pend[mesAtualStr]||0) > 0;
+        if (tinhaPend) delete pend[mesAtualStr];
+        const hist = aluno.historico_alteracoes || [];
+        hist.push({ data: hojeBR.toLocaleDateString('pt-BR'), tipo: 'pagamento',
+          desc: 'Pagamento ' + mesAtualStr + ' via Pix Inter (detectado no extrato): ' + brl(valor) });
+        const patch = { pagamentos: pags, historico_alteracoes: hist };
+        if (tinhaPend) patch.pagamentos_pendentes = pend;
+        await sbPatch('alunos', 'id=eq.' + aluno.id, patch);
+        await logOp('pix_detectado', aluno.nome + ' - ' + mesAtualStr, aluno.id, valor, mesAtualStr);
+        await tgSend(TELEGRAM_CHAT_ID,
+          '💸 *Pix detectado e lançado!*\n\n' +
+          '👤 ' + aluno.nome + '\n' +
+          '💰 ' + brl(valor) + '\n' +
+          '📅 ' + mesAtualStr + ' — Pix recebido hoje no Inter.\n\n' +
+          '_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mesAtualStr + '"_');
+        console.log('[rotina-pix] lançado:', aluno.nome, valor);
+      } catch(e) {
+        console.error('[rotina-pix] erro ao lançar:', aluno.nome, e.message);
+      }
+    }
+  } catch(e) {
+    console.error('[rotina-pix] erro geral:', e.message);
+  }
+}
 
 // ── Rotina proativa: detectar boletos pagos no Inter ─────────────────────────
 async function verificarBoletosPagosInter() {
@@ -2687,8 +2768,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.45 iniciado ✓ ===');
-  console.log('Versão: 4.45 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.46 iniciado ✓ ===');
+  console.log('Versão: 4.46 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2842,7 +2923,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.45 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.46 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
@@ -2852,6 +2933,9 @@ async function main() {
   // Verificar boletos pagos no Inter a cada 5 minutos (independente do webhook)
   setInterval(verificarBoletosPagosInter, 5 * 60 * 1000);
   setTimeout(verificarBoletosPagosInter, 30000); // primeira verificação 30s após iniciar
+  // Detectar Pix de alunos no extrato a cada 30 minutos
+  setInterval(rotinaDetectarPixAlunos, 30 * 60 * 1000);
+  setTimeout(rotinaDetectarPixAlunos, 60000); // primeira verificação 60s após iniciar
   // Rotinas automáticas: inadimplência, planos vencendo, abandono, resumo semanal, fechamento mensal
   agendarRotinasAutomaticas();
 
