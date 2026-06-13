@@ -10,6 +10,7 @@ const GEMINI_KEY     = process.env.GEMINI_API_KEY;
 const SUPABASE_URL   = process.env.SUPABASE_URL || 'https://amkuqijbwjspxajiguxz.supabase.co';
 const SUPABASE_KEY   = process.env.SUPABASE_KEY;
 const ALLOWED_USER   = (process.env.ALLOWED_USER || '').toLowerCase();
+const COMANDO_TOKEN  = process.env.COMANDO_TOKEN || 'lca-studio-2026'; // token secreto p/ endpoint /comando do site (configure COMANDO_TOKEN no Render p/ maior segurança)
 
 // Certificados via variáveis de ambiente (INTER_CERT e INTER_KEY)
 // Client ID/Secret APENAS via variáveis de ambiente - nunca hardcoded no código
@@ -64,6 +65,7 @@ function interReq(path, method, body, token, extraHeaders) {
 // Obter token OAuth2 (com cache de 50 minutos)
 const interTokenCache = {}; // cache por scope
 
+// Obtém token OAuth2 do Banco Inter (cache por escopo). Escopos: extrato.read, cobranca.read, cobranca.write, etc.
 async function interGetToken(scope) {
   const scopeKey = scope || 'extrato.read boleto-cobranca.read boleto-cobranca.write';
   const agora = Date.now();
@@ -163,6 +165,7 @@ async function interEmitirBoleto(dados) {
   return r.data;
 }
 
+// Cancela um boleto/cobrança no Inter pelo código de solicitação.
 async function interCancelarBoleto(codigoSolicitacao) {
   if (!codigoSolicitacao) return null;
   const token = await interGetToken();
@@ -171,6 +174,7 @@ async function interCancelarBoleto(codigoSolicitacao) {
   return r;
 }
 
+// Grava registro de boleto emitido na tabela 'boletos' do Supabase (controle local de cobranças).
 async function gravarBoleto(alunoId, mes, codigoSolicitacao, seuNumero, valor, vencimento) {
   try {
     await sbPost('boletos', {
@@ -185,6 +189,7 @@ async function gravarBoleto(alunoId, mes, codigoSolicitacao, seuNumero, valor, v
   }
 }
 
+// Busca e cancela no Inter o boleto A_VENCER de um aluno em um mês específico (usado em alteração/rescisão de plano).
 async function cancelarBoletoPorMes(alunoId, mes) {
   try {
     const r = await sbGet('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto&select=id,codigo_solicitacao');
@@ -240,6 +245,7 @@ async function tgSend(chatId, text) {
   return r;
 }
 
+// Envia um Buffer PDF como documento no Telegram via multipart/form-data.
 async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption) {
   const boundary = '----TGBoundary' + Date.now();
   const safeFilename = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
@@ -263,6 +269,7 @@ async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption) {
   });
 }
 
+// Lê um arquivo PDF do disco e envia no Telegram (wrapper de tgSendPDFBuffer).
 async function tgSendPDF(chatId, pdfUrl, filename, caption) {
   // Baixar o PDF do Inter
   const pdfBuffer = await new Promise((resolve, reject) => {
@@ -357,6 +364,7 @@ function encontrarAluno(dados, p) {
   return matches.find(a => a.ativo === 'SIM') || matches[0];
 }
 
+// Registra uma operação na tabela 'log_inter' do Supabase (auditoria exibida na aba API Inter do site).
 async function logOp(tipo, descricao, alunoId, valor, mes, extra) {
   try {
     await sbPost('log_operacoes', {
@@ -382,6 +390,7 @@ function aiWithTimeout(promise, ms) {
   ]);
 }
 
+// Chama a API Gemini com um prompt e retorna o texto da resposta. Timeout interno.
 async function ai(prompt) {
   const models = ['gemini-2.5-flash-lite', 'gemini-2.5-flash'];
   for (const model of models) {
@@ -404,6 +413,7 @@ async function ai(prompt) {
   return null;
 }
 
+// Chama o Gemini esperando JSON; faz parse defensivo extraindo o objeto mesmo com texto ao redor.
 async function aiJSON(prompt) {
   const raw = await ai(prompt + '\n\nRetorne APENAS JSON válido, sem markdown, sem explicação, sem texto antes ou depois.');
   if (!raw) return null;
@@ -470,6 +480,7 @@ async function getDados() {
   };
 }
 
+// Persiste alterações de agenda/checkins/planos na tabela 'changes' (id=1) do Supabase via upsert.
 async function saveChanges(ch) {
   try {
     await req(SUPABASE_URL+'/rest/v1/changes', 'POST',
@@ -1815,8 +1826,13 @@ async function processar(msg) {
   const username = (msg.from.username||'').toLowerCase();
   const texto    = (msg.text||'').trim();
 
-  // Segurança
-  if (ALLOWED_USER && username !== ALLOWED_USER) return tgSend(chatId, '🔒 Acesso não autorizado.');
+  // Segurança: só o dono (chat_id imutável) pode comandar o bot.
+  // chatId é numérico e não pode ser forjado pelo usuário (diferente de username).
+  // TELEGRAM_CHAT_ID sempre existe (env ou fallback), garantindo barreira mesmo sem ALLOWED_USER.
+  if (String(chatId) !== String(TELEGRAM_CHAT_ID)) {
+    console.log('[seguranca] acesso negado — chatId:', chatId, 'username:', username);
+    return tgSend(chatId, '🔒 Acesso não autorizado.');
+  }
 
   // Ignorar mensagens antigas (>60s)
   if ((Math.floor(Date.now()/1000) - (msg.date||0)) > 60) return;
@@ -1955,7 +1971,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.46*\n\n' +
+      '👋 *LCA Studio Bot v4.47*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2269,6 +2285,7 @@ async function processarFilaBoletos() {
 
 // ── Rotina: detectar Pix recebidos de alunos no extrato (a cada 30 min) ─────
 const _pixProcessados = new Set(); // chave: data|valor|nome (evita duplicar no mesmo processo)
+// Rotina (30 min): varre o extrato do dia buscando Pix recebidos, casa nome do pagador com aluno (2 nomes), lança pagamento e notifica.
 async function rotinaDetectarPixAlunos() {
   try {
     const hojeBR = new Date(Date.now() - 3*60*60*1000);
@@ -2425,6 +2442,7 @@ async function verificarBoletosPagosInter() {
 
 // Controle de execução única por dia (evita duplicar se bot reiniciar)
 const _rotinasExecutadas = {}; // chave: 'nomeRotina-YYYY-MM-DD'
+// Helper de controle das rotinas: retorna true se a rotina nomeada já rodou hoje (evita duplicação após reinício do Render).
 function _jaExecutouHoje(nome) {
   const hojeBR = new Date(Date.now() - 3*60*60*1000).toISOString().slice(0,10);
   const chave = nome + '-' + hojeBR;
@@ -2667,6 +2685,7 @@ async function tgSendJSONBuffer(chatId, jsonBuffer, filename, caption) {
   });
 }
 
+// Rotina (dom 20h / sob demanda): exporta JSON completo do sistema e envia como documento no Telegram.
 async function rotinaBackupSemanal() {
   try {
     const dados = await getDados();
@@ -2746,6 +2765,7 @@ function agendarRotinasAutomaticas() {
 }
 
 
+// Agenda o envio diário (8h BRT) das mensagens de aniversariantes do dia.
 function agendarRotinaAniversarios() {
   // Verificar a cada hora se chegou às 8h (horário de Brasília = UTC-3)
   async function checar() {
@@ -2768,8 +2788,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.46 iniciado ✓ ===');
-  console.log('Versão: 4.46 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.47 iniciado ✓ ===');
+  console.log('Versão: 4.47 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2831,10 +2851,8 @@ async function main() {
             if (!valorFinal) {
               console.log('[WEBHOOK-INTER] Sem valor — ignorado. seuNum=' + seuNum);
             } else {
-              const [rAlunos] = await Promise.all([
-                sbGet('alunos', 'select=id,nome,pagamentos,pagamentos_pendentes,historico_alteracoes&id=eq.' + alunoId)
-              ]);
-              const aluno = rAlunos?.data?.[0];
+              const rAlunos = await sbGet('alunos', 'select=id,nome,pagamentos,pagamentos_pendentes,historico_alteracoes&id=eq.' + alunoId);
+              const aluno = (Array.isArray(rAlunos) ? rAlunos[0] : rAlunos?.data?.[0]);
               if (!aluno) {
                 console.log('[WEBHOOK-INTER] Aluno ' + alunoId + ' não encontrado');
               } else {
@@ -2887,15 +2905,23 @@ async function main() {
       }
 
     } else if (req.url === '/comando' && req.method === 'POST') {
-      // Verificar CORS para o site no Netlify
+      // CORS para o site no Netlify
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Comando-Token');
       let body = '';
       req.on('data', chunk => body += chunk);
       req.on('end', async () => {
         try {
           const payload = JSON.parse(body);
-          const chatId = payload.chatId || TELEGRAM_CHAT_ID;
+          // Segurança: exigir token secreto compartilhado (env COMANDO_TOKEN).
+          // Sem isso, qualquer um poderia POSTar comandos executados como se fosse o dono.
+          const tokenRecebido = req.headers['x-comando-token'] || payload.token || '';
+          if (!COMANDO_TOKEN || tokenRecebido !== COMANDO_TOKEN) {
+            console.log('[COMANDO SITE] token inválido — negado');
+            res.writeHead(403, {'Content-Type':'application/json'});
+            res.end(JSON.stringify({ ok: false, erro: 'não autorizado' }));
+            return;
+          }
           const comando = payload.comando || '';
           const alunoId = payload.aluno_id;
           console.log('[COMANDO SITE]', comando, 'aluno_id:', alunoId);
@@ -2904,8 +2930,8 @@ async function main() {
             res.end(JSON.stringify({ ok: false, erro: 'comando não informado' }));
             return;
           }
-          // Processar como mensagem do Telegram
-          const msgFake = { text: comando, chat: { id: chatId }, from: { username: 'site' } };
+          // Processar SEMPRE como o dono (chatId fixo do env, nunca do payload — evita injeção de chatId)
+          const msgFake = { text: comando, chat: { id: TELEGRAM_CHAT_ID }, from: { username: 'site', id: TELEGRAM_CHAT_ID } };
           processar(msgFake).catch(e => console.error('[COMANDO SITE] erro:', e.message));
           res.writeHead(200, {'Content-Type':'application/json'});
           res.end(JSON.stringify({ ok: true, mensagem: 'Comando recebido - verifique o Telegram' }));
@@ -2923,7 +2949,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.46 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.47 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
@@ -2958,5 +2984,14 @@ async function main() {
     }
   }
 }
+
+// ── Proteção contra crash: captura exceções não tratadas para o bot não morrer ──
+// (Render reinicia o processo em caso de crash, mas isso causa downtime e perda do offset)
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err.message, err.stack?.slice(0,300));
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', (reason && reason.message) || reason);
+});
 
 main();
