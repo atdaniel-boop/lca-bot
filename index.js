@@ -97,50 +97,74 @@ async function interGetToken(scope) {
 // boletos antigos (pré-bot) que foram importados como pagos. Modo dry-run lista sem alterar.
 async function migrarBoletosFuturosParaPendente(dryRun) {
   const hoje = new Date(Date.now() - 3*60*60*1000);
-  const hojeStr = hoje.toISOString().slice(0,10);
-  // Janela: de hoje até 12 meses à frente (cobre planos semestrais e anuais)
-  const dataInicio = hojeStr;
-  const dataFim = new Date(hoje.getFullYear(), hoje.getMonth()+12, 0).toISOString().slice(0,10);
-
-  let rAVencer;
-  try {
-    rAVencer = await Promise.race([
-      interCobranças('A_VENCER', dataInicio, dataFim),
-      new Promise((_,r) => setTimeout(() => r(new Error('Timeout Inter 25s')), 25000))
-    ]);
-  } catch(e) {
-    return '❌ Erro ao consultar boletos no Inter: ' + e.message;
+  const hojeMes = hoje.toISOString().slice(0,7);
+  // A janela dataInicial/dataFinal do Inter filtra por EMISSÃO. Boletos antigos foram
+  // emitidos no passado (até ~18 meses atrás) com vencimento futuro. Buscamos em janelas
+  // de ~90 dias para trás e para frente para capturar todos (o endpoint limita o intervalo).
+  const janelas = [];
+  for (let m = -18; m <= 12; m += 3) {
+    const ini = new Date(hoje.getFullYear(), hoje.getMonth()+m, 1).toISOString().slice(0,10);
+    const fim = new Date(hoje.getFullYear(), hoje.getMonth()+m+3, 0).toISOString().slice(0,10);
+    janelas.push([ini, fim]);
   }
 
-  const lista = rAVencer?.cobrancas || rAVencer?.content || (Array.isArray(rAVencer) ? rAVencer : []);
-  if (!lista.length) return 'ℹ️ Nenhum boleto A_VENCER encontrado no período (hoje até 12 meses).';
+  let lista = [];
+  const vistos = new Set();
+  for (const [ini, fim] of janelas) {
+    try {
+      const r = await Promise.race([
+        interCobranças('A_VENCER', ini, fim),
+        new Promise((_,rej) => setTimeout(() => rej(new Error('Timeout')), 25000))
+      ]);
+      const arr = r?.cobrancas || r?.content || (Array.isArray(r) ? r : []);
+      arr.forEach(item => {
+        const bc = item.cobranca || item;
+        const id = bc.codigoSolicitacao || bc.seuNumero || JSON.stringify(bc);
+        if (!vistos.has(id)) { vistos.add(id); lista.push(item); }
+      });
+    } catch(e) { console.log('[migrar] janela ' + ini + ' falhou:', e.message); }
+  }
+
+  console.log('[migrar] total boletos A_VENCER coletados:', lista.length);
+  if (!lista.length) return 'ℹ️ Nenhum boleto A_VENCER retornado pelo Inter nas janelas de emissão (-18 a +12 meses).';
 
   const dados = await getDados();
   const alteracoes = []; // {aluno, mes, valor}
   const naoIdentificados = [];
 
+  let diagAVencer = 0, diagComMes = 0, diagPagoNoSite = 0;
   for (const item of lista) {
     const bc = item.cobranca || item;
     if ((bc.situacao || '') !== 'A_VENCER') continue; // só não pagos
+    diagAVencer++;
     const psn = parseSeuNumero(bc.seuNumero);
     const venc = bc.dataVencimento || '';
     const mes = psn.mes || venc.slice(0,7);
     const valor = parseFloat(bc.valorNominal || 0);
-    if (!psn.alunoId || !mes || !valor) { naoIdentificados.push(bc.seuNumero + ' (' + (bc.pagador?.nome||'?') + ')'); continue; }
+    if (!psn.alunoId || !mes || !valor) { naoIdentificados.push((bc.seuNumero||'?') + ' (' + (bc.pagador?.nome||'?') + ')'); continue; }
+    diagComMes++;
 
     const aluno = dados.alunos.find(a => a.id === psn.alunoId);
-    if (!aluno) { naoIdentificados.push(bc.seuNumero + ' - aluno ' + psn.alunoId + ' não encontrado'); continue; }
+    if (!aluno) { naoIdentificados.push((bc.seuNumero||'?') + ' - aluno ' + psn.alunoId + ' não encontrado'); continue; }
 
     const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
     // Só corrigir se estiver marcado como PAGO (é o erro que queremos consertar)
     if (!(pags[mes] > 0)) continue;
+    diagPagoNoSite++;
 
     alteracoes.push({ aluno, mes, valor: pags[mes] });
   }
 
+  console.log('[migrar] diag — A_VENCER:', diagAVencer, '| com mês/id:', diagComMes, '| pagos no site:', diagPagoNoSite, '| não ident.:', naoIdentificados.length);
+
   if (!alteracoes.length) {
-    return '✅ Nenhuma correção necessária. Nenhum boleto A_VENCER está marcado como pago no site.' +
-      (naoIdentificados.length ? '\n\n⚠️ ' + naoIdentificados.length + ' boleto(s) não identificado(s).' : '');
+    return '✅ Nenhuma correção a fazer.\n\n' +
+      '📊 Diagnóstico:\n' +
+      '• Boletos A_VENCER no Inter: ' + diagAVencer + '\n' +
+      '• Com aluno+mês identificados: ' + diagComMes + '\n' +
+      '• Desses, marcados como pagos no site: ' + diagPagoNoSite + '\n' +
+      (naoIdentificados.length ? '• Não identificados: ' + naoIdentificados.length + '\n   ' + naoIdentificados.slice(0,8).join('\n   ') + '\n' : '') +
+      (diagAVencer === 0 ? '\n⚠️ O Inter não retornou nenhum boleto A_VENCER. A consulta filtra por data de EMISSÃO — pode ser que os boletos estejam fora da janela de -18 a +12 meses.' : '');
   }
 
   // Modo dry-run: apenas listar o que seria feito
@@ -2113,7 +2137,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.50*\n\n' +
+      '👋 *LCA Studio Bot v4.51*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2931,8 +2955,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.50 iniciado ✓ ===');
-  console.log('Versão: 4.50 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.51 iniciado ✓ ===');
+  console.log('Versão: 4.51 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3094,7 +3118,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.50 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.51 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
