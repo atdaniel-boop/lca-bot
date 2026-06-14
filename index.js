@@ -90,6 +90,21 @@ async function interGetToken(scope) {
 }
 
 // Consultar saldo da conta
+
+// Extrai { alunoId, mes } de um seuNumero de boleto Inter.
+// Formatos suportados:
+//  - 'LCA-{id}-{YYYY-MM}'  → boletos emitidos pelo bot (id + mês)
+//  - '{numero}'            → boletos antigos (pré-bot): o seuNumero é o próprio ID do aluno (coluna # da aba Alunos)
+// Retorna { alunoId: number|null, mes: string|null }.
+function parseSeuNumero(seuNum) {
+  const sn = String(seuNum || '').trim();
+  const mLCA = sn.match(/^LCA-(\d+)-(\d{4}-\d{2})$/);
+  if (mLCA) return { alunoId: parseInt(mLCA[1]), mes: mLCA[2] };
+  // Número puro = ID do aluno (boleto antigo). Sem mês embutido — será inferido pelo vencimento.
+  if (/^\d+$/.test(sn)) return { alunoId: parseInt(sn), mes: null };
+  return { alunoId: null, mes: null };
+}
+
 async function interSaldo() {
   const token = await interGetToken('extrato.read');
   const hoje = new Date().toISOString().slice(0,10);
@@ -1206,11 +1221,11 @@ async function executar(intencao, p, dados, chatId) {
         const seuNum   = b.seuNumero || item.boleto?.nossoNumero || '';
         const sit      = b.situacao || 'ATRASADO';
 
-        // Cruzar com aluno: seuNumero formato LCA-id-mes, depois por nome do pagador
+        // Cruzar com aluno: por ID do seuNumero (LCA-id-mes OU número puro antigo), depois por nome
         let nomeAluno = '';
-        const matchSN = seuNum.match(/LCA-(\d+)-/);
-        if (matchSN) {
-          const al = dados.alunos.find(a => a.id === parseInt(matchSN[1]));
+        const psnV = parseSeuNumero(seuNum);
+        if (psnV.alunoId) {
+          const al = dados.alunos.find(a => a.id === psnV.alunoId);
           if (al) nomeAluno = al.nome.split(' ').slice(0,2).join(' ');
         }
         if (!nomeAluno && nomePag) {
@@ -1279,14 +1294,20 @@ async function executar(intencao, p, dados, chatId) {
       // Filtrar por aluno se mencionado
       const filtroAluno = encontrarAluno(dados, p);
       if (filtroAluno) {
-        const nomeFirst = filtroAluno.nome.split(' ')[0].toLowerCase();
+        // Match por nome exige os 2 primeiros nomes (evita confundir "Ana Luiza" com "Ana Clara")
+        const preps = ['de','da','do','das','dos','e'];
+        const partesAluno = filtroAluno.nome.toLowerCase().split(/\s+/).filter(x => !preps.includes(x));
+        const n1 = partesAluno[0] || '';
+        const n2 = partesAluno[1] || '';
         lista = lista.filter(item => {
           const bc = item.cobranca || item;
           const nomePag = (bc.pagador?.nome || '').toLowerCase();
-          const seuNum = bc.seuNumero || '';
-          const matchId = seuNum.match(/^LCA-(\d+)-/);
-          return (matchId && parseInt(matchId[1]) === filtroAluno.id) ||
-            nomePag.includes(nomeFirst);
+          const partesPag = nomePag.split(/\s+/).filter(x => !preps.includes(x));
+          // 1) match seguro por ID (LCA-id-mes OU número puro = id antigo)
+          const psn = parseSeuNumero(bc.seuNumero);
+          if (psn.alunoId === filtroAluno.id) return true;
+          // 2) fallback: primeiro E segundo nome presentes no pagador
+          return n1 && n2 && partesPag.includes(n1) && partesPag.includes(n2);
         });
       }
       if (!lista.length) return '📋 *Boletos Inter*' + (filtroAluno ? ' — ' + filtroAluno.nome.split(' ')[0] : '') + '\n\n_Nenhuma cobrança encontrada no período._';
@@ -1575,13 +1596,17 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         // Filtrar pelo seuNumero que começa com LCA-{id}- (campos dentro de .cobranca)
         const prefixo = 'LCA-' + aluno.id + '-';
         boletos = cobrancas
-          .filter(c => ((c.cobranca||c).seuNumero||'').startsWith(prefixo))
+          .filter(c => {
+            const sn = (c.cobranca||c).seuNumero || '';
+            // boletos do bot (LCA-id-) ou antigos (seuNumero == id puro)
+            return sn.startsWith(prefixo) || sn === String(aluno.id);
+          })
           .map(c => {
             const bc = c.cobranca || c;
             const bb = c.boleto || {};
             return {
               codigo_solicitacao: bc.codigoSolicitacao,
-              mes: (bc.seuNumero||'').replace(prefixo, ''),
+              mes: (bc.seuNumero||'').startsWith(prefixo) ? (bc.seuNumero||'').replace(prefixo, '') : (bc.dataVencimento||'').slice(0,7),
               valor: bc.valorNominal,
               vencimento: bc.dataVencimento,
               linkVisualizacaoBoleto: bc.linkVisualizacaoBoleto || bb.linkVisualizacaoBoleto || ''
@@ -1971,7 +1996,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.47*\n\n' +
+      '👋 *LCA Studio Bot v4.49*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2389,12 +2414,13 @@ async function verificarBoletosPagosInter() {
 
     for (const item of lista) {
       const bc = item.cobranca || item;
-      const seuNum = bc.seuNumero || '';
-      const match = seuNum.match(/^LCA-(\d+)-(\d{4}-\d{2})$/);
-      if (!match) continue;
+      const psn = parseSeuNumero(bc.seuNumero);
+      if (!psn.alunoId) continue;
 
-      const alunoId = parseInt(match[1]);
-      const mes = match[2];
+      const alunoId = psn.alunoId;
+      // mês: do seuNumero (LCA) ou inferido pelo vencimento do boleto (boletos antigos)
+      const mes = psn.mes || (bc.dataVencimento || '').slice(0,7);
+      if (!mes) continue;
       const valor = parseFloat(bc.valorNominal || 0);
       if (!valor) continue;
 
@@ -2788,8 +2814,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.47 iniciado ✓ ===');
-  console.log('Versão: 4.47 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.49 iniciado ✓ ===');
+  console.log('Versão: 4.49 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2825,17 +2851,19 @@ async function main() {
           const dataPag = payload?.dataLiquidacao || payload?.dataPagamento ||
             (payload?.dataHoraSituacao || '').slice(0,10) || new Date().toISOString().slice(0,10);
 
-          // seuNumero formato LCA-{id}-{mes}
-          const match = seuNum.match(/^LCA-(\d+)-(\d{4}-\d{2})$/);
+          // seuNumero: LCA-{id}-{mes} (bot) ou número puro = id (boletos antigos)
+          const psn = parseSeuNumero(seuNum);
+          const vencWebhook = payload?.dataVencimento || payload?.cobranca?.dataVencimento || '';
+          const mesInferido = psn.mes || vencWebhook.slice(0,7) || dataPag.slice(0,7);
           const eventoValido = !evento || evento.includes('PAGO') || evento.includes('LIQUIDADO') || evento.includes('RECEBIDO');
 
-          if (!match) {
+          if (!psn.alunoId || !mesInferido) {
             console.log('[WEBHOOK-INTER] seuNum não reconhecido:', seuNum, '| nossoNum:', nossoNum);
           } else if (!eventoValido) {
             console.log('[WEBHOOK-INTER] Evento ignorado:', evento);
           } else {
-            const alunoId = parseInt(match[1]);
-            const mes = match[2];
+            const alunoId = psn.alunoId;
+            const mes = mesInferido;
 
             // Se valor não veio no webhook, buscar na API Inter
             let valorFinal = valorPago;
@@ -2949,7 +2977,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.47 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.49 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
