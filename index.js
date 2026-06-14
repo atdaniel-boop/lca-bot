@@ -92,7 +92,7 @@ async function interGetToken(scope) {
 // Consultar saldo da conta
 
 
-// Corrige boletos A_VENCER (não pagos, venc. futuro) que estão marcados como PAGOS no site:
+// Corrige boletos A_RECEBER (não pagos, venc. futuro) que estão marcados como PAGOS no site:
 // move o valor de pagamentos[mes] para pagamentos_pendentes[mes]. Usado uma vez para regularizar
 // boletos antigos (pré-bot) que foram importados como pagos. Modo dry-run lista sem alterar.
 async function migrarBoletosFuturosParaPendente(dryRun) {
@@ -112,8 +112,8 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
   const vistos = new Set();
   for (const [ini, fim] of janelas) {
     try {
-      // Buscar SEM filtro de situação (o filtro situacao='A_VENCER' retorna vazio nesse endpoint);
-      // filtramos A_VENCER no código depois.
+      // Buscar SEM filtro de situação e filtrar A_RECEBER no código (o Inter usa A_RECEBER
+      // para boletos emitidos aguardando pagamento, não A_VENCER).
       const r = await Promise.race([
         interCobranças(null, ini, fim),
         new Promise((_,rej) => setTimeout(() => rej(new Error('Timeout')), 25000))
@@ -140,7 +140,7 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
   let diagAVencer = 0, diagComMes = 0, diagPagoNoSite = 0;
   for (const item of lista) {
     const bc = item.cobranca || item;
-    if ((bc.situacao || '') !== 'A_VENCER') continue; // só não pagos
+    if ((bc.situacao || '') !== 'A_RECEBER') continue; // só não pagos (Inter usa A_RECEBER, não A_VENCER)
     diagAVencer++;
     const psn = parseSeuNumero(bc.seuNumero);
     const venc = bc.dataVencimento || '';
@@ -160,16 +160,16 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
     alteracoes.push({ aluno, mes, valor: pags[mes] });
   }
 
-  console.log('[migrar] diag — A_VENCER:', diagAVencer, '| com mês/id:', diagComMes, '| pagos no site:', diagPagoNoSite, '| não ident.:', naoIdentificados.length);
+  console.log('[migrar] diag — A_RECEBER:', diagAVencer, '| com mês/id:', diagComMes, '| pagos no site:', diagPagoNoSite, '| não ident.:', naoIdentificados.length);
 
   if (!alteracoes.length) {
     return '✅ Nenhuma correção a fazer.\n\n' +
       '📊 Diagnóstico:\n' +
-      '• Boletos A_VENCER no Inter: ' + diagAVencer + '\n' +
+      '• Boletos A_RECEBER no Inter: ' + diagAVencer + '\n' +
       '• Com aluno+mês identificados: ' + diagComMes + '\n' +
       '• Desses, marcados como pagos no site: ' + diagPagoNoSite + '\n' +
       (naoIdentificados.length ? '• Não identificados: ' + naoIdentificados.length + '\n   ' + naoIdentificados.slice(0,8).join('\n   ') + '\n' : '') +
-      (diagAVencer === 0 ? '\n⚠️ Nenhum boleto com situação A_VENCER.\nSituações encontradas: ' + JSON.stringify(porSituacao) : '');
+      (diagAVencer === 0 ? '\n⚠️ Nenhum boleto com situação A_RECEBER.\nSituações encontradas: ' + JSON.stringify(porSituacao) : '');
   }
 
   // Modo dry-run: apenas listar o que seria feito
@@ -179,7 +179,7 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
     ).join('\n');
     return '🔍 *Prévia da correção* (' + alteracoes.length + ' boleto(s))\n\n' + linhas +
       (alteracoes.length>30 ? '\n_...e mais ' + (alteracoes.length-30) + '_' : '') +
-      '\n\n_Estes estão como PAGOS mas são A_VENCER no Inter._\n' +
+      '\n\n_Estes estão como PAGOS mas estão a receber (não pagos) no Inter._\n' +
       'Para aplicar a correção, envie: *confirmar correcao boletos*';
   }
 
@@ -202,7 +202,7 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
         pend[m.mes] = m.valor;   // marca como aguardando
         delete pags[m.mes];      // remove o "pago" indevido
         hist.push({ data: hoje.toLocaleDateString('pt-BR'), tipo: 'correcao',
-          desc: 'Boleto ' + m.mes + ' reclassificado de pago→pendente (A_VENCER no Inter): ' + brl(m.valor) });
+          desc: 'Boleto ' + m.mes + ' reclassificado de pago→pendente (a receber no Inter): ' + brl(m.valor) });
       });
       await sbPatch('alunos', 'id=eq.' + a.id, {
         pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: hist
@@ -333,7 +333,7 @@ async function gravarBoleto(alunoId, mes, codigoSolicitacao, seuNumero, valor, v
   }
 }
 
-// Busca e cancela no Inter o boleto A_VENCER de um aluno em um mês específico (usado em alteração/rescisão de plano).
+// Busca e cancela no Inter o boleto a receber de um aluno em um mês específico (usado em alteração/rescisão de plano).
 async function cancelarBoletoPorMes(alunoId, mes) {
   try {
     const r = await sbGet('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto&select=id,codigo_solicitacao');
@@ -1313,11 +1313,11 @@ async function executar(intencao, p, dados, chatId) {
         Promise.race([p, new Promise((_,r) => setTimeout(() => r(new Error('Timeout ' + label)), ms))]);
 
       console.log('[inter_boletos_vencidos] buscando...');
-      // A_VENCER: janela menor (30 dias) para não puxar centenas de boletos futuros
+      // A_RECEBER: janela menor (30 dias) para não puxar centenas de boletos futuros
       const dataInicioAberto = new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
       const [rAtr, rAberto] = await Promise.all([
         withTimeout(interCobranças('ATRASADO', dataInicio, dataFim), 25000, 'ATRASADO').catch(e => { console.error('rAtr:', e.message); return null; }),
-        withTimeout(interCobranças('A_VENCER', dataInicioAberto, dataFim), 25000, 'A_VENCER').catch(e => { console.error('rAberto:', e.message); return null; })
+        withTimeout(interCobranças('A_RECEBER', dataInicioAberto, dataFim), 25000, 'A_RECEBER').catch(e => { console.error('rAberto:', e.message); return null; })
       ]);
       // Log completo para ver todos os campos disponíveis
       console.log('[inter_boletos_vencidos] rAtr keys:', rAtr ? Object.keys(rAtr).join(',') : 'null');
@@ -1325,12 +1325,12 @@ async function executar(intencao, p, dados, chatId) {
 
       // rAtr.cobrancas: apenas ATRASADO (já filtrado pela API)
       const atrasados = rAtr?.cobrancas || [];
-      // emAberto: A_VENCER que já venceram E ainda não foram pagos/cancelados
+      // emAberto: A_RECEBER que já venceram E ainda não foram pagos/cancelados
       const emAberto = (rAberto?.cobrancas || []).filter(b => {
         const bc = b.cobranca || b;
         const sit = bc.situacao || '';
         const dv = bc.dataVencimento || '';
-        return dv < dataFim && sit === 'A_VENCER'; // só os genuinamente em aberto
+        return dv < dataFim && sit === 'A_RECEBER'; // só os genuinamente em aberto
       });
 
       console.log('[inter_boletos_vencidos] atrasados:', atrasados.length, '| emAberto:', emAberto.length);
@@ -1725,7 +1725,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         const dataFim = new Date(hoje.getFullYear(), hoje.getMonth() + 6, 30).toISOString().slice(0,10);
         const dataInicio = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1).toISOString().slice(0,10);
         const rInter = await Promise.race([
-          interCobranças('A_VENCER', dataInicio, dataFim),
+          interCobranças('A_RECEBER', dataInicio, dataFim),
           new Promise((_,r) => setTimeout(() => r(new Error('Timeout Inter 25s')), 25000))
         ]);
         const cobrancas = rInter?.content || rInter?.cobrancas || [];
@@ -1944,7 +1944,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   }
 
   if (intencao === 'corrigir_boletos_preview') {
-    await tgSend(chatId, '🔍 Consultando boletos A_VENCER no Inter...');
+    await tgSend(chatId, '🔍 Consultando boletos a receber no Inter...');
     return await migrarBoletosFuturosParaPendente(true); // dry-run
   }
 
@@ -2142,7 +2142,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.52*\n\n' +
+      '👋 *LCA Studio Bot v4.53*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2960,8 +2960,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.52 iniciado ✓ ===');
-  console.log('Versão: 4.52 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.53 iniciado ✓ ===');
+  console.log('Versão: 4.53 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3123,7 +3123,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.52 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.53 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
