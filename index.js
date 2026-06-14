@@ -112,8 +112,10 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
   const vistos = new Set();
   for (const [ini, fim] of janelas) {
     try {
+      // Buscar SEM filtro de situação (o filtro situacao='A_VENCER' retorna vazio nesse endpoint);
+      // filtramos A_VENCER no código depois.
       const r = await Promise.race([
-        interCobranças('A_VENCER', ini, fim),
+        interCobranças(null, ini, fim),
         new Promise((_,rej) => setTimeout(() => rej(new Error('Timeout')), 25000))
       ]);
       const arr = r?.cobrancas || r?.content || (Array.isArray(r) ? r : []);
@@ -125,8 +127,11 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
     } catch(e) { console.log('[migrar] janela ' + ini + ' falhou:', e.message); }
   }
 
-  console.log('[migrar] total boletos A_VENCER coletados:', lista.length);
-  if (!lista.length) return 'ℹ️ Nenhum boleto A_VENCER retornado pelo Inter nas janelas de emissão (-18 a +12 meses).';
+  // Contagem por situação para diagnóstico
+  const porSituacao = {};
+  lista.forEach(item => { const s=(item.cobranca||item).situacao||'?'; porSituacao[s]=(porSituacao[s]||0)+1; });
+  console.log('[migrar] total coletado:', lista.length, '| situações:', JSON.stringify(porSituacao));
+  if (!lista.length) return 'ℹ️ Nenhum boleto retornado pelo Inter nas janelas de emissão (-18 a +12 meses).';
 
   const dados = await getDados();
   const alteracoes = []; // {aluno, mes, valor}
@@ -164,7 +169,7 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
       '• Com aluno+mês identificados: ' + diagComMes + '\n' +
       '• Desses, marcados como pagos no site: ' + diagPagoNoSite + '\n' +
       (naoIdentificados.length ? '• Não identificados: ' + naoIdentificados.length + '\n   ' + naoIdentificados.slice(0,8).join('\n   ') + '\n' : '') +
-      (diagAVencer === 0 ? '\n⚠️ O Inter não retornou nenhum boleto A_VENCER. A consulta filtra por data de EMISSÃO — pode ser que os boletos estejam fora da janela de -18 a +12 meses.' : '');
+      (diagAVencer === 0 ? '\n⚠️ Nenhum boleto com situação A_VENCER.\nSituações encontradas: ' + JSON.stringify(porSituacao) : '');
   }
 
   // Modo dry-run: apenas listar o que seria feito
@@ -2137,7 +2142,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.51*\n\n' +
+      '👋 *LCA Studio Bot v4.52*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2955,8 +2960,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.51 iniciado ✓ ===');
-  console.log('Versão: 4.51 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.52 iniciado ✓ ===');
+  console.log('Versão: 4.52 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3118,7 +3123,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.51 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.52 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
