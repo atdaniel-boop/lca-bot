@@ -91,6 +91,106 @@ async function interGetToken(scope) {
 
 // Consultar saldo da conta
 
+
+// Corrige boletos A_VENCER (não pagos, venc. futuro) que estão marcados como PAGOS no site:
+// move o valor de pagamentos[mes] para pagamentos_pendentes[mes]. Usado uma vez para regularizar
+// boletos antigos (pré-bot) que foram importados como pagos. Modo dry-run lista sem alterar.
+async function migrarBoletosFuturosParaPendente(dryRun) {
+  const hoje = new Date(Date.now() - 3*60*60*1000);
+  const hojeStr = hoje.toISOString().slice(0,10);
+  // Janela: de hoje até 12 meses à frente (cobre planos semestrais e anuais)
+  const dataInicio = hojeStr;
+  const dataFim = new Date(hoje.getFullYear(), hoje.getMonth()+12, 0).toISOString().slice(0,10);
+
+  let rAVencer;
+  try {
+    rAVencer = await Promise.race([
+      interCobranças('A_VENCER', dataInicio, dataFim),
+      new Promise((_,r) => setTimeout(() => r(new Error('Timeout Inter 25s')), 25000))
+    ]);
+  } catch(e) {
+    return '❌ Erro ao consultar boletos no Inter: ' + e.message;
+  }
+
+  const lista = rAVencer?.cobrancas || rAVencer?.content || (Array.isArray(rAVencer) ? rAVencer : []);
+  if (!lista.length) return 'ℹ️ Nenhum boleto A_VENCER encontrado no período (hoje até 12 meses).';
+
+  const dados = await getDados();
+  const alteracoes = []; // {aluno, mes, valor}
+  const naoIdentificados = [];
+
+  for (const item of lista) {
+    const bc = item.cobranca || item;
+    if ((bc.situacao || '') !== 'A_VENCER') continue; // só não pagos
+    const psn = parseSeuNumero(bc.seuNumero);
+    const venc = bc.dataVencimento || '';
+    const mes = psn.mes || venc.slice(0,7);
+    const valor = parseFloat(bc.valorNominal || 0);
+    if (!psn.alunoId || !mes || !valor) { naoIdentificados.push(bc.seuNumero + ' (' + (bc.pagador?.nome||'?') + ')'); continue; }
+
+    const aluno = dados.alunos.find(a => a.id === psn.alunoId);
+    if (!aluno) { naoIdentificados.push(bc.seuNumero + ' - aluno ' + psn.alunoId + ' não encontrado'); continue; }
+
+    const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
+    // Só corrigir se estiver marcado como PAGO (é o erro que queremos consertar)
+    if (!(pags[mes] > 0)) continue;
+
+    alteracoes.push({ aluno, mes, valor: pags[mes] });
+  }
+
+  if (!alteracoes.length) {
+    return '✅ Nenhuma correção necessária. Nenhum boleto A_VENCER está marcado como pago no site.' +
+      (naoIdentificados.length ? '\n\n⚠️ ' + naoIdentificados.length + ' boleto(s) não identificado(s).' : '');
+  }
+
+  // Modo dry-run: apenas listar o que seria feito
+  if (dryRun) {
+    const linhas = alteracoes.slice(0,30).map(x =>
+      '• ' + x.aluno.nome.split(' ').slice(0,2).join(' ') + ' — ' + x.mes + ' (' + brl(x.valor) + ')'
+    ).join('\n');
+    return '🔍 *Prévia da correção* (' + alteracoes.length + ' boleto(s))\n\n' + linhas +
+      (alteracoes.length>30 ? '\n_...e mais ' + (alteracoes.length-30) + '_' : '') +
+      '\n\n_Estes estão como PAGOS mas são A_VENCER no Inter._\n' +
+      'Para aplicar a correção, envie: *confirmar correcao boletos*';
+  }
+
+  // Aplicar: mover pago → pendente
+  let ok = 0, erros = 0;
+  // Agrupar por aluno para um único patch por aluno
+  const porAluno = {};
+  alteracoes.forEach(x => {
+    if (!porAluno[x.aluno.id]) porAluno[x.aluno.id] = { aluno: x.aluno, meses: [] };
+    porAluno[x.aluno.id].meses.push({ mes: x.mes, valor: x.valor });
+  });
+
+  for (const g of Object.values(porAluno)) {
+    try {
+      const a = g.aluno;
+      const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+      const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
+      const hist = a.historico_alteracoes || [];
+      g.meses.forEach(m => {
+        pend[m.mes] = m.valor;   // marca como aguardando
+        delete pags[m.mes];      // remove o "pago" indevido
+        hist.push({ data: hoje.toLocaleDateString('pt-BR'), tipo: 'correcao',
+          desc: 'Boleto ' + m.mes + ' reclassificado de pago→pendente (A_VENCER no Inter): ' + brl(m.valor) });
+      });
+      await sbPatch('alunos', 'id=eq.' + a.id, {
+        pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: hist
+      });
+      ok += g.meses.length;
+    } catch(e) {
+      erros += g.meses.length;
+      console.error('[migrar-boletos] erro aluno ' + g.aluno.id + ':', e.message);
+    }
+  }
+
+  return '✅ *Correção aplicada!*\n\n' +
+    ok + ' boleto(s) movidos de PAGO → aguardando.\n' +
+    (erros ? '⚠️ ' + erros + ' com erro (ver log).\n' : '') +
+    '\n_Recarregue o site para ver as mudanças._';
+}
+
 // Extrai { alunoId, mes } de um seuNumero de boleto Inter.
 // Formatos suportados:
 //  - 'LCA-{id}-{YYYY-MM}'  → boletos emitidos pelo bot (id + mês)
@@ -725,6 +825,13 @@ async function processarComIA(texto, dados, mes) {
   // Comando "backup" sob demanda
   if (tL === 'backup' || tL === 'fazer backup' || tL === 'exportar backup') {
     return { tipo: 'acao', intencao: 'backup_agora', params: {} };
+  }
+  // Correção de boletos futuros marcados como pagos (prévia e confirmação)
+  if (tL === 'corrigir boletos' || tL === 'corrigir boletos futuros' || tL === 'migrar pendentes') {
+    return { tipo: 'acao', intencao: 'corrigir_boletos_preview', params: {} };
+  }
+  if (tL === 'confirmar correcao boletos' || tL === 'confirmar correção boletos') {
+    return { tipo: 'acao', intencao: 'corrigir_boletos_aplicar', params: {} };
   }
   if (temInter && (tL.includes('saldo') || tL.includes('quanto tem'))) {
     return { tipo: 'acao', intencao: 'inter_saldo', params: {} };
@@ -1807,6 +1914,16 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     return null;
   }
 
+  if (intencao === 'corrigir_boletos_preview') {
+    await tgSend(chatId, '🔍 Consultando boletos A_VENCER no Inter...');
+    return await migrarBoletosFuturosParaPendente(true); // dry-run
+  }
+
+  if (intencao === 'corrigir_boletos_aplicar') {
+    await tgSend(chatId, '⏳ Aplicando correção...');
+    return await migrarBoletosFuturosParaPendente(false);
+  }
+
   if (intencao === 'calcular_rescisao') {
     const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
@@ -1996,7 +2113,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.49*\n\n' +
+      '👋 *LCA Studio Bot v4.50*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2814,8 +2931,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.49 iniciado ✓ ===');
-  console.log('Versão: 4.49 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v4.50 iniciado ✓ ===');
+  console.log('Versão: 4.50 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -2977,7 +3094,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.49 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v4.50 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
