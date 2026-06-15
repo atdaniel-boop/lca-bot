@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 5.3 - detecção de aluno em "situação financeira" e "boletos" prioriza nome composto (fix real: "ana luiza" casava com aluna "Luiza" pelo primeiro nome)
+// Versão 5.4 - boletos: status cruzado com pagamento no site (boleto A_RECEBER pago via Pix mostra ✅); nome completo (2 nomes) no título da situação financeira
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -1522,12 +1522,29 @@ async function executar(intencao, p, dados, chatId) {
       });
       const linhas = lista.slice(0,20).map(item => {
         const bc = item.cobranca || item;
-        const status = bc.situacao === 'PAGO' ? '✅' : bc.situacao === 'CANCELADO' ? '❌' : bc.situacao === 'ATRASADO' ? '🔴' : '⏳';
+        // Status: cruzar com o pagamento real no site. Pix não baixa o boleto no Inter,
+        // então um boleto A_RECEBER pode já estar pago no site (via Pix/dinheiro).
+        const psnB = parseSeuNumero(bc.seuNumero);
+        const mesB = psnB.mes || (bc.dataVencimento||'').slice(0,7);
+        let pagoNoSite = false;
+        if (psnB.alunoId && mesB) {
+          const alB = dados.alunos.find(a => a.id === psnB.alunoId);
+          if (alB) {
+            const pagsB = typeof alB.pagamentos==='string'?JSON.parse(alB.pagamentos||'{}'):(alB.pagamentos||{});
+            pagoNoSite = (pagsB[mesB]||0) > 0;
+          }
+        }
+        let status;
+        if (bc.situacao === 'PAGO' || bc.situacao === 'RECEBIDO' || bc.situacao === 'MARCADO_RECEBIDO' || pagoNoSite) status = '✅';
+        else if (bc.situacao === 'CANCELADO') status = '❌';
+        else if (bc.situacao === 'ATRASADO') status = '🔴';
+        else status = '⏳';
+        const obs = (pagoNoSite && bc.situacao === 'A_RECEBER') ? ' _(pago via Pix/dinheiro)_' : '';
         const val = brl(parseFloat(bc.valorNominal) || 0);
         const nome = filtroAluno ? '' : ' - ' + (bc.pagador?.nome || '').split(' ').slice(0,2).join(' ');
         const venc = (bc.dataVencimento||'').split('-').reverse().join('/');
         const seuN = bc.seuNumero ? ' _[' + bc.seuNumero + ']_' : '';
-        return status + ' ' + venc + ' ' + val + nome + seuN;
+        return status + ' ' + venc + ' ' + val + nome + seuN + obs;
       }).join('\n');
       const titulo = filtroAluno
         ? '📋 *Boletos Inter — ' + filtroAluno.nome.split(' ').slice(0,2).join(' ') + '*'
@@ -2214,7 +2231,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v5.3*\n\n' +
+      '👋 *LCA Studio Bot v5.4*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -3049,8 +3066,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v5.3 iniciado ✓ ===');
-  console.log('Versão: 5.3 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v5.4 iniciado ✓ ===');
+  console.log('Versão: 5.4 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3212,7 +3229,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v5.3 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v5.4 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
