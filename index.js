@@ -510,11 +510,36 @@ function nowBRT() {
 function encontrarAluno(dados, p) {
   if (p?.aluno_id) return dados.alunos.find(a => a.id === p.aluno_id);
   if (!p?.aluno_nome) return null;
-  const termo = p.aluno_nome.toLowerCase();
-  const matches = dados.alunos.filter(a => a.nome.toLowerCase().includes(termo));
-  if (!matches.length) return null;
-  // Preferir ativo; se todos inativos, retornar o primeiro
-  return matches.find(a => a.ativo === 'SIM') || matches[0];
+  const preps = ['de','da','do','das','dos','e'];
+  const termo = p.aluno_nome.toLowerCase().trim();
+  const termoPartes = termo.split(/\s+/).filter(x => !preps.includes(x));
+
+  // 1) Match exato do nome completo
+  let m = dados.alunos.filter(a => a.nome.toLowerCase() === termo);
+  // 2) Nome do aluno começa com o termo (ex: "ana luiza" → "Ana Luiza Santoro")
+  if (!m.length) m = dados.alunos.filter(a => a.nome.toLowerCase().startsWith(termo));
+  // 3) Substring direta
+  if (!m.length) m = dados.alunos.filter(a => a.nome.toLowerCase().includes(termo));
+  // 4) Todas as palavras do termo presentes no nome (ordem livre). Quando o termo tem 2+ palavras,
+  //    isso evita casar "luiza" sozinho com a aluna errada — exige Ana E Luiza.
+  if (!m.length && termoPartes.length) {
+    m = dados.alunos.filter(a => {
+      const partesAluno = a.nome.toLowerCase().split(/\s+/).filter(x => !preps.includes(x));
+      return termoPartes.every(t => partesAluno.includes(t));
+    });
+  }
+  if (!m.length) return null;
+
+  // Desempate: se o termo tem 2+ palavras, preferir quem casa TODAS as palavras do termo
+  if (termoPartes.length >= 2 && m.length > 1) {
+    const exatos = m.filter(a => {
+      const partesAluno = a.nome.toLowerCase().split(/\s+/).filter(x => !preps.includes(x));
+      return termoPartes.every(t => partesAluno.includes(t));
+    });
+    if (exatos.length) m = exatos;
+  }
+  // Preferir ativo
+  return m.find(a => a.ativo === 'SIM') || m[0];
 }
 
 // Registra uma operação na tabela 'log_inter' do Supabase (auditoria exibida na aba API Inter do site).
@@ -863,6 +888,10 @@ async function processarComIA(texto, dados, mes) {
   // Comando "backup" sob demanda
   if (tL === 'backup' || tL === 'fazer backup' || tL === 'exportar backup') {
     return { tipo: 'acao', intencao: 'backup_agora', params: {} };
+  }
+  // Verificar Pix recebidos agora (antecipa a rotina de 30 min)
+  if (tL === 'pix' || tL === 'verificar pix' || tL === 'detectar pix' || tL === 'checar pix') {
+    return { tipo: 'acao', intencao: 'verificar_pix', params: {} };
   }
   // Correção de boletos futuros marcados como pagos (prévia e confirmação)
   if (tL === 'corrigir boletos' || tL === 'corrigir boletos futuros' || tL === 'migrar pendentes') {
@@ -1952,6 +1981,11 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     return null;
   }
 
+  if (intencao === 'verificar_pix') {
+    await tgSend(chatId, '🔍 Verificando Pix recebidos hoje no Inter...');
+    return await rotinaDetectarPixAlunos(true); // modo manual: retorna resumo
+  }
+
   if (intencao === 'corrigir_boletos_preview') {
     await tgSend(chatId, '🔍 Consultando boletos a receber no Inter...');
     return await migrarBoletosFuturosParaPendente(true); // dry-run
@@ -2151,7 +2185,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v5.0*\n\n' +
+      '👋 *LCA Studio Bot v5.2*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2159,6 +2193,7 @@ async function processar(msg) {
       '- _"resumo financeiro de maio"_\n' +
       '- _"resumo"_ - resumo semanal com saldo, na hora\n' +
       '- _"backup"_ - exporta JSON completo agora\n' +
+      '- _"pix"_ - detecta Pix de alunos recebidos hoje\n' +
       '- _"qual aluna falta mais?"_\n\n' +
       '*💰 Lançamentos:*\n' +
       '- _"custo aluguel 3700 junho"_\n' +
@@ -2466,7 +2501,9 @@ async function processarFilaBoletos() {
 // ── Rotina: detectar Pix recebidos de alunos no extrato (a cada 30 min) ─────
 const _pixProcessados = new Set(); // chave: data|valor|nome (evita duplicar no mesmo processo)
 // Rotina (30 min): varre o extrato do dia buscando Pix recebidos, casa nome do pagador com aluno (2 nomes), lança pagamento e notifica.
-async function rotinaDetectarPixAlunos() {
+async function rotinaDetectarPixAlunos(retornarResumo) {
+  let lancados = 0, semMatch = 0, jaPagos = 0;
+  const lancadosNomes = [];
   try {
     const hojeBR = new Date(Date.now() - 3*60*60*1000);
     const hojeStr = hojeBR.toISOString().slice(0,10);
@@ -2477,13 +2514,13 @@ async function rotinaDetectarPixAlunos() {
       new Promise((_,r) => setTimeout(() => r(new Error('Timeout extrato 25s')), 25000))
     ]);
     const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
-    if (!transacoes.length) return;
+    if (!transacoes.length) return retornarResumo ? '🔍 Nenhuma transação no extrato de hoje ainda.' : undefined;
 
     // Pix de crédito (recebidos)
     const pixRecebidos = transacoes.filter(t =>
       t.tipoTransacao === 'PIX' && t.tipoOperacao === 'C' && parseFloat(t.valor||0) > 0
     );
-    if (!pixRecebidos.length) return;
+    if (!pixRecebidos.length) return retornarResumo ? '🔍 Nenhum Pix recebido hoje no extrato.' : undefined;
 
     const dados = await getDados();
     const preposicoes = ['de','da','do','das','dos','e'];
@@ -2507,12 +2544,12 @@ async function rotinaDetectarPixAlunos() {
         return partesPag.includes(partesAluno[0]) && partesPag.includes(partesAluno[1]);
       });
 
-      if (candidatos.length !== 1) continue; // sem match único e seguro, ignorar
+      if (candidatos.length !== 1) { semMatch++; continue; } // sem match único e seguro, ignorar
       const aluno = candidatos[0];
 
       // Já pagou o mês? pular (evita duplicar com rotina de boletos e lançamentos manuais)
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
-      if ((pags[mesAtualStr]||0) > 0) { _pixProcessados.add(chave); continue; }
+      if ((pags[mesAtualStr]||0) > 0) { _pixProcessados.add(chave); jaPagos++; continue; }
 
       // Lançar pagamento automaticamente
       _pixProcessados.add(chave);
@@ -2535,12 +2572,26 @@ async function rotinaDetectarPixAlunos() {
           '📅 ' + mesAtualStr + ' — Pix recebido hoje no Inter.\n\n' +
           '_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mesAtualStr + '"_');
         console.log('[rotina-pix] lançado:', aluno.nome, valor);
+        lancados++;
+        lancadosNomes.push(aluno.nome.split(' ').slice(0,2).join(' ') + ' (' + brl(valor) + ')');
       } catch(e) {
         console.error('[rotina-pix] erro ao lançar:', aluno.nome, e.message);
       }
     }
   } catch(e) {
     console.error('[rotina-pix] erro geral:', e.message);
+    if (retornarResumo) return '❌ Erro ao verificar Pix: ' + e.message;
+  }
+
+  if (retornarResumo) {
+    if (lancados > 0) {
+      return '✅ *' + lancados + ' Pix lançado(s):*\n' + lancadosNomes.map(n => '• ' + n).join('\n') +
+        (jaPagos ? '\n\n_' + jaPagos + ' Pix de aluno(s) que já estavam pagos (ignorados)._' : '');
+    }
+    return '🔍 Nenhum Pix novo de aluno para lançar.\n' +
+      (jaPagos ? '• ' + jaPagos + ' Pix de aluno(s) já pagos\n' : '') +
+      (semMatch ? '• ' + semMatch + ' Pix sem correspondência segura (nome não bate com 2 nomes de aluno ativo)\n' : '') +
+      '\n_Pix de terceiros ou com nome diferente do cadastro precisam de lançamento manual._';
   }
 }
 
@@ -2969,8 +3020,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v5.0 iniciado ✓ ===');
-  console.log('Versão: 5.0 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v5.2 iniciado ✓ ===');
+  console.log('Versão: 5.2 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3132,7 +3183,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v5.0 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v5.2 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
