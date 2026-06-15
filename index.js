@@ -1,8 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 5.9 - ao emitir plano (renovação), registra entrada de renovacao no historico_alteracoes (data + dia_venc), tornando o cálculo de vencimento explícito em vez de inferido
+// Versão 6.0 - revisão de robustez: try/catch em executar (avisa erro em vez de silêncio), fila_boletos lia r?.data (array) e nunca processava, bugs de precedência em remover_custo/desfazer_aula, boleto avulso gravava/exibia valor nulo, versão centralizada em BOT_VERSION
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
+
+const BOT_VERSION = '6.0'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1204,17 +1206,17 @@ async function executar(intencao, p, dados, chatId) {
       });
       if (!filtro.length) {
         const doMes = dados.custos.filter(c => c.mes === mesR);
-        const lista = doMes.map(c => '- ' + c.descricao||c.categoria + ' - ' + brl(c.valor)).join('\n');
-        return '❌ Custo "' + busca + '" não encontrado em ' + mesR + '.' + lista?'\n\nCustos em '+mesR+':\n'+lista:'';
+        const lista = doMes.map(c => '- ' + (c.descricao||c.categoria) + ' - ' + brl(c.valor)).join('\n');
+        return '❌ Custo "' + busca + '" não encontrado em ' + mesR + '.' + (lista ? '\n\nCustos em '+mesR+':\n'+lista : '');
       }
       if (filtro.length > 1) {
         return '⚠️ Encontrei ' + filtro.length + ' registros:\n' +
-          filtro.map(c => '- ID ' + c.id||c._id + ': ' + c.descricao||c.categoria + ' - ' + brl(c.valor)).join('\n') +
+          filtro.map(c => '- ID ' + (c.id||c._id) + ': ' + (c.descricao||c.categoria) + ' - ' + brl(c.valor)).join('\n') +
           '\n\nMande: "remover custo ID XX"';
       }
       custo = filtro[0];
     }
-    await sbDelete('custos', 'id=eq.' + custo.id||custo._id);
+    await sbDelete('custos', 'id=eq.' + (custo.id||custo._id));
     await logOp('custo_removido', (custo.descricao||custo.categoria) + ' - ' + (custo.mes||''), null, custo.valor, custo.mes);
     return '✅ Custo removido!\n*' + (custo.descricao||custo.categoria).replace(' [via Bot Telegram]','') + '* - ' + brl(custo.valor);
   }
@@ -1225,11 +1227,11 @@ async function executar(intencao, p, dados, chatId) {
     let filtro = dados.aulas;
     if (profId) filtro = filtro.filter(k => k.prof_id === profId);
     if (p?.mes)  filtro = filtro.filter(k => k.mes === p.mes);
-    if (!filtro.length) return '❌ Nenhuma aula encontrada' + profId?' para '+profId:'' + '.';
+    if (!filtro.length) return '❌ Nenhuma aula encontrada' + (profId ? ' para ' + profId : '') + '.';
     const aula = filtro[0];
     await sbDelete('aulas', 'id=eq.' + aula.id);
     await logOp('aula_removida', aula.prof_id + ' - ' + (aula.horas||aula.vh) + 'h - ' + (aula.data_fmt||aula.data), null, null, aula.mes);
-    return '✅ Aula removida!\n*' + aula.prof_id + '* - ' + aula.horas||aula.vh + 'h - ' + aula.data_fmt||aula.data;
+    return '✅ Aula removida!\n*' + aula.prof_id + '* - ' + (aula.horas||aula.vh) + 'h - ' + (aula.data_fmt||aula.data);
   }
 
   if (intencao === 'checkin') {
@@ -1633,11 +1635,11 @@ async function executar(intencao, p, dados, chatId) {
         const cod = result.codigoSolicitacao || result.nossoNumero;
         const link = result.linkVisualizacaoBoleto || result.link || '';
         // Gravar boleto na tabela boletos
-        await gravarBoleto(aluno.id, mes, cod, 'LCA-' + aluno.id + '-' + mes, p.valor, venc);
+        await gravarBoleto(aluno.id, mes, cod, 'LCA-' + aluno.id + '-' + mes, valorBoleto, venc);
         const mesNomeAvulso = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt(mes.slice(5,7))-1];
         const anoAvulso = mes.slice(0,4);
         const nomeArq = 'Boleto - ' + aluno.nome.split(' ')[0] + ' - ' + mesNomeAvulso + ' ' + anoAvulso + '.pdf';
-        const caption = '✅ *Boleto emitido!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(p.valor) + '\n📅 Vencimento: ' + venc.split('-').reverse().join('/') + '\n🔑 Código: ' + cod;
+        const caption = '✅ *Boleto emitido!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorBoleto) + '\n📅 Vencimento: ' + venc.split('-').reverse().join('/') + '\n🔑 Código: ' + cod;
         if (link) {
           try {
             await tgSendPDF(chatId, link, nomeArq, caption);
@@ -1861,8 +1863,8 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       let boletos = rArr.filter(b => b.status === 'aberto');
 
       if (!boletos.length) {
-        const total = r?.data?.length || 0;
-        if (total > 0) return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + total + ' boleto(s) na tabela mas nenhum com status "aberto".\nStatus encontrados: ' + [...new Set((r?.data||[]).map(b=>b.status))].join(', ');
+        const total = rArr.length || 0;
+        if (total > 0) return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + total + ' boleto(s) na tabela mas nenhum com status "aberto".\nStatus encontrados: ' + [...new Set(rArr.map(b=>b.status))].join(', ');
         // Sem nenhum registro - buscar na API Inter
         await tgSend(chatId, '🔍 Buscando boletos na API Inter para *' + aluno.nome.split(' ')[0] + '*...');
         const hoje = new Date();
@@ -2291,7 +2293,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v5.9*\n\n' +
+      '👋 *LCA Studio Bot v' + BOT_VERSION + '*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2473,7 +2475,16 @@ async function processar(msg) {
     }
   }
 
-  const resultado = await executar(intencao, params, dados, chatId);
+  let resultado;
+  try {
+    resultado = await executar(intencao, params, dados, chatId);
+  } catch(e) {
+    console.error('[executar] erro na intenção', intencao, ':', e.message);
+    clearTimeout(_timer);
+    if (_timedOut) return;
+    _respondeu=true;
+    return tgSend(chatId, '❌ Ocorreu um erro ao executar a ação. Tente novamente.\n_Detalhe: ' + (e.message||'desconhecido').slice(0,80) + '_');
+  }
   clearTimeout(_timer);
   if (_timedOut) return;
   _respondeu=true;
@@ -2541,7 +2552,7 @@ async function processarFilaBoletos() {
   try {
     // Buscar pedidos pendentes
     const r = await sbGet('fila_boletos', 'status=eq.pendente&select=*&order=criado_em.asc&limit=5');
-    const fila = r?.data || [];
+    const fila = Array.isArray(r) ? r : (r?.data || []);
     if (!fila.length) return;
 
     console.log('[fila_boletos] ' + fila.length + ' pedido(s) pendente(s)');
@@ -3039,7 +3050,7 @@ async function rotinaBackupSemanal() {
     } catch(e) { console.log('[backup] changes indisponível:', e.message); }
 
     const backup = {
-      versao: 'bot-4.41',
+      versao: 'bot-' + BOT_VERSION,
       exportado: new Date().toISOString(),
       alunos: dados.alunos,
       custos: dados.custos,
@@ -3128,8 +3139,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v5.9 iniciado ✓ ===');
-  console.log('Versão: 5.9 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v' + BOT_VERSION + ' iniciado ✓ ===');
+  console.log('Versão: ' + BOT_VERSION + ' | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3291,7 +3302,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v5.9 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v' + BOT_VERSION + ' OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
