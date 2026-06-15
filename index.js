@@ -174,11 +174,20 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
 
   // Modo dry-run: apenas listar o que seria feito
   if (dryRun) {
+    const totalValor = alteracoes.reduce((s,x) => s + (x.valor||0), 0);
+    // Total por mês para conferência
+    const porMes = {};
+    alteracoes.forEach(x => { porMes[x.mes] = (porMes[x.mes]||0) + x.valor; });
+    const resumoMes = Object.keys(porMes).sort().map(m =>
+      '   ' + m + ': ' + brl(porMes[m]) + ' (' + alteracoes.filter(x=>x.mes===m).length + ')'
+    ).join('\n');
     const linhas = alteracoes.slice(0,30).map(x =>
       '• ' + x.aluno.nome.split(' ').slice(0,2).join(' ') + ' — ' + x.mes + ' (' + brl(x.valor) + ')'
     ).join('\n');
     return '🔍 *Prévia da correção* (' + alteracoes.length + ' boleto(s))\n\n' + linhas +
       (alteracoes.length>30 ? '\n_...e mais ' + (alteracoes.length-30) + '_' : '') +
+      '\n\n📊 *Total por mês:*\n' + resumoMes +
+      '\n\n💰 *Total geral: ' + brl(totalValor) + '* (' + alteracoes.length + ' boletos)' +
       '\n\n_Estes estão como PAGOS mas estão a receber (não pagos) no Inter._\n' +
       'Para aplicar a correção, envie: *confirmar correcao boletos*';
   }
@@ -2142,7 +2151,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v4.53*\n\n' +
+      '👋 *LCA Studio Bot v5.0*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2960,8 +2969,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v4.53 iniciado ✓ ===');
-  console.log('Versão: 4.53 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v5.0 iniciado ✓ ===');
+  console.log('Versão: 5.0 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3123,7 +3132,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v4.53 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v5.0 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
