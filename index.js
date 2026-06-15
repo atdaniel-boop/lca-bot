@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 5.4 - boletos: status cruzado com pagamento no site (boleto A_RECEBER pago via Pix mostra ✅); nome completo (2 nomes) no título da situação financeira
+// Versão 5.6 - fix nome composto no título da situação financeira (a correção da v5.4 não havia sido aplicada de fato)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -688,6 +688,14 @@ function buildContexto(dados, mes) {
     return s + (pr[mes] || 0);
   }, 0);
   const receitaMes = pagMes.reduce((s, a) => s + a.valor, 0) - totalRescisaoMes;
+  // A receber no mês = soma de pagamentos_pendentes[mes] (boletos emitidos aguardando pagamento)
+  let aReceberMes = 0, nAReceber = 0;
+  dados.alunos.forEach(a => {
+    const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
+    if (pend[mes] > 0) { aReceberMes += pend[mes]; nAReceber++; }
+  });
+  const receitaEsperada = receitaMes + aReceberMes;          // se todos os pendentes pagarem
+  const resultadoEsperado = receitaEsperada; // resultado calculado abaixo após custos/prof
   // Inadimplentes = ativos que não pagaram E cujo dia de vencimento já passou neste mês
   const hojeBot = new Date();
   const diaHoje = hojeBot.getDate();
@@ -775,6 +783,9 @@ function buildContexto(dados, mes) {
     mes,
     estudio: { totalAlunos: dados.alunos.length, ativos: ativos.length, inativos: inativos.length },
     financeiro: { receita: receitaMes, professoras: totalProf, custos: totalCustos, resultado,
+      aReceber: aReceberMes, nAReceber: nAReceber,
+      receitaEsperada: receitaEsperada,
+      resultadoEsperado: receitaEsperada - totalProf - totalCustos,
       detalheProfessoras: { leda: totalLeda, monica: totalMonica, kelly: totalKelly },
       paramProf: { retLeda: retLeda, pctMonica: pctMonica, vhKelly: vhKelly } },
     inadimplentes: inadimplentes.map(a => ({ id: a.id, nome: a.nome, plano: a.tipo_plano })),
@@ -1008,6 +1019,7 @@ function detectarAlunoNoTexto(dados, tL) {
     'DADOS (' + mes + '):\n' +
     'Ativos: ' + ctx.estudio.ativos + ' | Inadimplentes: ' + (ctx.inadimplentes.map(function(a){return a.nome;}).join(', ')||'Nenhum') + '\n' +
     'Receita: ' + brl(ctx.financeiro.receita) + ' | Professoras: ' + brl(ctx.financeiro.professoras) + ' | Custos: ' + brl(ctx.financeiro.custos) + ' | Resultado: ' + brl(ctx.financeiro.resultado) + '\n' +
+    'A receber neste mes (boletos pendentes): ' + brl(ctx.financeiro.aReceber) + ' (' + ctx.financeiro.nAReceber + ' boletos) | Receita esperada se todos pagarem: ' + brl(ctx.financeiro.receitaEsperada) + ' | Resultado esperado: ' + brl(ctx.financeiro.resultadoEsperado) + '\n' +
     'Planos vencendo: ' + (ctx.planosVencendo.length?ctx.planosVencendo.map(function(p){return p.nome+' ('+p.plano+', dia '+p.diaVenc+'/'+p.mesVenc+', '+p.dias+' dias)';}).join(' | '):'Nenhum') + '\n' +
     'Custos lancados: ' + (ctx.custosMes.map(function(c){return c.desc+' '+brl(c.valor);}).join(', ')||'Nenhum') + '\n' +
     'Faltas frequentes: ' + (ctx.faltasFrequentes.join(', ')||'Nenhuma') + '\n' +
@@ -1465,7 +1477,7 @@ async function executar(intencao, p, dados, chatId) {
     const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
     const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
     const todosM = [...new Set([...Object.keys(pags),...Object.keys(pend)])].sort().slice(-12);
-    if (!todosM.length) return '📋 *' + aluno.nome.split(' ')[0] + '* — nenhum registro financeiro encontrado.';
+    if (!todosM.length) return '📋 *' + aluno.nome.split(' ').slice(0,2).join(' ') + '* — nenhum registro financeiro encontrado.';
     const MESES_PT2 = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
     const linhas = todosM.reverse().map(m => {
       const v = pags[m]||0;
@@ -1475,7 +1487,7 @@ async function executar(intencao, p, dados, chatId) {
       if (vp > 0) return '⏳ ' + label + ' — ' + brl(vp) + ' (aguardando)';
       return '🔴 ' + label + ' — pendente';
     }).join('\n');
-    return '📋 *Situação financeira — ' + aluno.nome.split(' ')[0] + '*\n' +
+    return '📋 *Situação financeira — ' + aluno.nome.split(' ').slice(0,2).join(' ') + '*\n' +
       'Plano: ' + aluno.tipo_plano + ' | ' + (aluno.vezes_semana||2) + 'x/sem | ' + aluno.forma_pagamento + '\n\n' + linhas;
   }
 
@@ -2231,7 +2243,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v5.4*\n\n' +
+      '👋 *LCA Studio Bot v5.6*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -2284,8 +2296,10 @@ async function processar(msg) {
         : '✅ Todos os alunos pagaram em '+mes+'.';
     } else if (aiResult.intencao === 'consulta_financeiro') {
       const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});var pr=typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});return s+(p[mes]||0)-(pr[mes]||0);},0);
+      var arec = 0, narec = 0;
+      dados.alunos.forEach(function(a){var pd=typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});if(pd[mes]>0){arec+=pd[mes];narec++;}});
       const cst = dados.custos.filter(function(c){return c.mes===mes;}).reduce(function(s,c){return s+(c.valor||0);},0);
-      resp3 = '*Resumo '+mes+':*\n💰 Receita: '+brl(rec)+'\n🔴 Custos: '+brl(cst)+'\n[alta] Bruto: '+brl(rec-cst);
+      resp3 = '*Resumo '+mes+':*\n💰 Receita: '+brl(rec)+'\n⏳ A receber: '+brl(arec)+' ('+narec+' boletos)\n📈 Receita esperada: '+brl(rec+arec)+'\n🔴 Custos: '+brl(cst)+'\n💵 Bruto atual: '+brl(rec-cst);
     } else if (aiResult.intencao === 'consulta_vencendo') {
       const pv = dados._planosVencendo || [];
       resp3 = pv.length
@@ -3066,8 +3080,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v5.4 iniciado ✓ ===');
-  console.log('Versão: 5.4 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v5.6 iniciado ✓ ===');
+  console.log('Versão: 5.6 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3229,7 +3243,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v5.4 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v5.6 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
