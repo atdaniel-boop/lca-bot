@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 5.7 - aluno trimestral/semestral com ciclo encerrado e sem renovação não conta mais como inadimplente (está "a renovar")
+// Versão 5.9 - ao emitir plano (renovação), registra entrada de renovacao no historico_alteracoes (data + dia_venc), tornando o cálculo de vencimento explícito em vez de inferido
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -609,6 +609,39 @@ async function aiJSON(prompt) {
 }
 
 // ── Dados do Supabase ───────────────────────────────────────────────────────────
+
+// Calcula a data de vencimento do plano de um aluno (espelha calcVencimentoPlano do site).
+// Prioridade: 1) última renovação no histórico (data + dia_venc precisos);
+//             2) último mês com valor (pago/pendente) + duração como fallback.
+function calcVencimentoPlanoBot(a) {
+  const DUR = { mensal:1, trimestral:3, semestral:6 };
+  const dur = DUR[a.tipo_plano] || 1;
+  const hist = a.historico_alteracoes || [];
+  const renovacoes = hist.filter(h => (h.tipo==='renovacao'||h.tipo==='renovacao_antecipada') && h.data && h.dia_venc);
+  if (renovacoes.length) {
+    const ult = renovacoes[renovacoes.length-1];
+    const dp = ult.data.split('/');
+    const anoRen = parseInt(dp[2]), mesRen = parseInt(dp[1]), diaRen = parseInt(dp[0]);
+    const diaVenc = ult.dia_venc || a.dia_vencimento || 1;
+    let mesInicio = mesRen, anoInicio = anoRen;
+    if (diaRen > diaVenc) { mesInicio++; if (mesInicio>12){mesInicio=1;anoInicio++;} }
+    let mesVenc = mesInicio + dur, anoVenc = anoInicio;
+    while (mesVenc > 12) { mesVenc -= 12; anoVenc++; }
+    return new Date(anoVenc, mesVenc-1, diaVenc);
+  }
+  // Fallback: último mês com valor (pago ou pendente) + 1 mês no dia de vencimento
+  const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
+  const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+  const meses = [...new Set([
+    ...Object.keys(pend).filter(k=>(pend[k]||0)>0),
+    ...Object.keys(pags).filter(k=>(pags[k]||0)>0)
+  ])].sort();
+  if (!meses.length) return null;
+  const lp = meses[meses.length-1].split('-');
+  const diaV = parseInt(a.dia_vencimento||10);
+  return new Date(parseInt(lp[0]), parseInt(lp[1]), diaV);
+}
+
 async function getDados() {
   const [ra, rc, rk] = await Promise.all([
     sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo'),
@@ -704,18 +737,9 @@ function buildContexto(dados, mes) {
   const DUR_INAD = { mensal:1, trimestral:3, semestral:6 };
   function cicloVencidoBot(a) {
     if (a.tipo_plano === 'mensal') return false;
-    const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
-    const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
-    const meses = [...new Set([
-      ...Object.keys(pend).filter(k=>(pend[k]||0)>0),
-      ...Object.keys(pags).filter(k=>(pags[k]||0)>0)
-    ])].sort();
-    if (!meses.length) return false;
-    const lp = meses[meses.length-1].split('-');
-    const diaV = parseInt(a.dia_vencimento||10);
-    // Vencimento = dia de venc. no mês seguinte ao último mês com valor
-    const venc = new Date(parseInt(lp[0]), parseInt(lp[1]), diaV);
-    return venc < hojeBot; // ciclo encerrado antes de hoje
+    const venc = calcVencimentoPlanoBot(a);
+    if (!venc) return false;
+    return venc < hojeBot; // ciclo encerrado antes de hoje (sem renovação)
   }
   const inadimplentes = ativos.filter(a => {
     const pag = pagMes.find(p => p.id === a.id);
@@ -766,30 +790,16 @@ function buildContexto(dados, mes) {
 
   // Calcular planos vencendo (próximos 30 dias)
   const hojeTs = new Date(); hojeTs.setHours(0,0,0,0);
-  const DUR = { mensal:1, trimestral:3, semestral:6 };
   const planosVencendo = ativos
     .filter(a => a.tipo_plano === 'trimestral' || a.tipo_plano === 'semestral')
     .map(a => {
-      const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
-      const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
-      // Todos os meses com valor (pago ou pendente)
-      const todosMeses = [...new Set([
-        ...Object.keys(pend).filter(k=>(pend[k]||0)>0),
-        ...Object.keys(pags).filter(k=>(pags[k]||0)>0)
-      ])].sort();
-      if (!todosMeses.length) return null;
-      // Último mês do plano atual
-      const lastMes = todosMeses[todosMeses.length-1];
-      const lp = lastMes.split('-');
-      const diaVenc = parseInt(a.dia_vencimento||10);
-      // Vencimento = dia de vencimento no mês seguinte ao último mês pago
-      const venc = new Date(parseInt(lp[0]), parseInt(lp[1]), diaVenc);
+      const venc = calcVencimentoPlanoBot(a);
+      if (!venc) return null;
       const dias = Math.round((venc-hojeTs)/86400000);
       return { nome: a.nome, plano: a.tipo_plano, dias,
         dataVenc: venc.toLocaleDateString('pt-BR'),
         diaVenc: String(venc.getDate()).padStart(2,'0'),
-        mesVenc: String(venc.getMonth()+1).padStart(2,'0'),
-        ultimoMes: lastMes };
+        mesVenc: String(venc.getMonth()+1).padStart(2,'0') };
     }).filter(p => p && p.dias >= -5 && p.dias <= 30)
     .sort((a,b) => a.dias-b.dias);
 
@@ -1789,6 +1799,26 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     }
 
     const status = erros === 0 ? '✅' : erros === dur ? '❌' : '⚠️';
+    // Registrar a renovação no histórico (igual ao site) para que o cálculo de vencimento
+    // use a data real em vez de inferir pelos boletos. Só registra se algo foi emitido.
+    if (erros < dur) {
+      try {
+        const rAlH = await sbGet('alunos', 'select=historico_alteracoes&id=eq.' + aluno.id);
+        const alH = (Array.isArray(rAlH) ? rAlH[0] : rAlH?.data?.[0]) || {};
+        const histR = alH.historico_alteracoes || [];
+        histR.push({
+          data: fmtData(dtInicio),
+          tipo: 'renovacao',
+          valor: valor,
+          dia_venc: diaVenc,
+          plano_novo: plano,
+          plano_anterior: plano,
+          desc: 'Renovacao ' + planoLabel + ' (' + dur + ' boletos) via bot - ' + periodoPlano
+        });
+        await sbPatch('alunos', 'id=eq.' + aluno.id, { historico_alteracoes: histR });
+      } catch(eHist) { console.error('[emitir_plano] erro ao registrar renovacao no historico:', eHist.message); }
+    }
+
     const resumo = status + ' *Plano ' + planoLabel + ' - ' + aluno.nome.split(' ')[0] + '*\n' +
       '📋 ' + periodoPlano + '\n💰 ' + brl(valor) + '/mês × ' + dur + ' boletos' +
       (resultados.length ? '\n\n' + resultados.join('\n') : '') +
@@ -2261,7 +2291,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v5.7*\n\n' +
+      '👋 *LCA Studio Bot v5.9*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -3098,8 +3128,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v5.7 iniciado ✓ ===');
-  console.log('Versão: 5.7 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v5.9 iniciado ✓ ===');
+  console.log('Versão: 5.9 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3261,7 +3291,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v5.7 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v5.9 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
