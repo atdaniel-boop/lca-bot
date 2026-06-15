@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 6.0 - revisão de robustez: try/catch em executar (avisa erro em vez de silêncio), fila_boletos lia r?.data (array) e nunca processava, bugs de precedência em remover_custo/desfazer_aula, boleto avulso gravava/exibia valor nulo, versão centralizada em BOT_VERSION
+// Versão 6.1 - boletos vencidos agora excluem os já pagos no site (Pix não baixa o boleto no Inter): corrige aluno aparecer como ATRASADO mesmo após pagar via Pix (caso Ivanilda - junho pago mas boleto A_RECEBER no Inter)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '6.0'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '6.1'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1452,6 +1452,17 @@ async function executar(intencao, p, dados, chatId) {
         if (vistosId.has(id)) return false;
         vistosId.add(id);
         return true;
+      }).filter(b => {
+        // Excluir boletos JÁ PAGOS no site (Pix não baixa o boleto no Inter, então um boleto
+        // A_RECEBER/ATRASADO pode já ter sido quitado por Pix/dinheiro e confirmado no site).
+        const bc = b.cobranca || b;
+        const psn = parseSeuNumero(bc.seuNumero);
+        const mesB = psn.mes || (bc.dataVencimento || '').slice(0,7);
+        if (!psn.alunoId || !mesB) return true; // sem como cruzar — mantém na lista
+        const al = dados.alunos.find(a => a.id === psn.alunoId);
+        if (!al) return true;
+        const pagsB = typeof al.pagamentos==='string'?JSON.parse(al.pagamentos||'{}'):(al.pagamentos||{});
+        return !((pagsB[mesB]||0) > 0); // se pago no site, remove dos vencidos
       }).sort((a,b) => (((a.cobranca||a).dataVencimento)||'').localeCompare(((b.cobranca||b).dataVencimento)||''));
 
       if (!lista.length) return '✅ *Boletos vencidos e não pagos*\n\n_Nenhum boleto atrasado encontrado nos últimos 90 dias._';
