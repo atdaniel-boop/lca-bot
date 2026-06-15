@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 6.1 - boletos vencidos agora excluem os já pagos no site (Pix não baixa o boleto no Inter): corrige aluno aparecer como ATRASADO mesmo após pagar via Pix (caso Ivanilda - junho pago mas boleto A_RECEBER no Inter)
+// Versão 6.3 - extrato lê o nome do pagador do objeto detalhes do extrato enriquecido (Inter mostra o nome real de quem pagou o boleto); comando 'extrato debug' adicionado para revelar campos crus da API e ajustar com precisão
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '6.1'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '6.3'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -920,6 +920,9 @@ async function processarComIA(texto, dados, mes) {
   // Comandos Inter - detecção direta por palavra-chave (sem IA)
   const temInter = tL.includes('inter') || tL.includes('banco') || tL.includes('conta');
   if (tL.includes('extrato') || tL.includes('movimentação') || tL.includes('transaç')) {
+    if (tL.includes('debug') || tL.includes('cru') || tL.includes('json')) {
+      return { tipo: 'acao', intencao: 'inter_extrato_debug', params: {} };
+    }
     return { tipo: 'acao', intencao: 'inter_extrato', params: {} };
   }
   // Comando "resumo" sob demanda — mesma mensagem do resumo semanal
@@ -1320,6 +1323,26 @@ async function executar(intencao, p, dados, chatId) {
     } catch(e) { return '❌ Erro Inter: ' + e.message; }
   }
 
+  if (intencao === 'inter_extrato_debug') {
+    try {
+      const hoje = new Date(Date.now() - 3*60*60*1000);
+      const dataFim = hoje.toISOString().slice(0,10);
+      const dataInicio = new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
+      const ext = await Promise.race([
+        interExtrato(dataInicio, dataFim),
+        new Promise((_,r) => setTimeout(() => r(new Error('Timeout 25s')), 25000))
+      ]);
+      const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
+      // Pegar a primeira transação de boleto e a primeira de Pix recebido, mostrar JSON cru
+      const umBoleto = transacoes.find(t => (t.tipoTransacao||'').includes('BOLETO') || (t.titulo||t.descricao||'').toLowerCase().includes('boleto'));
+      const umPix = transacoes.find(t => (t.tipoTransacao||'')==='PIX' && t.tipoOperacao==='C');
+      let out = '🔍 *Debug extrato* (campos crus da API)\n\n';
+      out += '*Boleto recebido:*\n`' + JSON.stringify(umBoleto || {}, null, 1).slice(0,1500) + '`\n\n';
+      out += '*Pix recebido:*\n`' + JSON.stringify(umPix || {}, null, 1).slice(0,800) + '`';
+      return out.slice(0, 3900);
+    } catch(e) { return '❌ Erro debug extrato: ' + e.message; }
+  }
+
   if (intencao === 'inter_extrato') {
     try {
       const hoje = new Date(Date.now() - 3*60*60*1000); // BRT
@@ -1354,6 +1377,19 @@ async function executar(intencao, p, dados, chatId) {
         });
       });
 
+      // Carregar boletos do Supabase para identificar BOLETO_COBRANCA por aluno_id
+      // (o extrato bancário não traz seuNumero; a tabela boletos liga valor+venc → aluno).
+      let boletosIndex = [];
+      try {
+        const rBol = await sbGet('boletos', 'select=aluno_id,mes,valor,vencimento,status&order=vencimento.asc');
+        const arrBol = Array.isArray(rBol) ? rBol : (rBol?.data || []);
+        boletosIndex = arrBol.map(b => {
+          const al = dados.alunos.find(a => a.id === b.aluno_id);
+          return { aluno_id: b.aluno_id, nome: al ? al.nome.split(' ')[0] : null,
+                   valor: Math.round(parseFloat(b.valor||0)), vencimento: (b.vencimento||'').slice(0,10) };
+        }).filter(b => b.nome);
+      } catch(eBol) { console.error('[inter_extrato] erro ao carregar boletos:', eBol.message); }
+
       const linhas = transacoes.slice().reverse().slice(0,15).map(t => {
         const sinal = (t.tipoOperacao === 'C') ? '🟢' : '🔴';
         const valNum = parseFloat(t.valor || t.valorOperacao || 0);
@@ -1365,9 +1401,18 @@ async function executar(intencao, p, dados, chatId) {
 
         let nomeAluno = '';
         if (t.tipoOperacao === 'C') {
-          const nomePag = t.nomePagador || t.pagador?.nome || t.remetente?.nome || '';
-          if (nomePag) {
-            nomeAluno = ' _(' + nomePag.split(' ')[0] + ')_';
+          const det = t.detalhes || {};
+          // Extrato enriquecido do Inter traz o nome do pagador em detalhes.* (varia por tipo).
+          // Para boleto: nome de quem pagou; para Pix: nome do pagador/origem.
+          const nomePag = t.nomePagador || t.pagador?.nome || t.remetente?.nome ||
+                          det.nomePagador || det.pagador?.nome || det.nomeOrigem ||
+                          det.descricaoPagador || det.nomeRemetente || '';
+          if (nomePag && nomePag.trim().length > 2) {
+            const pnPag = nomePag.trim().split(' ')[0].toLowerCase();
+            const homonimos = dados.alunos.filter(a => a.nome.toLowerCase().split(' ')[0] === pnPag);
+            nomeAluno = homonimos.length > 1
+              ? ' _(' + nomePag.trim().split(' ').slice(0,2).join(' ') + ')_'
+              : ' _(' + nomePag.trim().split(' ')[0] + ')_';
           } else if (t.tipoTransacao === 'PIX' && t.descricao) {
             // Pix: extrair nome do campo "PIX RECEBIDO - Cp :XXXXXXXX-NOME COMPLETO"
             const mPix = t.descricao.match(/Cp\s*:\s*\d+-(.+)/i);
@@ -1384,13 +1429,31 @@ async function executar(intencao, p, dados, chatId) {
                 : ' _(' + nomeFormatado.split(' ')[0] + ')_';
             }
           } else if (t.tipoTransacao === 'BOLETO_COBRANCA') {
-            // Boleto: cruzar por valor+mês nos pagamentos dos alunos
-            const keyB = Math.round(valNum) + '-' + mes;
-            const cands = valorMesParaAlunos[keyB] || [];
-            if (cands.length === 1) nomeAluno = ' _(' + cands[0] + ')_';
-            else if (cands.length > 1) nomeAluno = ' _(~' + cands.slice(0,2).join('/')+ ')_';
+            // Boleto: casar com a tabela boletos por valor + proximidade da data de pagamento.
+            // Boleto costuma ser pago perto do vencimento → menor diferença de dias desempata.
+            const vAlvo = Math.round(valNum);
+            const cands = boletosIndex.filter(b => b.valor === vAlvo);
+            const nomesUnicos = [...new Set(cands.map(b => b.nome))];
+            if (nomesUnicos.length === 1) {
+              nomeAluno = ' _(' + nomesUnicos[0] + ')_';
+            } else if (nomesUnicos.length > 1 && dataStr) {
+              // Desempatar: boleto cujo vencimento é mais próximo da data de pagamento
+              const tPag = new Date(dataStr).getTime();
+              let melhor = null, menorDif = Infinity;
+              cands.forEach(b => {
+                if (!b.vencimento) return;
+                const dif = Math.abs(new Date(b.vencimento).getTime() - tPag);
+                if (dif < menorDif) { menorDif = dif; melhor = b; }
+              });
+              // Só aceita o desempate se for razoável (até 20 dias do vencimento)
+              if (melhor && menorDif <= 20*24*60*60*1000) {
+                nomeAluno = ' _(' + melhor.nome + ')_';
+              } else {
+                nomeAluno = ' _(~' + nomesUnicos.slice(0,2).join('/') + ')_';
+              }
+            }
           }
-          // Fallback para qualquer tipo sem nome: valor+mês
+          // Fallback para qualquer tipo sem nome: valor+mês nos pagamentos dos alunos
           if (!nomeAluno) {
             const key = Math.round(valNum) + '-' + mes;
             const candidatos = valorMesParaAlunos[key] || [];
