@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 6.8 - CORREÇÃO dedup: boletos antigos do mesmo aluno compartilham o seuNumero (ex: Vinicius='98'), então dedup por seuNumero descartava o 2º boleto (julho). Agora dedup por codigoSolicitacao ou seuNumero+vencimento, em 3 pontos (rotina baixa, correção, vencidos)
+// Versão 7.0 - 'desfazer pagamento NOME MES' detectado direto por palavra-chave (antes a IA classificava como remover custo). Reconhece YYYY-MM, MM/YYYY e mês por extenso; resolve aluno (inclui inativos) e passa aluno_id exato
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '6.8'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '7.0'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -940,6 +940,28 @@ async function processarComIA(texto, dados, mes) {
   if (tL === 'detectar boletos' || tL === 'verificar boletos' || tL === 'checar boletos' || tL === 'baixar boletos') {
     return { tipo: 'acao', intencao: 'verificar_boletos_pagos', params: {} };
   }
+  // Desfazer pagamento direto: "desfazer pagamento NOME MES" (evita a IA classificar como remover custo)
+  if (tL.startsWith('desfazer pagamento ') || tL.startsWith('remover pagamento ') || tL.startsWith('apagar pagamento ')) {
+    const resto = texto.replace(/^(desfazer|remover|apagar)\s+pagamento\s+/i, '').trim();
+    // Extrair mês: YYYY-MM, MM/YYYY, ou nome por extenso
+    const MESES_D = {janeiro:'01',fevereiro:'02','março':'03',marco:'03',abril:'04',maio:'05',junho:'06',julho:'07',agosto:'08',setembro:'09',outubro:'10',novembro:'11',dezembro:'12'};
+    let mesAlvo = null, nomeParte = resto;
+    const mYYYYMM = resto.match(/(\d{4})-(\d{2})/);
+    const mMMYYYY = resto.match(/(\d{1,2})\/(\d{4})/);
+    if (mYYYYMM) { mesAlvo = mYYYYMM[1] + '-' + mYYYYMM[2]; nomeParte = resto.replace(mYYYYMM[0], '').trim(); }
+    else if (mMMYYYY) { mesAlvo = mMMYYYY[2] + '-' + String(mMMYYYY[1]).padStart(2,'0'); nomeParte = resto.replace(mMMYYYY[0], '').trim(); }
+    else {
+      for (const [nm, num] of Object.entries(MESES_D)) {
+        if (tL.includes(nm)) { const anoM = (tL.match(/20\d{2}/)||[])[0] || String(new Date().getFullYear()); mesAlvo = anoM + '-' + num; nomeParte = resto.replace(new RegExp(nm,'i'),'').replace(/20\d{2}/,'').trim(); break; }
+      }
+    }
+    if (nomeParte) {
+      const alunoDesf = detectarAlunoNoTexto(dados, nomeParte.toLowerCase()) || encontrarAluno(dados, { aluno_nome: nomeParte });
+      if (alunoDesf) {
+        return { tipo: 'acao', intencao: 'desfazer_pagamento', params: { aluno_id: alunoDesf.id, aluno_nome: alunoDesf.nome, mes: mesAlvo } };
+      }
+    }
+  }
   // Correção de boletos futuros marcados como pagos (prévia e confirmação)
   if (tL === 'corrigir boletos' || tL === 'corrigir boletos futuros' || tL === 'migrar pendentes') {
     return { tipo: 'acao', intencao: 'corrigir_boletos_preview', params: {} };
@@ -1685,17 +1707,45 @@ async function executar(intencao, p, dados, chatId) {
     try {
       const hoje = new Date();
       const filtroAlunoCheck = encontrarAluno(dados, p);
-      // Se filtrando por aluno, ampliar período para cobrir plano completo (até 6 meses à frente)
+      // Se filtrando por aluno, ampliar período: boletos antigos foram emitidos há meses
+      // (o filtro do Inter é por EMISSÃO). Buscar de -12 meses até +7 meses cobre todos.
       const dataFim = filtroAlunoCheck
         ? new Date(hoje.getFullYear(), hoje.getMonth() + 7, 0).toISOString().slice(0,10)
         : hoje.toISOString().slice(0,10);
-      const dataInicio = p?.data_inicio || new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1).toISOString().slice(0,10);
+      const dataInicio = p?.data_inicio || (filtroAlunoCheck
+        ? new Date(hoje.getFullYear(), hoje.getMonth() - 12, 1).toISOString().slice(0,10)
+        : new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1).toISOString().slice(0,10));
       const situacao = p?.situacao || null;
-      const result = await Promise.race([
-        interCobranças(situacao, dataInicio, dataFim),
-        new Promise((_,r) => setTimeout(() => r(new Error('Timeout Inter 25s')), 25000))
-      ]);
-      let lista = result?.content || result?.cobrancas || [];
+      // Com janela ampla, o intervalo pode exceder o limite do endpoint — buscar em blocos de 90 dias
+      let lista = [];
+      {
+        const vistosB = new Set();
+        const blocosB = [];
+        let cur = new Date(dataInicio);
+        const fimB = new Date(dataFim);
+        while (cur < fimB) {
+          const ini = cur.toISOString().slice(0,10);
+          const px = new Date(cur.getTime() + 90*24*60*60*1000);
+          const fm = (px < fimB ? px : fimB).toISOString().slice(0,10);
+          blocosB.push([ini, fm]);
+          cur = new Date(px.getTime() + 24*60*60*1000);
+        }
+        const resB = await Promise.all(blocosB.map(([i,f]) =>
+          Promise.race([
+            interCobranças(situacao, i, f),
+            new Promise((_,r) => setTimeout(() => r(new Error('Timeout')), 18000))
+          ]).catch(() => null)
+        ));
+        resB.forEach(r => {
+          (r?.content || r?.cobrancas || []).forEach(item => {
+            const bc = item.cobranca || item;
+            const id = bc.codigoSolicitacao || ((bc.seuNumero||'') + '|' + (bc.dataVencimento||''));
+            if (vistosB.has(id)) return;
+            vistosB.add(id);
+            lista.push(item);
+          });
+        });
+      }
       // Filtrar por aluno se mencionado
       const filtroAluno = encontrarAluno(dados, p);
       if (filtroAluno) {
@@ -2936,21 +2986,36 @@ async function verificarBoletosPagosInter() {
     let confirmados = 0;
     const confirmadosNomes = [];
 
+    // Janela de PAGAMENTO recente: só dar baixa em boletos efetivamente pagos nos últimos 7 dias.
+    // O status RECEBIDO é permanente; sem este filtro, pagamentos antigos (até de 2024) seriam
+    // reprocessados quando a busca varre 12 meses de emissão. Comparamos pela data de pagamento.
+    const limitePag = new Date(hoje.getTime() - 7*24*60*60*1000);
+
     for (const item of lista) {
       const bc = item.cobranca || item;
       const psn = parseSeuNumero(bc.seuNumero);
       if (!psn.alunoId) continue;
 
+      // Só boletos PAGOS RECENTEMENTE (evita reprocessar pagamentos antigos)
+      const dataPagStr = (bc.dataHoraSituacao || bc.dataPagamento || bc.dataLiquidacao || bc.dataRecebimento || '').slice(0,10);
+      if (dataPagStr) {
+        const dPag = new Date(dataPagStr);
+        if (!isNaN(dPag.getTime()) && dPag < limitePag) continue; // pago há mais de 7 dias → ignora
+      } else {
+        // Sem data de pagamento confiável: por segurança, NÃO processa (evita baixar antigo errado)
+        continue;
+      }
+
       const alunoId = psn.alunoId;
-      // mês: do seuNumero (LCA) ou inferido pelo vencimento do boleto (boletos antigos)
       const mes = psn.mes || (bc.dataVencimento || '').slice(0,7);
       if (!mes) continue;
       const valor = parseFloat(bc.valorNominal || 0);
       if (!valor) continue;
 
-      // Verificar se já está confirmado
       const aluno = dados.alunos.find(a => a.id === alunoId);
       if (!aluno) continue;
+      // Não dar baixa para aluno inativo (ex: boleto antigo de quem saiu)
+      if (aluno.ativo !== 'SIM') continue;
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
       if ((pags[mes]||0) > 0) continue; // já confirmado
 
