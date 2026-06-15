@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 7.0 - 'desfazer pagamento NOME MES' detectado direto por palavra-chave (antes a IA classificava como remover custo). Reconhece YYYY-MM, MM/YYYY e mês por extenso; resolve aluno (inclui inativos) e passa aluno_id exato
+// Versão 7.1 - 'boletos debug NOME' agora mostra também os campos de data de pagamento (dataHoraSituacao/dataPagamento/dataLiquidacao/dataRecebimento) para calibrar o filtro de 7 dias da rotina de baixa (descobrir se a API retorna essas datas)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '7.0'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '7.1'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1688,7 +1688,9 @@ async function executar(intencao, p, dados, chatId) {
           const psn = parseSeuNumero(bc.seuNumero);
           if (psn.alunoId === aluno.id) {
             meus.push({ seuNumero: bc.seuNumero, codigoSolicitacao: bc.codigoSolicitacao,
-                        situacao: bc.situacao, vencimento: bc.dataVencimento, valor: bc.valorNominal });
+                        situacao: bc.situacao, vencimento: bc.dataVencimento, valor: bc.valorNominal,
+                        dataHoraSituacao: bc.dataHoraSituacao, dataPagamento: bc.dataPagamento,
+                        dataLiquidacao: bc.dataLiquidacao, dataRecebimento: bc.dataRecebimento });
           }
         });
       });
@@ -1698,6 +1700,9 @@ async function executar(intencao, p, dados, chatId) {
         out += (i+1) + '. venc ' + (b.vencimento||'?') + ' | ' + (b.situacao||'?') + ' | R$ ' + (b.valor||'?') + '\n';
         out += '   seuNum: `' + (b.seuNumero||'?') + '`\n';
         out += '   codSol: `' + (b.codigoSolicitacao||'(VAZIO!)') + '`\n';
+        const datas = ['dataHoraSituacao','dataPagamento','dataLiquidacao','dataRecebimento']
+          .filter(k => b[k]).map(k => k + '=' + b[k]);
+        out += '   datas: ' + (datas.length ? datas.join(' ') : '(nenhuma data de pgto!)') + '\n';
       });
       return out.slice(0, 3900);
     } catch(e) { return '❌ Erro debug boletos: ' + e.message; }
