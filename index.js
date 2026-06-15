@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 6.3 - extrato lê o nome do pagador do objeto detalhes do extrato enriquecido (Inter mostra o nome real de quem pagou o boleto); comando 'extrato debug' adicionado para revelar campos crus da API e ajustar com precisão
+// Versão 6.4 - extrato identifica boleto pelo nossoNumero da descrição (RECEBIMENTO TITULO - 112/NNN) cruzando com cobranças do Inter → seuNumero → aluno (identificação exata, sem ambiguidade por valor). Fallback: valor + proximidade do vencimento
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '6.3'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '6.4'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1377,8 +1377,30 @@ async function executar(intencao, p, dados, chatId) {
         });
       });
 
-      // Carregar boletos do Supabase para identificar BOLETO_COBRANCA por aluno_id
-      // (o extrato bancário não traz seuNumero; a tabela boletos liga valor+venc → aluno).
+      // Carregar cobranças do Inter no período para mapear nossoNumero → aluno (via seuNumero).
+      // O extrato traz "RECEBIMENTO TITULO - 112/<nossoNumero>"; a cobrança liga ao seuNumero.
+      let nossoNumParaAluno = {};
+      try {
+        const iniCob = new Date(new Date(dataInicio).getTime() - 60*24*60*60*1000).toISOString().slice(0,10);
+        const rCob = await Promise.race([
+          interCobranças(null, iniCob, dataFim),
+          new Promise((_,r) => setTimeout(() => r(new Error('Timeout cobranças')), 20000))
+        ]).catch(() => null);
+        const listaCob = rCob?.cobrancas || (Array.isArray(rCob) ? rCob : []);
+        listaCob.forEach(item => {
+          const bc = item.cobranca || item;
+          const bol = item.boleto || {};
+          // nossoNumero pode vir em vários lugares
+          const nn = String(bol.nossoNumero || bc.nossoNumero || item.nossoNumero || '').replace(/^0+/, '');
+          if (!nn) return;
+          const psn = parseSeuNumero(bc.seuNumero);
+          if (!psn.alunoId) return;
+          const al = dados.alunos.find(a => a.id === psn.alunoId);
+          if (al) nossoNumParaAluno[nn] = al.nome.split(' ')[0];
+        });
+      } catch(eCob) { console.error('[inter_extrato] erro cobranças:', eCob.message); }
+
+      // Carregar boletos do Supabase como reforço (valor + proximidade do vencimento)
       let boletosIndex = [];
       try {
         const rBol = await sbGet('boletos', 'select=aluno_id,mes,valor,vencimento,status&order=vencimento.asc');
@@ -1401,12 +1423,7 @@ async function executar(intencao, p, dados, chatId) {
 
         let nomeAluno = '';
         if (t.tipoOperacao === 'C') {
-          const det = t.detalhes || {};
-          // Extrato enriquecido do Inter traz o nome do pagador em detalhes.* (varia por tipo).
-          // Para boleto: nome de quem pagou; para Pix: nome do pagador/origem.
-          const nomePag = t.nomePagador || t.pagador?.nome || t.remetente?.nome ||
-                          det.nomePagador || det.pagador?.nome || det.nomeOrigem ||
-                          det.descricaoPagador || det.nomeRemetente || '';
+          const nomePag = t.nomePagador || t.pagador?.nome || t.remetente?.nome || '';
           if (nomePag && nomePag.trim().length > 2) {
             const pnPag = nomePag.trim().split(' ')[0].toLowerCase();
             const homonimos = dados.alunos.filter(a => a.nome.toLowerCase().split(' ')[0] === pnPag);
@@ -1429,27 +1446,30 @@ async function executar(intencao, p, dados, chatId) {
                 : ' _(' + nomeFormatado.split(' ')[0] + ')_';
             }
           } else if (t.tipoTransacao === 'BOLETO_COBRANCA') {
-            // Boleto: casar com a tabela boletos por valor + proximidade da data de pagamento.
-            // Boleto costuma ser pago perto do vencimento → menor diferença de dias desempata.
-            const vAlvo = Math.round(valNum);
-            const cands = boletosIndex.filter(b => b.valor === vAlvo);
-            const nomesUnicos = [...new Set(cands.map(b => b.nome))];
-            if (nomesUnicos.length === 1) {
-              nomeAluno = ' _(' + nomesUnicos[0] + ')_';
-            } else if (nomesUnicos.length > 1 && dataStr) {
-              // Desempatar: boleto cujo vencimento é mais próximo da data de pagamento
-              const tPag = new Date(dataStr).getTime();
-              let melhor = null, menorDif = Infinity;
-              cands.forEach(b => {
-                if (!b.vencimento) return;
-                const dif = Math.abs(new Date(b.vencimento).getTime() - tPag);
-                if (dif < menorDif) { menorDif = dif; melhor = b; }
-              });
-              // Só aceita o desempate se for razoável (até 20 dias do vencimento)
-              if (melhor && menorDif <= 20*24*60*60*1000) {
-                nomeAluno = ' _(' + melhor.nome + ')_';
-              } else {
-                nomeAluno = ' _(~' + nomesUnicos.slice(0,2).join('/') + ')_';
+            // 1ª tentativa: extrair nossoNumero da descrição ("RECEBIMENTO TITULO - 112/<nossoNumero>")
+            // e casar com a cobrança do Inter (que liga ao seuNumero → aluno).
+            const mNN = (t.descricao || '').match(/(\d+)\/(\d+)/);
+            if (mNN && mNN[2]) {
+              const nn = mNN[2].replace(/^0+/, '');
+              if (nossoNumParaAluno[nn]) nomeAluno = ' _(' + nossoNumParaAluno[nn] + ')_';
+            }
+            // 2ª tentativa: casar com a tabela boletos por valor + proximidade do vencimento
+            if (!nomeAluno) {
+              const vAlvo = Math.round(valNum);
+              const cands = boletosIndex.filter(b => b.valor === vAlvo);
+              const nomesUnicos = [...new Set(cands.map(b => b.nome))];
+              if (nomesUnicos.length === 1) {
+                nomeAluno = ' _(' + nomesUnicos[0] + ')_';
+              } else if (nomesUnicos.length > 1 && dataStr) {
+                const tPag = new Date(dataStr).getTime();
+                let melhor = null, menorDif = Infinity;
+                cands.forEach(b => {
+                  if (!b.vencimento) return;
+                  const dif = Math.abs(new Date(b.vencimento).getTime() - tPag);
+                  if (dif < menorDif) { menorDif = dif; melhor = b; }
+                });
+                if (melhor && menorDif <= 20*24*60*60*1000) nomeAluno = ' _(' + melhor.nome + ')_';
+                else nomeAluno = ' _(~' + nomesUnicos.slice(0,2).join('/') + ')_';
               }
             }
           }
