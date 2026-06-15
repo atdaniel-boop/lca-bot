@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 6.4 - extrato identifica boleto pelo nossoNumero da descrição (RECEBIMENTO TITULO - 112/NNN) cruzando com cobranças do Inter → seuNumero → aluno (identificação exata, sem ambiguidade por valor). Fallback: valor + proximidade do vencimento
+// Versão 6.8 - CORREÇÃO dedup: boletos antigos do mesmo aluno compartilham o seuNumero (ex: Vinicius='98'), então dedup por seuNumero descartava o 2º boleto (julho). Agora dedup por codigoSolicitacao ou seuNumero+vencimento, em 3 pontos (rotina baixa, correção, vencidos)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '6.4'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '6.8'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -123,7 +123,7 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
       const arr = r?.cobrancas || r?.content || (Array.isArray(r) ? r : []);
       arr.forEach(item => {
         const bc = item.cobranca || item;
-        const id = bc.codigoSolicitacao || bc.seuNumero || JSON.stringify(bc);
+        const id = bc.codigoSolicitacao || ((bc.seuNumero||'') + '|' + (bc.dataVencimento||''));
         if (!vistos.has(id)) { vistos.add(id); lista.push(item); }
       });
     } catch(e) { console.log('[migrar] janela ' + ini + ' falhou:', e.message); }
@@ -937,6 +937,9 @@ async function processarComIA(texto, dados, mes) {
   if (tL === 'pix' || tL === 'verificar pix' || tL === 'detectar pix' || tL === 'checar pix') {
     return { tipo: 'acao', intencao: 'verificar_pix', params: {} };
   }
+  if (tL === 'detectar boletos' || tL === 'verificar boletos' || tL === 'checar boletos' || tL === 'baixar boletos') {
+    return { tipo: 'acao', intencao: 'verificar_boletos_pagos', params: {} };
+  }
   // Correção de boletos futuros marcados como pagos (prévia e confirmação)
   if (tL === 'corrigir boletos' || tL === 'corrigir boletos futuros' || tL === 'migrar pendentes') {
     return { tipo: 'acao', intencao: 'corrigir_boletos_preview', params: {} };
@@ -1024,6 +1027,10 @@ function detectarAlunoNoTexto(dados, tL) {
   if (temBoleto && !tL.includes('emitir') && !tL.includes('gerar') && !tL.includes('criar')) {
     // Identificar aluno (prioriza nome composto: "ana luiza" não casa com "Luiza")
     const alunoMencB = detectarAlunoNoTexto(dados, tL);
+    // Modo debug: mostra campos crus dos boletos do aluno (codigoSolicitacao, situacao, venc)
+    if ((tL.includes('debug') || tL.includes('cru')) && alunoMencB) {
+      return { tipo: 'acao', intencao: 'inter_boletos_debug', params: { aluno_id: alunoMencB.id, aluno_nome: alunoMencB.nome } };
+    }
     // Só disparar sem "inter" se houver aluno mencionado — senão exige "inter" para não confundir
     if (alunoMencB || temInter) {
       return { tipo: 'acao', intencao: 'inter_boletos', params: alunoMencB ? { aluno_id: alunoMencB.id, aluno_nome: alunoMencB.nome } : {} };
@@ -1379,24 +1386,41 @@ async function executar(intencao, p, dados, chatId) {
 
       // Carregar cobranças do Inter no período para mapear nossoNumero → aluno (via seuNumero).
       // O extrato traz "RECEBIMENTO TITULO - 112/<nossoNumero>"; a cobrança liga ao seuNumero.
+      // Boletos antigos podem ter sido emitidos muitos meses antes do vencimento, então
+      // varremos uma janela ampla de emissão (-12 meses) em blocos para mapear nossoNumero→aluno.
       let nossoNumParaAluno = {};
       try {
-        const iniCob = new Date(new Date(dataInicio).getTime() - 60*24*60*60*1000).toISOString().slice(0,10);
-        const rCob = await Promise.race([
-          interCobranças(null, iniCob, dataFim),
-          new Promise((_,r) => setTimeout(() => r(new Error('Timeout cobranças')), 20000))
-        ]).catch(() => null);
-        const listaCob = rCob?.cobrancas || (Array.isArray(rCob) ? rCob : []);
-        listaCob.forEach(item => {
-          const bc = item.cobranca || item;
-          const bol = item.boleto || {};
-          // nossoNumero pode vir em vários lugares
-          const nn = String(bol.nossoNumero || bc.nossoNumero || item.nossoNumero || '').replace(/^0+/, '');
-          if (!nn) return;
-          const psn = parseSeuNumero(bc.seuNumero);
-          if (!psn.alunoId) return;
-          const al = dados.alunos.find(a => a.id === psn.alunoId);
-          if (al) nossoNumParaAluno[nn] = al.nome.split(' ')[0];
+        const fimCob = dataFim;
+        const iniCobGeral = new Date(new Date(dataInicio).getTime() - 365*24*60*60*1000);
+        // Buscar em blocos de ~90 dias (limite da API por requisição)
+        const blocos = [];
+        let cursor = new Date(iniCobGeral);
+        const fimDate = new Date(fimCob);
+        while (cursor < fimDate) {
+          const ini = cursor.toISOString().slice(0,10);
+          const prox = new Date(cursor.getTime() + 90*24*60*60*1000);
+          const fim = (prox < fimDate ? prox : fimDate).toISOString().slice(0,10);
+          blocos.push([ini, fim]);
+          cursor = new Date(prox.getTime() + 24*60*60*1000);
+        }
+        const resultados = await Promise.all(blocos.map(([ini, fim]) =>
+          Promise.race([
+            interCobranças(null, ini, fim),
+            new Promise((_,r) => setTimeout(() => r(new Error('Timeout')), 18000))
+          ]).catch(() => null)
+        ));
+        resultados.forEach(rCob => {
+          const listaCob = rCob?.cobrancas || (Array.isArray(rCob) ? rCob : []);
+          listaCob.forEach(item => {
+            const bc = item.cobranca || item;
+            const bol = item.boleto || {};
+            const nn = String(bol.nossoNumero || bc.nossoNumero || item.nossoNumero || '').replace(/^0+/, '');
+            if (!nn) return;
+            const psn = parseSeuNumero(bc.seuNumero);
+            if (!psn.alunoId) return;
+            const al = dados.alunos.find(a => a.id === psn.alunoId);
+            if (al) nossoNumParaAluno[nn] = al.nome.split(' ')[0];
+          });
         });
       } catch(eCob) { console.error('[inter_extrato] erro cobranças:', eCob.message); }
 
@@ -1531,7 +1555,7 @@ async function executar(intencao, p, dados, chatId) {
       const vistosId = new Set();
       const lista = [...atrasados, ...emAberto].filter(b => {
         const bc = b.cobranca || b;
-        const id = bc.codigoSolicitacao || bc.seuNumero || JSON.stringify(bc);
+        const id = bc.codigoSolicitacao || ((bc.seuNumero||'') + '|' + (bc.dataVencimento||''));
         if (vistosId.has(id)) return false;
         vistosId.add(id);
         return true;
@@ -1613,6 +1637,48 @@ async function executar(intencao, p, dados, chatId) {
     }).join('\n');
     return '📋 *Situação financeira — ' + aluno.nome.split(' ').slice(0,2).join(' ') + '*\n' +
       'Plano: ' + aluno.tipo_plano + ' | ' + (aluno.vezes_semana||2) + 'x/sem | ' + aluno.forma_pagamento + '\n\n' + linhas;
+  }
+
+  if (intencao === 'inter_boletos_debug') {
+    const aluno = encontrarAluno(dados, p);
+    if (!aluno) return '❌ Aluno não encontrado.';
+    try {
+      // Buscar cobranças em janela ampla de emissão (-12 meses), filtrar pelo seuNumero do aluno
+      const hoje = new Date(Date.now() - 3*60*60*1000);
+      const fimDate = new Date(hoje.toISOString().slice(0,10));
+      const iniGeral = new Date(hoje.getTime() - 365*24*60*60*1000);
+      const blocos = [];
+      let cursor = new Date(iniGeral);
+      while (cursor < fimDate) {
+        const ini = cursor.toISOString().slice(0,10);
+        const prox = new Date(cursor.getTime() + 90*24*60*60*1000);
+        const fim = (prox < fimDate ? prox : fimDate).toISOString().slice(0,10);
+        blocos.push([ini, fim]);
+        cursor = new Date(prox.getTime() + 24*60*60*1000);
+      }
+      const resultados = await Promise.all(blocos.map(([ini, fim]) =>
+        Promise.race([interCobranças(null, ini, fim), new Promise(res => setTimeout(() => res(null), 18000))]).catch(() => null)
+      ));
+      const meus = [];
+      resultados.forEach(r => {
+        (r?.cobrancas || []).forEach(item => {
+          const bc = item.cobranca || item;
+          const psn = parseSeuNumero(bc.seuNumero);
+          if (psn.alunoId === aluno.id) {
+            meus.push({ seuNumero: bc.seuNumero, codigoSolicitacao: bc.codigoSolicitacao,
+                        situacao: bc.situacao, vencimento: bc.dataVencimento, valor: bc.valorNominal });
+          }
+        });
+      });
+      if (!meus.length) return 'ℹ️ Nenhum boleto encontrado para ' + aluno.nome.split(' ')[0] + ' na janela de 12 meses.';
+      let out = '🔍 *Boletos crus — ' + aluno.nome.split(' ')[0] + '* (' + meus.length + ')\n\n';
+      meus.forEach((b, i) => {
+        out += (i+1) + '. venc ' + (b.vencimento||'?') + ' | ' + (b.situacao||'?') + ' | R$ ' + (b.valor||'?') + '\n';
+        out += '   seuNum: `' + (b.seuNumero||'?') + '`\n';
+        out += '   codSol: `' + (b.codigoSolicitacao||'(VAZIO!)') + '`\n';
+      });
+      return out.slice(0, 3900);
+    } catch(e) { return '❌ Erro debug boletos: ' + e.message; }
   }
 
   if (intencao === 'inter_boletos') {
@@ -2188,6 +2254,14 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     return await rotinaDetectarPixAlunos(true); // modo manual: retorna resumo
   }
 
+  if (intencao === 'verificar_boletos_pagos') {
+    await tgSend(chatId, '🔍 Verificando boletos pagos no Inter...');
+    const r = await verificarBoletosPagosInter();
+    if (r.erro) return '❌ Erro ao verificar boletos: ' + r.erro;
+    if (!r.confirmados) return 'ℹ️ Nenhum boleto novo para dar baixa (todos os recebidos já estavam confirmados).';
+    return '✅ *' + r.confirmados + ' boleto(s) confirmado(s):*\n' + r.nomes.map(n => '• ' + n).join('\n');
+  }
+
   if (intencao === 'corrigir_boletos_preview') {
     await tgSend(chatId, '🔍 Consultando boletos a receber no Inter...');
     return await migrarBoletosFuturosParaPendente(true); // dry-run
@@ -2396,6 +2470,7 @@ async function processar(msg) {
       '- _"resumo"_ - resumo semanal com saldo, na hora\n' +
       '- _"backup"_ - exporta JSON completo agora\n' +
       '- _"pix"_ - detecta Pix de alunos recebidos hoje\n' +
+      '- _"detectar boletos"_ - dá baixa em boletos pagos no Inter\n' +
       '- _"qual aluna falta mais?"_\n\n' +
       '*💰 Lançamentos:*\n' +
       '- _"custo aluguel 3700 junho"_\n' +
@@ -2813,23 +2888,53 @@ async function verificarBoletosPagosInter() {
   try {
     const hoje = new Date(Date.now() - 3*60*60*1000);
     const dataFim = hoje.toISOString().slice(0,10);
-    const dataInicio = new Date(hoje.getTime() - 5*24*60*60*1000).toISOString().slice(0,10);
 
-    // Buscar boletos MARCADO_RECEBIDO e RECEBIDO nos últimos 5 dias
-    const [rMR, rRec] = await Promise.all([
-      interCobranças('MARCADO_RECEBIDO', dataInicio, dataFim).catch(() => null),
-      interCobranças('RECEBIDO', dataInicio, dataFim).catch(() => null)
+    // IMPORTANTE: o filtro de cobranças do Inter é por data de EMISSÃO, não de pagamento.
+    // Um boleto emitido há meses (ex: plano semestral emitido de uma vez) pode ser pago hoje.
+    // Por isso varremos uma janela ampla de emissão (-12 meses) em blocos de ~90 dias,
+    // buscando os pagos (MARCADO_RECEBIDO/RECEBIDO) em cada bloco.
+    const iniGeral = new Date(hoje.getTime() - 365*24*60*60*1000);
+    const blocos = [];
+    let cursor = new Date(iniGeral);
+    const fimDate = new Date(dataFim);
+    while (cursor < fimDate) {
+      const ini = cursor.toISOString().slice(0,10);
+      const prox = new Date(cursor.getTime() + 90*24*60*60*1000);
+      const fim = (prox < fimDate ? prox : fimDate).toISOString().slice(0,10);
+      blocos.push([ini, fim]);
+      cursor = new Date(prox.getTime() + 24*60*60*1000);
+    }
+    const buscas = [];
+    const comTimeout = (pr) => Promise.race([
+      pr, new Promise(res => setTimeout(() => res(null), 18000))
     ]);
+    blocos.forEach(([ini, fim]) => {
+      buscas.push(comTimeout(interCobranças('MARCADO_RECEBIDO', ini, fim).catch(() => null)));
+      buscas.push(comTimeout(interCobranças('RECEBIDO', ini, fim).catch(() => null)));
+    });
+    const resultados = await Promise.all(buscas);
 
-    const lista = [
-      ...(rMR?.cobrancas || []),
-      ...(rRec?.cobrancas || [])
-    ];
+    // Unificar e deduplicar por codigoSolicitacao (mesmo boleto pode vir em status/blocos diferentes)
+    const vistos = new Set();
+    const lista = [];
+    resultados.forEach(r => {
+      (r?.cobrancas || []).forEach(item => {
+        const bc = item.cobranca || item;
+        // Dedup por codigoSolicitacao (único por boleto). Se faltar, usar seuNumero+vencimento —
+        // NUNCA só seuNumero, pois boletos antigos do mesmo aluno compartilham o seuNumero (ex: "98"),
+        // e dois boletos (jun e jul) seriam tratados como duplicados, descartando um deles.
+        const id = bc.codigoSolicitacao || ((bc.seuNumero||'') + '|' + (bc.dataVencimento||''));
+        if (vistos.has(id)) return;
+        vistos.add(id);
+        lista.push(item);
+      });
+    });
 
-    if (!lista.length) return;
+    if (!lista.length) return { confirmados: 0, nomes: [] };
 
     const dados = await getDados();
     let confirmados = 0;
+    const confirmadosNomes = [];
 
     for (const item of lista) {
       const bc = item.cobranca || item;
@@ -2869,14 +2974,17 @@ async function verificarBoletosPagosInter() {
           '📅 ' + mes + ' — boleto Inter baixado.\n' +
           '_Detectado pela rotina automática._');
         confirmados++;
+        confirmadosNomes.push(aluno.nome.split(' ')[0] + ' (' + mes + ')');
         console.log('[rotina-inter] Pagamento confirmado:', aluno.nome, mes, valor);
       } catch(e) {
         console.error('[rotina-inter] erro ao confirmar:', aluno.nome, e.message);
       }
     }
     if (confirmados > 0) console.log('[rotina-inter] Total confirmados:', confirmados);
+    return { confirmados, nomes: confirmadosNomes };
   } catch(e) {
     console.error('[rotina-inter] erro geral:', e.message);
+    return { confirmados: 0, nomes: [], erro: e.message };
   }
 }
 
