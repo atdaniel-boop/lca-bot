@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 5.6 - fix nome composto no título da situação financeira (a correção da v5.4 não havia sido aplicada de fato)
+// Versão 5.7 - aluno trimestral/semestral com ciclo encerrado e sem renovação não conta mais como inadimplente (está "a renovar")
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -700,9 +700,27 @@ function buildContexto(dados, mes) {
   const hojeBot = new Date();
   const diaHoje = hojeBot.getDate();
   const mesAtualBot = hojeBot.getFullYear() + '-' + String(hojeBot.getMonth()+1).padStart(2,'0');
+  // Aluno trimestral/semestral cujo ciclo terminou e não renovou NÃO é inadimplente (está "a renovar")
+  const DUR_INAD = { mensal:1, trimestral:3, semestral:6 };
+  function cicloVencidoBot(a) {
+    if (a.tipo_plano === 'mensal') return false;
+    const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
+    const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+    const meses = [...new Set([
+      ...Object.keys(pend).filter(k=>(pend[k]||0)>0),
+      ...Object.keys(pags).filter(k=>(pags[k]||0)>0)
+    ])].sort();
+    if (!meses.length) return false;
+    const lp = meses[meses.length-1].split('-');
+    const diaV = parseInt(a.dia_vencimento||10);
+    // Vencimento = dia de venc. no mês seguinte ao último mês com valor
+    const venc = new Date(parseInt(lp[0]), parseInt(lp[1]), diaV);
+    return venc < hojeBot; // ciclo encerrado antes de hoje
+  }
   const inadimplentes = ativos.filter(a => {
     const pag = pagMes.find(p => p.id === a.id);
     if (pag && pag.pagou) return false; // Já pagou
+    if (cicloVencidoBot(a)) return false; // Plano encerrado sem renovação → não é inadimplência
     // Só considera inadimplente se o dia de vencimento já passou
     const diaVenc = parseInt(a.dia_vencimento || 10);
     return diaHoje >= diaVenc;
@@ -2243,7 +2261,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v5.6*\n\n' +
+      '👋 *LCA Studio Bot v5.7*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -3080,8 +3098,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v5.6 iniciado ✓ ===');
-  console.log('Versão: 5.6 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v5.7 iniciado ✓ ===');
+  console.log('Versão: 5.7 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3243,7 +3261,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v5.6 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v5.7 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
