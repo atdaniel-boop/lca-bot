@@ -1,5 +1,5 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 4.45 - validação anti-alucinação: valor extraído pela IA deve existir no texto digitado (fix Gemini trocando 359 por 329 histórico)
+// Versão 5.3 - detecção de aluno em "situação financeira" e "boletos" prioriza nome composto (fix real: "ana luiza" casava com aluna "Luiza" pelo primeiro nome)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
@@ -948,9 +948,38 @@ async function processarComIA(texto, dados, mes) {
   if (temVencido && (tL.includes('aluno') || tL.includes('pag') || tL.includes('devend'))) {
     return { tipo: 'acao', intencao: 'inter_boletos_vencidos', params: {} };
   }
+
+// Tenta identificar um aluno mencionado em um texto livre.
+// Prioriza match de nome composto (2 palavras) sobre primeiro nome isolado,
+// evitando que "ana luiza" case com a aluna "Luiza". Retorna o aluno ou null.
+function detectarAlunoNoTexto(dados, tL) {
+  const preps = ['de','da','do','das','dos','e'];
+  // 1) Tentar casar nome+sobrenome (2 primeiras palavras de cada aluno) presentes no texto
+  let best = null, bestLen = 0;
+  for (const a of dados.alunos) {
+    const partes = a.nome.toLowerCase().split(/\s+/).filter(x => !preps.includes(x));
+    if (partes.length >= 2) {
+      const n1 = partes[0], n2 = partes[1];
+      if (n1.length > 2 && n2.length > 2 && tL.includes(n1) && tL.includes(n2)) {
+        // pontuação: comprimento combinado — nomes compostos mais específicos ganham
+        const score = n1.length + n2.length;
+        if (score > bestLen) { best = a; bestLen = score; }
+      }
+    }
+  }
+  if (best) return best;
+  // 2) Fallback: primeiro nome isolado (>3 letras). Preferir aluno ativo.
+  const porPrimeiro = dados.alunos.filter(a => {
+    const p1 = a.nome.split(' ')[0].toLowerCase();
+    return p1.length > 3 && tL.includes(p1);
+  });
+  if (porPrimeiro.length) return porPrimeiro.find(a => a.ativo === 'SIM') || porPrimeiro[0];
+  return null;
+}
+
   if (temBoleto && !tL.includes('emitir') && !tL.includes('gerar') && !tL.includes('criar')) {
-    // Se mencionou aluno específico, passar como parâmetro
-    const alunoMencB = dados.alunos.find(a => tL.includes(a.nome.split(' ')[0].toLowerCase()) && a.nome.split(' ')[0].length > 3);
+    // Identificar aluno (prioriza nome composto: "ana luiza" não casa com "Luiza")
+    const alunoMencB = detectarAlunoNoTexto(dados, tL);
     // Só disparar sem "inter" se houver aluno mencionado — senão exige "inter" para não confundir
     if (alunoMencB || temInter) {
       return { tipo: 'acao', intencao: 'inter_boletos', params: alunoMencB ? { aluno_id: alunoMencB.id, aluno_nome: alunoMencB.nome } : {} };
@@ -958,7 +987,7 @@ async function processarComIA(texto, dados, mes) {
   }
   // Situação financeira de aluno específico (não intercepta "resumo financeiro" geral)
   if ((tL.includes('situação') || tL.includes('situacao') || tL.includes('financeira') || tL.includes('financeiro')) && !tL.includes('resumo') && !tL.includes('resultado')) {
-    const alunoMencF = dados.alunos.find(a => tL.includes(a.nome.split(' ')[0].toLowerCase()) && a.nome.split(' ')[0].length > 3);
+    const alunoMencF = detectarAlunoNoTexto(dados, tL);
     if (alunoMencF) return { tipo: 'acao', intencao: 'consulta_aluno', params: { aluno_id: alunoMencF.id, aluno_nome: alunoMencF.nome } };
   }
   // Despedidas e respostas curtas não-acionáveis
@@ -2185,7 +2214,7 @@ async function processar(msg) {
   // Ajuda / saudacao
   if (aiResult.tipo === 'ajuda' || aiResult.tipo === 'saudacao') {
     _respondeu=true; return tgSend(chatId,
-      '👋 *LCA Studio Bot v5.2*\n\n' +
+      '👋 *LCA Studio Bot v5.3*\n\n' +
       'Pode me perguntar qualquer coisa sobre o estúdio!\n\n' +
       '*📊 Consultas:*\n' +
       '- _"quem não pagou maio?"_\n' +
@@ -3020,8 +3049,8 @@ const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguard
 
 // ── Main ────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('=== LCA Bot v5.2 iniciado ✓ ===');
-  console.log('Versão: 5.2 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  console.log('=== LCA Bot v5.3 iniciado ✓ ===');
+  console.log('Versão: 5.3 | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
   let offset = 0;
   try {
     const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
@@ -3183,7 +3212,7 @@ async function main() {
       res.end();
     } else {
       res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('LCA Bot v5.2 OK - ' + new Date().toLocaleString('pt-BR'));
+      res.end('LCA Bot v5.3 OK - ' + new Date().toLocaleString('pt-BR'));
     }
   }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
