@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 8.1 - índice do extrato agora usa a MESMA estratégia de janelas (-18 a +12 meses, passo 3) que migrarBoletosFuturosParaPendente, que comprovadamente captura boletos de vencimento futuro (ex: julho do Vinicius). Janelas pequenas evitam truncamento por paginação. Batimento individual (v8.0) mantido como 2ª camada
+// Versão 8.2 - ROBUSTEZ: criado helper interCobrancasRobusto (janelas -18/+12 meses, passo 3, dedup) usado em TODOS os pontos de busca de cobranças (extrato, listagem, debug, vencidos, rotina de baixa, reenviar). Elimina janelas curtas que perdiam boletos antigos/futuros. Código unificado e consistente
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '8.1'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '8.2'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -322,6 +322,45 @@ async function interCobranças(situacao, dataInicio, dataFim) {
     pagina++;
   }
   return { cobrancas: todas };
+}
+
+// Busca robusta de cobranças varrendo janelas de EMISSÃO de -18 a +12 meses (passo 3 meses).
+// É a estratégia comprovada que captura TODOS os boletos, inclusive de vencimento futuro
+// (ex: planos emitidos antecipadamente). Dedup por codigoSolicitacao ou seuNumero+vencimento.
+// Opções: { situacao, mesesAtras=18, mesesFrente=12, passo=3, timeoutMs=25000 }.
+async function interCobrancasRobusto(opts) {
+  opts = opts || {};
+  const situacao = opts.situacao || null;
+  const mesesAtras = opts.mesesAtras != null ? opts.mesesAtras : 18;
+  const mesesFrente = opts.mesesFrente != null ? opts.mesesFrente : 12;
+  const passo = opts.passo || 3;
+  const timeoutMs = opts.timeoutMs || 25000;
+  const hoje = new Date(Date.now() - 3*60*60*1000);
+  const janelas = [];
+  for (let m = -mesesAtras; m <= mesesFrente; m += passo) {
+    const ini = new Date(hoje.getFullYear(), hoje.getMonth()+m, 1).toISOString().slice(0,10);
+    const fim = new Date(hoje.getFullYear(), hoje.getMonth()+m+passo, 0).toISOString().slice(0,10);
+    janelas.push([ini, fim]);
+  }
+  const vistos = new Set();
+  const lista = [];
+  for (const [ini, fim] of janelas) {
+    try {
+      const r = await Promise.race([
+        interCobranças(situacao, ini, fim),
+        new Promise((_,rej) => setTimeout(() => rej(new Error('Timeout')), timeoutMs))
+      ]);
+      const arr = r?.cobrancas || r?.content || (Array.isArray(r) ? r : []);
+      arr.forEach(item => {
+        const bc = item.cobranca || item;
+        const id = bc.codigoSolicitacao || ((bc.seuNumero||'') + '|' + (bc.dataVencimento||''));
+        if (vistos.has(id)) return;
+        vistos.add(id);
+        lista.push(item);
+      });
+    } catch(e) { console.log('[interCobrancasRobusto] janela ' + ini + ' falhou:', e.message); }
+  }
+  return { cobrancas: lista };
 }
 
 // Emitir boleto de cobrança
@@ -1451,40 +1490,19 @@ async function executar(intencao, p, dados, chatId) {
       // evitam que a paginação trunque resultados em meses com muitos boletos emitidos.
       let nossoNumParaAluno = {};
       try {
-        const hojeIdx = new Date(Date.now() - 3*60*60*1000);
-        const janelas = [];
-        for (let m = -18; m <= 12; m += 3) {
-          const ini = new Date(hojeIdx.getFullYear(), hojeIdx.getMonth()+m, 1).toISOString().slice(0,10);
-          const fim = new Date(hojeIdx.getFullYear(), hojeIdx.getMonth()+m+3, 0).toISOString().slice(0,10);
-          janelas.push([ini, fim]);
-        }
-        const vistosIdx = new Set();
-        let totalCob = 0;
-        for (const [ini, fim] of janelas) {
-          try {
-            const r = await Promise.race([
-              interCobranças(null, ini, fim),
-              new Promise((_,rej) => setTimeout(() => rej(new Error('Timeout')), 25000))
-            ]);
-            const arr = r?.cobrancas || r?.content || (Array.isArray(r) ? r : []);
-            arr.forEach(item => {
-              const bc = item.cobranca || item;
-              const bol = item.boleto || {};
-              // dedup por codigoSolicitacao (único) ou seuNumero+venc (boletos antigos compartilham seuNumero)
-              const idDedup = bc.codigoSolicitacao || ((bc.seuNumero||'') + '|' + (bc.dataVencimento||''));
-              if (vistosIdx.has(idDedup)) return;
-              vistosIdx.add(idDedup);
-              totalCob++;
-              const nn = String(bol.nossoNumero || bc.nossoNumero || item.nossoNumero || '').replace(/^0+/, '');
-              if (!nn) return;
-              const psn = parseSeuNumero(bc.seuNumero);
-              if (!psn.alunoId) return;
-              const al = dados.alunos.find(a => a.id === psn.alunoId);
-              if (al) nossoNumParaAluno[nn] = { nome: al.nome.split(' ')[0], venc: (bc.dataVencimento||'').slice(0,7) };
-            });
-          } catch(eJ) { console.log('[inter_extrato] janela ' + ini + ' falhou:', eJ.message); }
-        }
-        console.log('[inter_extrato] índice nossoNumero: ' + Object.keys(nossoNumParaAluno).length + ' entradas de ' + totalCob + ' cobranças');
+        const rIdx = await interCobrancasRobusto({});
+        const listaIdx = rIdx?.cobrancas || [];
+        listaIdx.forEach(item => {
+          const bc = item.cobranca || item;
+          const bol = item.boleto || {};
+          const nn = String(bol.nossoNumero || bc.nossoNumero || item.nossoNumero || '').replace(/^0+/, '');
+          if (!nn) return;
+          const psn = parseSeuNumero(bc.seuNumero);
+          if (!psn.alunoId) return;
+          const al = dados.alunos.find(a => a.id === psn.alunoId);
+          if (al) nossoNumParaAluno[nn] = { nome: al.nome.split(' ')[0], venc: (bc.dataVencimento||'').slice(0,7) };
+        });
+        console.log('[inter_extrato] índice nossoNumero: ' + Object.keys(nossoNumParaAluno).length + ' entradas de ' + listaIdx.length + ' cobranças');
       } catch(eCob) { console.error('[inter_extrato] erro cobranças:', eCob.message); }
 
       // Carregar boletos do Supabase: reforço por valor/venc E batimento por nossoNumero via API.
@@ -1653,23 +1671,13 @@ async function executar(intencao, p, dados, chatId) {
     try {
       const hoje = new Date(Date.now() - 3*60*60*1000); // BRT
       const dataFim = hoje.toISOString().slice(0,10);
-      // Últimos 90 dias para pegar todos os atrasados
-      const dataInicio = new Date(hoje.getTime() - 90*24*60*60*1000).toISOString().slice(0,10);
-
-      // Timeout global de 25s por chamada para não travar o bot
-      const withTimeout = (p, ms, label) =>
-        Promise.race([p, new Promise((_,r) => setTimeout(() => r(new Error('Timeout ' + label)), ms))]);
 
       console.log('[inter_boletos_vencidos] buscando...');
-      // A_RECEBER: janela menor (30 dias) para não puxar centenas de boletos futuros
-      const dataInicioAberto = new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
+      // Busca robusta (-18 a +12 meses de emissão) para não perder atrasados de planos longos
       const [rAtr, rAberto] = await Promise.all([
-        withTimeout(interCobranças('ATRASADO', dataInicio, dataFim), 25000, 'ATRASADO').catch(e => { console.error('rAtr:', e.message); return null; }),
-        withTimeout(interCobranças('A_RECEBER', dataInicioAberto, dataFim), 25000, 'A_RECEBER').catch(e => { console.error('rAberto:', e.message); return null; })
+        interCobrancasRobusto({ situacao: 'ATRASADO' }).catch(e => { console.error('rAtr:', e.message); return null; }),
+        interCobrancasRobusto({ situacao: 'A_RECEBER' }).catch(e => { console.error('rAberto:', e.message); return null; })
       ]);
-      // Log completo para ver todos os campos disponíveis
-      console.log('[inter_boletos_vencidos] rAtr keys:', rAtr ? Object.keys(rAtr).join(',') : 'null');
-      console.log('[inter_boletos_vencidos] rAtr sample:', rAtr ? JSON.stringify(rAtr).slice(0,300) : 'null');
 
       // rAtr.cobrancas: apenas ATRASADO (já filtrado pela API)
       const atrasados = rAtr?.cobrancas || [];
@@ -1775,22 +1783,9 @@ async function executar(intencao, p, dados, chatId) {
     const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado.';
     try {
-      // Buscar cobranças em janela ampla de emissão (-12 meses), filtrar pelo seuNumero do aluno
-      const hoje = new Date(Date.now() - 3*60*60*1000);
-      const fimDate = new Date(hoje.toISOString().slice(0,10));
-      const iniGeral = new Date(hoje.getTime() - 365*24*60*60*1000);
-      const blocos = [];
-      let cursor = new Date(iniGeral);
-      while (cursor < fimDate) {
-        const ini = cursor.toISOString().slice(0,10);
-        const prox = new Date(cursor.getTime() + 90*24*60*60*1000);
-        const fim = (prox < fimDate ? prox : fimDate).toISOString().slice(0,10);
-        blocos.push([ini, fim]);
-        cursor = new Date(prox.getTime() + 24*60*60*1000);
-      }
-      const resultados = await Promise.all(blocos.map(([ini, fim]) =>
-        Promise.race([interCobranças(null, ini, fim), new Promise(res => setTimeout(() => res(null), 18000))]).catch(() => null)
-      ));
+      // Busca robusta (-18 a +12 meses) para capturar todos os boletos, inclusive futuros
+      const rRob = await interCobrancasRobusto({});
+      const resultados = [rRob];
       const meus = [];
       resultados.forEach(r => {
         (r?.cobrancas || []).forEach(item => {
@@ -1820,47 +1815,10 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'inter_boletos') {
     try {
-      const hoje = new Date();
-      const filtroAlunoCheck = encontrarAluno(dados, p);
-      // Se filtrando por aluno, ampliar período: boletos antigos foram emitidos há meses
-      // (o filtro do Inter é por EMISSÃO). Buscar de -12 meses até +7 meses cobre todos.
-      const dataFim = filtroAlunoCheck
-        ? new Date(hoje.getFullYear(), hoje.getMonth() + 7, 0).toISOString().slice(0,10)
-        : hoje.toISOString().slice(0,10);
-      const dataInicio = p?.data_inicio || (filtroAlunoCheck
-        ? new Date(hoje.getFullYear(), hoje.getMonth() - 12, 1).toISOString().slice(0,10)
-        : new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1).toISOString().slice(0,10));
       const situacao = p?.situacao || null;
-      // Com janela ampla, o intervalo pode exceder o limite do endpoint — buscar em blocos de 90 dias
-      let lista = [];
-      {
-        const vistosB = new Set();
-        const blocosB = [];
-        let cur = new Date(dataInicio);
-        const fimB = new Date(dataFim);
-        while (cur < fimB) {
-          const ini = cur.toISOString().slice(0,10);
-          const px = new Date(cur.getTime() + 90*24*60*60*1000);
-          const fm = (px < fimB ? px : fimB).toISOString().slice(0,10);
-          blocosB.push([ini, fm]);
-          cur = new Date(px.getTime() + 24*60*60*1000);
-        }
-        const resB = await Promise.all(blocosB.map(([i,f]) =>
-          Promise.race([
-            interCobranças(situacao, i, f),
-            new Promise((_,r) => setTimeout(() => r(new Error('Timeout')), 18000))
-          ]).catch(() => null)
-        ));
-        resB.forEach(r => {
-          (r?.content || r?.cobrancas || []).forEach(item => {
-            const bc = item.cobranca || item;
-            const id = bc.codigoSolicitacao || ((bc.seuNumero||'') + '|' + (bc.dataVencimento||''));
-            if (vistosB.has(id)) return;
-            vistosB.add(id);
-            lista.push(item);
-          });
-        });
-      }
+      // Busca robusta (-18 a +12 meses) captura todos os boletos, inclusive de venc. futuro
+      const rRob = await interCobrancasRobusto({ situacao });
+      let lista = rRob?.cobrancas || [];
       // Filtrar por aluno se mencionado
       const filtroAluno = encontrarAluno(dados, p);
       if (filtroAluno) {
@@ -2192,14 +2150,8 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         if (total > 0) return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + total + ' boleto(s) na tabela mas nenhum com status "aberto".\nStatus encontrados: ' + [...new Set(rArr.map(b=>b.status))].join(', ');
         // Sem nenhum registro - buscar na API Inter
         await tgSend(chatId, '🔍 Buscando boletos na API Inter para *' + aluno.nome.split(' ')[0] + '*...');
-        const hoje = new Date();
-        const dataFim = new Date(hoje.getFullYear(), hoje.getMonth() + 6, 30).toISOString().slice(0,10);
-        const dataInicio = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1).toISOString().slice(0,10);
-        const rInter = await Promise.race([
-          interCobranças('A_RECEBER', dataInicio, dataFim),
-          new Promise((_,r) => setTimeout(() => r(new Error('Timeout Inter 25s')), 25000))
-        ]);
-        const cobrancas = rInter?.content || rInter?.cobrancas || [];
+        const rInter = await interCobrancasRobusto({ situacao: 'A_RECEBER' });
+        const cobrancas = rInter?.cobrancas || [];
         // Filtrar pelo seuNumero que começa com LCA-{id}- (campos dentro de .cobranca)
         const prefixo = 'LCA-' + aluno.id + '-';
         boletos = cobrancas
@@ -3051,33 +3003,14 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
 // ── Rotina proativa: detectar boletos pagos no Inter ─────────────────────────
 async function verificarBoletosPagosInter() {
   try {
-    const hoje = new Date(Date.now() - 3*60*60*1000);
-    const dataFim = hoje.toISOString().slice(0,10);
-
     // IMPORTANTE: o filtro de cobranças do Inter é por data de EMISSÃO, não de pagamento.
     // Um boleto emitido há meses (ex: plano semestral emitido de uma vez) pode ser pago hoje.
-    // Por isso varremos uma janela ampla de emissão (-12 meses) em blocos de ~90 dias,
-    // buscando os pagos (MARCADO_RECEBIDO/RECEBIDO) em cada bloco.
-    const iniGeral = new Date(hoje.getTime() - 365*24*60*60*1000);
-    const blocos = [];
-    let cursor = new Date(iniGeral);
-    const fimDate = new Date(dataFim);
-    while (cursor < fimDate) {
-      const ini = cursor.toISOString().slice(0,10);
-      const prox = new Date(cursor.getTime() + 90*24*60*60*1000);
-      const fim = (prox < fimDate ? prox : fimDate).toISOString().slice(0,10);
-      blocos.push([ini, fim]);
-      cursor = new Date(prox.getTime() + 24*60*60*1000);
-    }
-    const buscas = [];
-    const comTimeout = (pr) => Promise.race([
-      pr, new Promise(res => setTimeout(() => res(null), 18000))
+    // Por isso usamos a busca robusta (-18 a +12 meses), buscando os pagos nos dois status.
+    const [rMarcado, rRecebido] = await Promise.all([
+      interCobrancasRobusto({ situacao: 'MARCADO_RECEBIDO' }).catch(() => ({ cobrancas: [] })),
+      interCobrancasRobusto({ situacao: 'RECEBIDO' }).catch(() => ({ cobrancas: [] }))
     ]);
-    blocos.forEach(([ini, fim]) => {
-      buscas.push(comTimeout(interCobranças('MARCADO_RECEBIDO', ini, fim).catch(() => null)));
-      buscas.push(comTimeout(interCobranças('RECEBIDO', ini, fim).catch(() => null)));
-    });
-    const resultados = await Promise.all(buscas);
+    const resultados = [rMarcado, rRecebido];
 
     // Unificar e deduplicar por codigoSolicitacao (mesmo boleto pode vir em status/blocos diferentes)
     const vistos = new Set();
