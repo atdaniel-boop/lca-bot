@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 7.6 - CORREÇÃO auth: a paginação (v7.5) multiplicou chamadas e várias pediam token ao mesmo tempo → Inter rejeitava ('auth falhou'). Agora requisições concorrentes de token compartilham a mesma promise + retry com backoff. Mantém paginação da v7.5
+// Versão 7.8 - extrato auto-explicativo: cada boleto mostra nome + MÊS DE VENCIMENTO + marca de origem (✓ exato pelo nº do boleto, ~ estimado por valor, ? não localizado), com legenda no rodapé. Permite conferir a identificação sem testes externos
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '7.6'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '7.8'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1443,54 +1443,31 @@ async function executar(intencao, p, dados, chatId) {
         });
       });
 
-      // Carregar cobranças do Inter no período para mapear nossoNumero → aluno (via seuNumero).
+      // Carregar cobranças do Inter para mapear nossoNumero → aluno (via seuNumero).
       // O extrato traz "RECEBIMENTO TITULO - 112/<nossoNumero>"; a cobrança liga ao seuNumero.
-      // CRÍTICO: se um bloco falhar (timeout), os boletos daquele período somem do índice e o
-      // boleto cai no fallback por valor (que erra). Por isso fazemos retry dos blocos que falham.
+      // Estratégia: UMA busca paginada cobrindo a janela de emissão relevante. A paginação
+      // (interCobranças) traz todas as páginas, evitando blocos paralelos que davam timeout.
       let nossoNumParaAluno = {};
-      let idxDiag = { blocos: 0, falhas: 0, entradas: 0 };
       try {
         const fimCob = dataFim;
-        const iniCobGeral = new Date(new Date(dataInicio).getTime() - 365*24*60*60*1000);
-        const blocos = [];
-        let cursor = new Date(iniCobGeral);
-        const fimDate = new Date(fimCob);
-        while (cursor < fimDate) {
-          const ini = cursor.toISOString().slice(0,10);
-          const prox = new Date(cursor.getTime() + 90*24*60*60*1000);
-          const fim = (prox < fimDate ? prox : fimDate).toISOString().slice(0,10);
-          blocos.push([ini, fim]);
-          cursor = new Date(prox.getTime() + 24*60*60*1000);
-        }
-        idxDiag.blocos = blocos.length;
-        const buscarBloco = (ini, fim) => Promise.race([
-          interCobranças(null, ini, fim),
-          new Promise((_,r) => setTimeout(() => r(new Error('Timeout')), 25000))
-        ]).catch(() => null);
-        // 1ª rodada
-        let resultados = await Promise.all(blocos.map(([i,f]) => buscarBloco(i,f).then(r => ({i,f,r}))));
-        // Retry dos que falharam (r === null)
-        const falhos = resultados.filter(x => x.r === null);
-        idxDiag.falhas = falhos.length;
-        if (falhos.length) {
-          const retry = await Promise.all(falhos.map(x => buscarBloco(x.i, x.f).then(r => ({i:x.i,f:x.f,r}))));
-          // Mesclar retries de volta
-          retry.forEach(rt => { const idx = resultados.findIndex(x => x.i===rt.i && x.f===rt.f); if (idx>=0 && rt.r) resultados[idx] = rt; });
-        }
-        resultados.forEach(({r:rCob}) => {
-          const listaCob = rCob?.cobrancas || (Array.isArray(rCob) ? rCob : []);
-          listaCob.forEach(item => {
-            const bc = item.cobranca || item;
-            const bol = item.boleto || {};
-            const nn = String(bol.nossoNumero || bc.nossoNumero || item.nossoNumero || '').replace(/^0+/, '');
-            if (!nn) return;
-            const psn = parseSeuNumero(bc.seuNumero);
-            if (!psn.alunoId) return;
-            const al = dados.alunos.find(a => a.id === psn.alunoId);
-            if (al) { nossoNumParaAluno[nn] = al.nome.split(' ')[0]; idxDiag.entradas++; }
-          });
+        // Boletos pagos no período foram emitidos meses antes; -13 meses cobre planos semestrais.
+        const iniCob = new Date(new Date(dataInicio).getTime() - 395*24*60*60*1000).toISOString().slice(0,10);
+        const rCob = await Promise.race([
+          interCobranças(null, iniCob, fimCob),
+          new Promise((_,r) => setTimeout(() => r(new Error('Timeout')), 60000))
+        ]).catch(e => { console.error('[inter_extrato] cobranças:', e.message); return null; });
+        const listaCob = rCob?.cobrancas || [];
+        listaCob.forEach(item => {
+          const bc = item.cobranca || item;
+          const bol = item.boleto || {};
+          const nn = String(bol.nossoNumero || bc.nossoNumero || item.nossoNumero || '').replace(/^0+/, '');
+          if (!nn) return;
+          const psn = parseSeuNumero(bc.seuNumero);
+          if (!psn.alunoId) return;
+          const al = dados.alunos.find(a => a.id === psn.alunoId);
+          if (al) nossoNumParaAluno[nn] = { nome: al.nome.split(' ')[0], venc: (bc.dataVencimento||'').slice(0,7) };
         });
-        console.log('[inter_extrato] índice nossoNumero:', JSON.stringify(idxDiag));
+        console.log('[inter_extrato] índice nossoNumero: ' + Object.keys(nossoNumParaAluno).length + ' entradas de ' + listaCob.length + ' cobranças');
       } catch(eCob) { console.error('[inter_extrato] erro cobranças:', eCob.message); }
 
       // Carregar boletos do Supabase como reforço (valor + proximidade do vencimento)
@@ -1539,20 +1516,25 @@ async function executar(intencao, p, dados, chatId) {
                 : ' _(' + nomeFormatado.split(' ')[0] + ')_';
             }
           } else if (t.tipoTransacao === 'BOLETO_COBRANCA') {
-            // 1ª tentativa: extrair nossoNumero da descrição ("RECEBIMENTO TITULO - 112/<nossoNumero>")
-            // e casar com a cobrança do Inter (que liga ao seuNumero → aluno).
+            // 1ª tentativa: nossoNumero da descrição → cobrança (identificação EXATA, marca ✓).
             const mNN = (t.descricao || '').match(/(\d+)\/(\d+)/);
+            let tinhaNossoNum = false;
             if (mNN && mNN[2]) {
+              tinhaNossoNum = true;
               const nn = mNN[2].replace(/^0+/, '');
-              if (nossoNumParaAluno[nn]) nomeAluno = ' _(' + nossoNumParaAluno[nn] + ')_';
+              const hit = nossoNumParaAluno[nn];
+              if (hit) {
+                const mesV = hit.venc ? ' ' + hit.venc.split('-').reverse().join('/') : '';
+                nomeAluno = ' _(' + hit.nome + mesV + ' ✓)_';
+              }
             }
-            // 2ª tentativa: casar com a tabela boletos por valor + proximidade do vencimento
-            if (!nomeAluno) {
+            // 2ª tentativa (só se NÃO extraiu nossoNumero): valor + proximidade do venc → marca ~
+            if (!nomeAluno && !tinhaNossoNum) {
               const vAlvo = Math.round(valNum);
               const cands = boletosIndex.filter(b => b.valor === vAlvo);
               const nomesUnicos = [...new Set(cands.map(b => b.nome))];
               if (nomesUnicos.length === 1) {
-                nomeAluno = ' _(' + nomesUnicos[0] + ')_';
+                nomeAluno = ' _(' + nomesUnicos[0] + ' ~)_';
               } else if (nomesUnicos.length > 1 && dataStr) {
                 const tPag = new Date(dataStr).getTime();
                 let melhor = null, menorDif = Infinity;
@@ -1561,17 +1543,20 @@ async function executar(intencao, p, dados, chatId) {
                   const dif = Math.abs(new Date(b.vencimento).getTime() - tPag);
                   if (dif < menorDif) { menorDif = dif; melhor = b; }
                 });
-                if (melhor && menorDif <= 20*24*60*60*1000) nomeAluno = ' _(' + melhor.nome + ')_';
-                else nomeAluno = ' _(~' + nomesUnicos.slice(0,2).join('/') + ')_';
+                if (melhor && menorDif <= 20*24*60*60*1000) nomeAluno = ' _(' + melhor.nome + ' ~)_';
               }
             }
+            // Tinha nossoNumero mas não casou no índice: mostrar o número (marca ?), sem chutar nome
+            if (!nomeAluno && tinhaNossoNum && mNN) {
+              nomeAluno = ' _(boleto ' + mNN[2] + ' ?)_';
+            }
           }
-          // Fallback para qualquer tipo sem nome: valor+mês nos pagamentos dos alunos
+          // Fallback para qualquer tipo sem nome: valor+mês nos pagamentos dos alunos (marca ~)
           if (!nomeAluno) {
             const key = Math.round(valNum) + '-' + mes;
             const candidatos = valorMesParaAlunos[key] || [];
-            if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ')_';
-            else if (candidatos.length > 1) nomeAluno = ' _(~' + candidatos.slice(0,2).join(' ou ') + ')_';
+            if (candidatos.length === 1) nomeAluno = ' _(' + candidatos[0] + ' ~)_';
+            else if (candidatos.length > 1) nomeAluno = ' _(~' + candidatos.slice(0,2).join('/') + ')_';
           }
         }
         // Detectar cheque devolvido
@@ -1582,7 +1567,8 @@ async function executar(intencao, p, dados, chatId) {
         return sinal + ' ' + data + ' ' + val + nomeAluno + ' - ' + desc + alertCheque;
       }).join('\n');
       return '📄 *Extrato Inter* (' + dataInicio.split('-').reverse().join('/') + ' a ' + dataFim.split('-').reverse().join('/') + ')\n\n' + linhas +
-        (transacoes.length > 15 ? '\n\n_...e mais ' + (transacoes.length - 15) + ' transações._' : '');
+        (transacoes.length > 15 ? '\n\n_...e mais ' + (transacoes.length - 15) + ' transações._' : '') +
+        '\n\n_Legenda: ✓ identificado pelo nº do boleto (exato) · ~ estimado por valor · ? boleto não localizado nas cobranças_';
     } catch(e) { return '❌ Erro extrato Inter: ' + e.message; }
   }
 
