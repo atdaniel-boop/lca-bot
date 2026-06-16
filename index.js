@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 7.3 - 'boletos debug NOME' mostra também o nossoNumero, para confirmar se a API de cobranças retorna esse campo (necessário para identificar boletos no extrato pelo nossoNumero, ex: julho do Vinicius mostrado como Katia)
+// Versão 7.5 - CAUSA RAIZ encontrada: interCobranças NÃO paginava (a API do Inter pagina ~100/página), então boletos além da página 1 sumiam — por isso o julho do Vinicius não aparecia em lugar nenhum e a identificação no extrato errava. Agora pagina todas as páginas. Resolve identificação, debug e baixa de uma vez
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '7.3'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '7.5'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -275,16 +275,33 @@ async function interExtrato(dataInicio, dataFim) {
 // Listar cobranças (boletos) por período
 async function interCobranças(situacao, dataInicio, dataFim) {
   const token = await interGetToken('boleto-cobranca.read');
-  const params = new URLSearchParams({
-    dataInicial: dataInicio,
-    dataFinal:   dataFim,
-    ...(situacao ? { situacao } : {})
-  });
-  const r = await interReq(
-    '/cobranca/v3/cobrancas?' + params.toString(),
-    'GET', null, token
-  );
-  return r.data;
+  // A API do Inter pagina os resultados (padrão ~100/página). Sem paginar, boletos além da
+  // página 1 são perdidos (ex: bloco com muitos boletos no mês → julho do Vinicius sumia).
+  let todas = [];
+  let pagina = 0;
+  const MAX_PAGINAS = 20; // proteção contra loop infinito
+  while (pagina < MAX_PAGINAS) {
+    const params = new URLSearchParams({
+      dataInicial: dataInicio,
+      dataFinal:   dataFim,
+      itensPorPagina: '100',
+      paginaAtual: String(pagina),
+      ...(situacao ? { situacao } : {})
+    });
+    const r = await interReq('/cobranca/v3/cobrancas?' + params.toString(), 'GET', null, token);
+    const d = r.data || {};
+    const lote = d.cobrancas || [];
+    todas = todas.concat(lote);
+    // Critério de parada: última página, ou lote menor que o tamanho de página
+    const totalPaginas = d.totalPaginas ?? d.paginacao?.totalPaginas;
+    if (totalPaginas != null) {
+      if (pagina >= (totalPaginas - 1)) break;
+    } else if (lote.length < 100) {
+      break;
+    }
+    pagina++;
+  }
+  return { cobrancas: todas };
 }
 
 // Emitir boleto de cobrança
@@ -1408,13 +1425,13 @@ async function executar(intencao, p, dados, chatId) {
 
       // Carregar cobranças do Inter no período para mapear nossoNumero → aluno (via seuNumero).
       // O extrato traz "RECEBIMENTO TITULO - 112/<nossoNumero>"; a cobrança liga ao seuNumero.
-      // Boletos antigos podem ter sido emitidos muitos meses antes do vencimento, então
-      // varremos uma janela ampla de emissão (-12 meses) em blocos para mapear nossoNumero→aluno.
+      // CRÍTICO: se um bloco falhar (timeout), os boletos daquele período somem do índice e o
+      // boleto cai no fallback por valor (que erra). Por isso fazemos retry dos blocos que falham.
       let nossoNumParaAluno = {};
+      let idxDiag = { blocos: 0, falhas: 0, entradas: 0 };
       try {
         const fimCob = dataFim;
         const iniCobGeral = new Date(new Date(dataInicio).getTime() - 365*24*60*60*1000);
-        // Buscar em blocos de ~90 dias (limite da API por requisição)
         const blocos = [];
         let cursor = new Date(iniCobGeral);
         const fimDate = new Date(fimCob);
@@ -1425,13 +1442,22 @@ async function executar(intencao, p, dados, chatId) {
           blocos.push([ini, fim]);
           cursor = new Date(prox.getTime() + 24*60*60*1000);
         }
-        const resultados = await Promise.all(blocos.map(([ini, fim]) =>
-          Promise.race([
-            interCobranças(null, ini, fim),
-            new Promise((_,r) => setTimeout(() => r(new Error('Timeout')), 18000))
-          ]).catch(() => null)
-        ));
-        resultados.forEach(rCob => {
+        idxDiag.blocos = blocos.length;
+        const buscarBloco = (ini, fim) => Promise.race([
+          interCobranças(null, ini, fim),
+          new Promise((_,r) => setTimeout(() => r(new Error('Timeout')), 25000))
+        ]).catch(() => null);
+        // 1ª rodada
+        let resultados = await Promise.all(blocos.map(([i,f]) => buscarBloco(i,f).then(r => ({i,f,r}))));
+        // Retry dos que falharam (r === null)
+        const falhos = resultados.filter(x => x.r === null);
+        idxDiag.falhas = falhos.length;
+        if (falhos.length) {
+          const retry = await Promise.all(falhos.map(x => buscarBloco(x.i, x.f).then(r => ({i:x.i,f:x.f,r}))));
+          // Mesclar retries de volta
+          retry.forEach(rt => { const idx = resultados.findIndex(x => x.i===rt.i && x.f===rt.f); if (idx>=0 && rt.r) resultados[idx] = rt; });
+        }
+        resultados.forEach(({r:rCob}) => {
           const listaCob = rCob?.cobrancas || (Array.isArray(rCob) ? rCob : []);
           listaCob.forEach(item => {
             const bc = item.cobranca || item;
@@ -1441,9 +1467,10 @@ async function executar(intencao, p, dados, chatId) {
             const psn = parseSeuNumero(bc.seuNumero);
             if (!psn.alunoId) return;
             const al = dados.alunos.find(a => a.id === psn.alunoId);
-            if (al) nossoNumParaAluno[nn] = al.nome.split(' ')[0];
+            if (al) { nossoNumParaAluno[nn] = al.nome.split(' ')[0]; idxDiag.entradas++; }
           });
         });
+        console.log('[inter_extrato] índice nossoNumero:', JSON.stringify(idxDiag));
       } catch(eCob) { console.error('[inter_extrato] erro cobranças:', eCob.message); }
 
       // Carregar boletos do Supabase como reforço (valor + proximidade do vencimento)
