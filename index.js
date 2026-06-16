@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 7.8 - extrato auto-explicativo: cada boleto mostra nome + MÊS DE VENCIMENTO + marca de origem (✓ exato pelo nº do boleto, ~ estimado por valor, ? não localizado), com legenda no rodapé. Permite conferir a identificação sem testes externos
+// Versão 8.1 - índice do extrato agora usa a MESMA estratégia de janelas (-18 a +12 meses, passo 3) que migrarBoletosFuturosParaPendente, que comprovadamente captura boletos de vencimento futuro (ex: julho do Vinicius). Janelas pequenas evitam truncamento por paginação. Batimento individual (v8.0) mantido como 2ª camada
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '7.8'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '8.1'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1445,42 +1445,119 @@ async function executar(intencao, p, dados, chatId) {
 
       // Carregar cobranças do Inter para mapear nossoNumero → aluno (via seuNumero).
       // O extrato traz "RECEBIMENTO TITULO - 112/<nossoNumero>"; a cobrança liga ao seuNumero.
-      // Estratégia: UMA busca paginada cobrindo a janela de emissão relevante. A paginação
-      // (interCobranças) traz todas as páginas, evitando blocos paralelos que davam timeout.
+      // Estratégia: janelas de EMISSÃO de -18 a +12 meses em passos de 3 meses — É A MESMA
+      // que migrarBoletosFuturosParaPendente usa e que comprovadamente captura TODOS os boletos
+      // (inclusive os de vencimento futuro como o julho do Vinicius). Janelas pequenas (3 meses)
+      // evitam que a paginação trunque resultados em meses com muitos boletos emitidos.
       let nossoNumParaAluno = {};
       try {
-        const fimCob = dataFim;
-        // Boletos pagos no período foram emitidos meses antes; -13 meses cobre planos semestrais.
-        const iniCob = new Date(new Date(dataInicio).getTime() - 395*24*60*60*1000).toISOString().slice(0,10);
-        const rCob = await Promise.race([
-          interCobranças(null, iniCob, fimCob),
-          new Promise((_,r) => setTimeout(() => r(new Error('Timeout')), 60000))
-        ]).catch(e => { console.error('[inter_extrato] cobranças:', e.message); return null; });
-        const listaCob = rCob?.cobrancas || [];
-        listaCob.forEach(item => {
-          const bc = item.cobranca || item;
-          const bol = item.boleto || {};
-          const nn = String(bol.nossoNumero || bc.nossoNumero || item.nossoNumero || '').replace(/^0+/, '');
-          if (!nn) return;
-          const psn = parseSeuNumero(bc.seuNumero);
-          if (!psn.alunoId) return;
-          const al = dados.alunos.find(a => a.id === psn.alunoId);
-          if (al) nossoNumParaAluno[nn] = { nome: al.nome.split(' ')[0], venc: (bc.dataVencimento||'').slice(0,7) };
-        });
-        console.log('[inter_extrato] índice nossoNumero: ' + Object.keys(nossoNumParaAluno).length + ' entradas de ' + listaCob.length + ' cobranças');
+        const hojeIdx = new Date(Date.now() - 3*60*60*1000);
+        const janelas = [];
+        for (let m = -18; m <= 12; m += 3) {
+          const ini = new Date(hojeIdx.getFullYear(), hojeIdx.getMonth()+m, 1).toISOString().slice(0,10);
+          const fim = new Date(hojeIdx.getFullYear(), hojeIdx.getMonth()+m+3, 0).toISOString().slice(0,10);
+          janelas.push([ini, fim]);
+        }
+        const vistosIdx = new Set();
+        let totalCob = 0;
+        for (const [ini, fim] of janelas) {
+          try {
+            const r = await Promise.race([
+              interCobranças(null, ini, fim),
+              new Promise((_,rej) => setTimeout(() => rej(new Error('Timeout')), 25000))
+            ]);
+            const arr = r?.cobrancas || r?.content || (Array.isArray(r) ? r : []);
+            arr.forEach(item => {
+              const bc = item.cobranca || item;
+              const bol = item.boleto || {};
+              // dedup por codigoSolicitacao (único) ou seuNumero+venc (boletos antigos compartilham seuNumero)
+              const idDedup = bc.codigoSolicitacao || ((bc.seuNumero||'') + '|' + (bc.dataVencimento||''));
+              if (vistosIdx.has(idDedup)) return;
+              vistosIdx.add(idDedup);
+              totalCob++;
+              const nn = String(bol.nossoNumero || bc.nossoNumero || item.nossoNumero || '').replace(/^0+/, '');
+              if (!nn) return;
+              const psn = parseSeuNumero(bc.seuNumero);
+              if (!psn.alunoId) return;
+              const al = dados.alunos.find(a => a.id === psn.alunoId);
+              if (al) nossoNumParaAluno[nn] = { nome: al.nome.split(' ')[0], venc: (bc.dataVencimento||'').slice(0,7) };
+            });
+          } catch(eJ) { console.log('[inter_extrato] janela ' + ini + ' falhou:', eJ.message); }
+        }
+        console.log('[inter_extrato] índice nossoNumero: ' + Object.keys(nossoNumParaAluno).length + ' entradas de ' + totalCob + ' cobranças');
       } catch(eCob) { console.error('[inter_extrato] erro cobranças:', eCob.message); }
 
-      // Carregar boletos do Supabase como reforço (valor + proximidade do vencimento)
+      // Carregar boletos do Supabase: reforço por valor/venc E batimento por nossoNumero via API.
       let boletosIndex = [];
+      let boletosSupabase = []; // com codigo_solicitacao, para batimento sob demanda
       try {
-        const rBol = await sbGet('boletos', 'select=aluno_id,mes,valor,vencimento,status&order=vencimento.asc');
+        const rBol = await sbGet('boletos', 'select=aluno_id,mes,valor,vencimento,status,codigo_solicitacao&order=vencimento.asc');
         const arrBol = Array.isArray(rBol) ? rBol : (rBol?.data || []);
+        boletosSupabase = arrBol.filter(b => b.codigo_solicitacao);
         boletosIndex = arrBol.map(b => {
           const al = dados.alunos.find(a => a.id === b.aluno_id);
           return { aluno_id: b.aluno_id, nome: al ? al.nome.split(' ')[0] : null,
                    valor: Math.round(parseFloat(b.valor||0)), vencimento: (b.vencimento||'').slice(0,10) };
         }).filter(b => b.nome);
       } catch(eBol) { console.error('[inter_extrato] erro ao carregar boletos:', eBol.message); }
+
+      // BATIMENTO: para os nossoNumeros que aparecem nas transações de boleto exibidas e NÃO
+      // foram resolvidos pela busca de cobranças, consultar a API individual por codigoSolicitacao
+      // (da tabela boletos do Supabase) para obter o nossoNumero real e completar o índice.
+      // Resolve casos como o julho do Vinicius (boleto que some da busca por janela).
+      try {
+        const recentes = transacoes.slice().reverse().slice(0,15);
+        const nnNaoResolvidos = new Set();
+        recentes.forEach(t => {
+          if (t.tipoOperacao !== 'C') return;
+          if (!((t.tipoTransacao||'')==='BOLETO_COBRANCA' || (t.titulo||t.descricao||'').toLowerCase().includes('boleto'))) return;
+          const m = (t.descricao||'').match(/(\d+)\/(\d+)/);
+          if (m && m[2]) {
+            const nn = m[2].replace(/^0+/, '');
+            if (!nossoNumParaAluno[nn]) nnNaoResolvidos.add(nn);
+          }
+        });
+        // Mapear o valor de cada nossoNumero não resolvido (do extrato), para filtrar candidatos
+        const valorPorNN = {};
+        recentes.forEach(t => {
+          if (t.tipoOperacao !== 'C') return;
+          const m = (t.descricao||'').match(/(\d+)\/(\d+)/);
+          if (m && m[2]) {
+            const nn = m[2].replace(/^0+/, '');
+            if (nnNaoResolvidos.has(nn)) valorPorNN[nn] = Math.round(parseFloat(t.valor || t.valorOperacao || 0));
+          }
+        });
+        const valoresAlvo = new Set(Object.values(valorPorNN));
+        if (nnNaoResolvidos.size && boletosSupabase.length) {
+          const token = await interGetToken('boleto-cobranca.read');
+          // Candidatos: boletos do Supabase cujo valor bate com algum nossoNumero órfão (mais recentes primeiro)
+          const candidatos = boletosSupabase
+            .filter(b => valoresAlvo.has(Math.round(parseFloat(b.valor||0))))
+            .reverse()
+            .slice(0, 30);
+          for (const b of candidatos) {
+            if (!nnNaoResolvidos.size) break;
+            try {
+              const det = await Promise.race([
+                interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao, 'GET', null, token),
+                new Promise((_,r) => setTimeout(() => r(new Error('Timeout')), 8000))
+              ]);
+              const d = det?.data || {};
+              const bol = d.boleto || {};
+              const bc = d.cobranca || d;
+              const nn = String(bol.nossoNumero || bc.nossoNumero || '').replace(/^0+/, '');
+              if (nn && nnNaoResolvidos.has(nn)) {
+                const al = dados.alunos.find(a => a.id === b.aluno_id);
+                if (al) {
+                  nossoNumParaAluno[nn] = { nome: al.nome.split(' ')[0], venc: (bc.dataVencimento||b.vencimento||'').slice(0,7) };
+                  nnNaoResolvidos.delete(nn);
+                }
+              }
+            } catch(eDet) { /* segue para o próximo */ }
+          }
+          console.log('[inter_extrato] batimento individual: faltaram', nnNaoResolvidos.size, 'de', candidatos.length, 'consultados');
+        }
+      } catch(eBat) { console.error('[inter_extrato] erro batimento:', eBat.message); }
 
       const linhas = transacoes.slice().reverse().slice(0,15).map(t => {
         const sinal = (t.tipoOperacao === 'C') ? '🟢' : '🔴';
@@ -3123,12 +3200,39 @@ async function rotinaAlertaInadimplencia() {
 
     if (!vencidosOntem.length) return;
 
+    // Buscar os boletos do mês atual desses alunos para obter o vencimento real do boleto
+    const idsVenc = vencidosOntem.map(a => a.id);
+    let boletosMes = {};
+    try {
+      const rB = await sbGet('boletos', 'aluno_id=in.(' + idsVenc.join(',') + ')&mes=eq.' + mesAtualStr + '&select=aluno_id,vencimento,status');
+      const arrB = Array.isArray(rB) ? rB : (rB?.data || []);
+      arrB.forEach(b => { if (!boletosMes[b.aluno_id]) boletosMes[b.aluno_id] = b.vencimento; });
+    } catch(eB) { console.error('[rotina-inadimplencia] boletos:', eB.message); }
+
+    const fmtData = (d) => {
+      if (!d) return null;
+      const dt = (d instanceof Date) ? d : new Date(d);
+      if (isNaN(dt.getTime())) return null;
+      return String(dt.getDate()).padStart(2,'0') + '/' + String(dt.getMonth()+1).padStart(2,'0') + '/' + dt.getFullYear();
+    };
+
     const linhas = vencidosOntem.map(a => {
       const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
       const temBoleto = (pend[mesAtualStr]||0) > 0;
-      return '🔴 *' + a.nome.split(' ').slice(0,2).join(' ') + '* — ' + a.tipo_plano + ' (' + a.forma_pagamento + ')' +
+      // Vencimento do boleto: da tabela boletos (preferido) ou montado de mes+dia_vencimento
+      let vencBoleto = boletosMes[a.id];
+      if (!vencBoleto && a.dia_vencimento) {
+        vencBoleto = mesAtualStr + '-' + String(a.dia_vencimento).padStart(2,'0');
+      }
+      const vbFmt = fmtData(vencBoleto);
+      // Vencimento do plano
+      const vpFmt = fmtData(calcVencimentoPlanoBot(a));
+      let linha = '🔴 *' + a.nome.split(' ').slice(0,2).join(' ') + '* — ' + a.tipo_plano + ' (' + a.forma_pagamento + ')' +
         (temBoleto ? ' — boleto emitido aguardando' : '');
-    }).join('\n');
+      if (vbFmt) linha += '\n   📄 Boleto vence: ' + vbFmt;
+      if (vpFmt) linha += '\n   📅 Plano vence: ' + vpFmt;
+      return linha;
+    }).join('\n\n');
 
     await tgSend(TELEGRAM_CHAT_ID,
       '⚠️ *Vencimentos de ontem sem pagamento (' + vencidosOntem.length + ')*\n\n' + linhas +
