@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 7.1 - 'boletos debug NOME' agora mostra também os campos de data de pagamento (dataHoraSituacao/dataPagamento/dataLiquidacao/dataRecebimento) para calibrar o filtro de 7 dias da rotina de baixa (descobrir se a API retorna essas datas)
+// Versão 7.2 - CORREÇÃO FINAL da rotina de baixa: API do Inter NÃO retorna data de pagamento, então o filtro de 7 dias bloqueava tudo. Substituído por: só baixa se aluno ATIVO E mês está em pagamentos_pendentes (boleto que o sistema espera). Protege contra reprocessar boletos antigos (Edno) sem inutilizar a rotina
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '7.1'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '7.2'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2991,25 +2991,15 @@ async function verificarBoletosPagosInter() {
     let confirmados = 0;
     const confirmadosNomes = [];
 
-    // Janela de PAGAMENTO recente: só dar baixa em boletos efetivamente pagos nos últimos 7 dias.
-    // O status RECEBIDO é permanente; sem este filtro, pagamentos antigos (até de 2024) seriam
-    // reprocessados quando a busca varre 12 meses de emissão. Comparamos pela data de pagamento.
-    const limitePag = new Date(hoje.getTime() - 7*24*60*60*1000);
-
+    // PROTEÇÃO (a API do Inter NÃO retorna data de pagamento, então não dá pra filtrar por recência):
+    // só dar baixa quando (1) o aluno está ATIVO e (2) o mês do boleto está em pagamentos_pendentes
+    // do aluno — ou seja, é um boleto que o sistema EMITIU e ESTÁ ESPERANDO receber.
+    // Isso impede reprocessar boletos antigos de inativos (ex: Edno) ou meses não esperados,
+    // já que o status RECEBIDO no Inter é permanente e a busca varre 12 meses de emissão.
     for (const item of lista) {
       const bc = item.cobranca || item;
       const psn = parseSeuNumero(bc.seuNumero);
       if (!psn.alunoId) continue;
-
-      // Só boletos PAGOS RECENTEMENTE (evita reprocessar pagamentos antigos)
-      const dataPagStr = (bc.dataHoraSituacao || bc.dataPagamento || bc.dataLiquidacao || bc.dataRecebimento || '').slice(0,10);
-      if (dataPagStr) {
-        const dPag = new Date(dataPagStr);
-        if (!isNaN(dPag.getTime()) && dPag < limitePag) continue; // pago há mais de 7 dias → ignora
-      } else {
-        // Sem data de pagamento confiável: por segurança, NÃO processa (evita baixar antigo errado)
-        continue;
-      }
 
       const alunoId = psn.alunoId;
       const mes = psn.mes || (bc.dataVencimento || '').slice(0,7);
@@ -3019,15 +3009,17 @@ async function verificarBoletosPagosInter() {
 
       const aluno = dados.alunos.find(a => a.id === alunoId);
       if (!aluno) continue;
-      // Não dar baixa para aluno inativo (ex: boleto antigo de quem saiu)
+      // (1) Só aluno ativo
       if (aluno.ativo !== 'SIM') continue;
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
       if ((pags[mes]||0) > 0) continue; // já confirmado
+      // (2) Só se o mês está em pagamentos_pendentes (boleto que o sistema espera receber)
+      const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
+      if (!(pend[mes] > 0)) continue; // não estava esperando esse mês → não baixa
 
       // Confirmar pagamento
       try {
         pags[mes] = valor;
-        const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
         const tinhaPend = (pend[mes]||0) > 0;
         if (tinhaPend) delete pend[mes];
         const hist = aluno.historico_alteracoes || [];
