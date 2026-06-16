@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 7.2 - CORREÇÃO FINAL da rotina de baixa: API do Inter NÃO retorna data de pagamento, então o filtro de 7 dias bloqueava tudo. Substituído por: só baixa se aluno ATIVO E mês está em pagamentos_pendentes (boleto que o sistema espera). Protege contra reprocessar boletos antigos (Edno) sem inutilizar a rotina
+// Versão 7.3 - 'boletos debug NOME' mostra também o nossoNumero, para confirmar se a API de cobranças retorna esse campo (necessário para identificar boletos no extrato pelo nossoNumero, ex: julho do Vinicius mostrado como Katia)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '7.2'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '7.3'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1687,8 +1687,10 @@ async function executar(intencao, p, dados, chatId) {
           const bc = item.cobranca || item;
           const psn = parseSeuNumero(bc.seuNumero);
           if (psn.alunoId === aluno.id) {
+            const bol = item.boleto || {};
             meus.push({ seuNumero: bc.seuNumero, codigoSolicitacao: bc.codigoSolicitacao,
                         situacao: bc.situacao, vencimento: bc.dataVencimento, valor: bc.valorNominal,
+                        nossoNumero: bol.nossoNumero || bc.nossoNumero || item.nossoNumero,
                         dataHoraSituacao: bc.dataHoraSituacao, dataPagamento: bc.dataPagamento,
                         dataLiquidacao: bc.dataLiquidacao, dataRecebimento: bc.dataRecebimento });
           }
@@ -1699,10 +1701,8 @@ async function executar(intencao, p, dados, chatId) {
       meus.forEach((b, i) => {
         out += (i+1) + '. venc ' + (b.vencimento||'?') + ' | ' + (b.situacao||'?') + ' | R$ ' + (b.valor||'?') + '\n';
         out += '   seuNum: `' + (b.seuNumero||'?') + '`\n';
+        out += '   nossoNum: `' + (b.nossoNumero||'(VAZIO!)') + '`\n';
         out += '   codSol: `' + (b.codigoSolicitacao||'(VAZIO!)') + '`\n';
-        const datas = ['dataHoraSituacao','dataPagamento','dataLiquidacao','dataRecebimento']
-          .filter(k => b[k]).map(k => k + '=' + b[k]);
-        out += '   datas: ' + (datas.length ? datas.join(' ') : '(nenhuma data de pgto!)') + '\n';
       });
       return out.slice(0, 3900);
     } catch(e) { return '❌ Erro debug boletos: ' + e.message; }
