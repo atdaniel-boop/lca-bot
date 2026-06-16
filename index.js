@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 7.5 - CAUSA RAIZ encontrada: interCobranças NÃO paginava (a API do Inter pagina ~100/página), então boletos além da página 1 sumiam — por isso o julho do Vinicius não aparecia em lugar nenhum e a identificação no extrato errava. Agora pagina todas as páginas. Resolve identificação, debug e baixa de uma vez
+// Versão 7.6 - CORREÇÃO auth: a paginação (v7.5) multiplicou chamadas e várias pediam token ao mesmo tempo → Inter rejeitava ('auth falhou'). Agora requisições concorrentes de token compartilham a mesma promise + retry com backoff. Mantém paginação da v7.5
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '7.5'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '7.6'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -66,6 +66,7 @@ function interReq(path, method, body, token, extraHeaders) {
 
 // Obter token OAuth2 (com cache de 50 minutos)
 const interTokenCache = {}; // cache por scope
+const interTokenPromise = {}; // promise em voo por scope (evita "thundering herd" de auth)
 
 // Obtém token OAuth2 do Banco Inter (cache por escopo). Escopos: extrato.read, cobranca.read, cobranca.write, etc.
 async function interGetToken(scope) {
@@ -74,21 +75,40 @@ async function interGetToken(scope) {
   if (interTokenCache[scopeKey] && agora < interTokenCache[scopeKey].exp) {
     return interTokenCache[scopeKey].token;
   }
-  const body = new URLSearchParams({
-    client_id:     INTER_CLIENT_ID,
-    client_secret: INTER_CLIENT_SECRET,
-    grant_type:    'client_credentials',
-    scope:         scopeKey
-  }).toString();
-  const r = await interReq('/oauth/v2/token', 'POST', body, null);
-  if (r.data && r.data.access_token) {
-    interTokenCache[scopeKey] = {
-      token: r.data.access_token,
-      exp:   agora + (r.data.expires_in - 60) * 1000
-    };
-    return interTokenCache[scopeKey].token;
+  // Se já há uma requisição de token em voo para este escopo, aguarda ela em vez de
+  // disparar outra (evita várias chamadas paralelas pedirem token ao mesmo tempo,
+  // o que o Inter rejeita retornando token vazio → "auth falhou").
+  if (interTokenPromise[scopeKey]) {
+    return interTokenPromise[scopeKey];
   }
-  throw new Error('Inter auth falhou: ' + JSON.stringify(r.data));
+  interTokenPromise[scopeKey] = (async () => {
+    const body = new URLSearchParams({
+      client_id:     INTER_CLIENT_ID,
+      client_secret: INTER_CLIENT_SECRET,
+      grant_type:    'client_credentials',
+      scope:         scopeKey
+    }).toString();
+    // Tentar até 3 vezes (o Inter às vezes rejeita sob carga)
+    let ultimoErro = '';
+    for (let tentativa = 0; tentativa < 3; tentativa++) {
+      const r = await interReq('/oauth/v2/token', 'POST', body, null);
+      if (r.data && r.data.access_token) {
+        interTokenCache[scopeKey] = {
+          token: r.data.access_token,
+          exp:   Date.now() + (r.data.expires_in - 60) * 1000
+        };
+        return interTokenCache[scopeKey].token;
+      }
+      ultimoErro = JSON.stringify(r.data);
+      await new Promise(res => setTimeout(res, 800 * (tentativa + 1))); // backoff
+    }
+    throw new Error('Inter auth falhou: ' + ultimoErro);
+  })();
+  try {
+    return await interTokenPromise[scopeKey];
+  } finally {
+    delete interTokenPromise[scopeKey]; // libera para futuras renovações
+  }
 }
 
 // Consultar saldo da conta
