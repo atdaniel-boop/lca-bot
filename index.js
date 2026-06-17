@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 8.2 - ROBUSTEZ: criado helper interCobrancasRobusto (janelas -18/+12 meses, passo 3, dedup) usado em TODOS os pontos de busca de cobranças (extrato, listagem, debug, vencidos, rotina de baixa, reenviar). Elimina janelas curtas que perdiam boletos antigos/futuros. Código unificado e consistente
+// Versão 8.3 - extrato distingue FALHA de comunicação (Render acordando/API fora) de extrato realmente vazio: antes mostrava 'Nenhuma transação encontrada' em ambos os casos (enganoso). interExtrato retorna null em falha; mensagens separadas e honestas
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '8.2'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '8.3'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -289,7 +289,10 @@ async function interExtrato(dataInicio, dataFim) {
     '/banking/v2/extrato?dataInicio=' + dataInicio + '&dataFim=' + dataFim,
     'GET', null, token
   );
-  return r2.data;
+  if (r2.status >= 200 && r2.status < 300) return r2.data;
+  // Ambas falharam → retorna null para o chamador distinguir FALHA de extrato vazio
+  console.error('[interExtrato] falha: status', r.status, '/', r2.status);
+  return null;
 }
 
 // Listar cobranças (boletos) por período
@@ -1459,11 +1462,19 @@ async function executar(intencao, p, dados, chatId) {
         new Promise((_,r) => setTimeout(() => r(new Error('Timeout extrato 25s')), 25000))
       ]);
       console.log('[inter_extrato] ok, keys:', ext ? Object.keys(ext).join(',') : 'null');
+      // Se a resposta não veio (null/undefined), foi FALHA de comunicação — não afirmar que
+      // não houve transações (seria enganoso). O extrato só está "vazio" se a API respondeu
+      // com uma estrutura válida porém sem itens.
+      if (ext === null || ext === undefined) {
+        return '⚠️ *Extrato Inter* (' + dataInicio + ' a ' + dataFim + ')\n\n' +
+               'Não foi possível obter o extrato agora (o serviço pode estar reativando ou o banco demorou a responder). ' +
+               'Tente novamente em alguns segundos.';
+      }
       const transacoes = ext?.transacoes || ext?.content || ext?.items || (Array.isArray(ext) ? ext : []);
       // Log diagnóstico: Pix sem padrão Cp:
       transacoes.filter(t => t.tipoTransacao==='PIX' && t.tipoOperacao==='C' && !(t.descricao||'').includes('Cp:')).slice(0,3).forEach(t => {
       });
-      if (!transacoes.length) return '📄 *Extrato Inter* (' + dataInicio + ' a ' + dataFim + ')\n\n_Nenhuma transação encontrada._';
+      if (!transacoes.length) return '📄 *Extrato Inter* (' + dataInicio + ' a ' + dataFim + ')\n\n_Nenhuma transação no período (a consulta funcionou, mas não há lançamentos nessas datas)._';
 
       // Índice de alunos por valor+mês (sem busca extra no Supabase)
       const valorMesParaAlunos = {};
