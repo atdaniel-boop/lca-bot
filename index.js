@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 8.3 - extrato distingue FALHA de comunicação (Render acordando/API fora) de extrato realmente vazio: antes mostrava 'Nenhuma transação encontrada' em ambos os casos (enganoso). interExtrato retorna null em falha; mensagens separadas e honestas
+// Versão 8.4 - resumo financeiro e consultas com emojis por seção (instrução de estilo no prompt da IA): 📊 título, 👥 ativos, 🔴 inadimplentes, 💰 receita, 👩‍🏫 professoras, 💸 custos, 📈/📉 resultado, 📥 a receber, 📅 planos vencendo, ⚠️ faltas
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '8.3'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '8.4'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1174,6 +1174,11 @@ function detectarAlunoNoTexto(dados, tL) {
     '- "resumo financeiro", "resultado do mes", "receita do estudio" → consulta\n' +
     '- "saldo" sem mencao a banco/conta/Inter → consulta sobre o estudio\n\n' +
     'MENSAGEM: "' + texto + '"\n\n' +
+    'ESTILO DA RESPOSTA (quando for consulta, especialmente resumo financeiro):\n' +
+    '- Use Markdown e emojis para deixar visual e fácil de ler no Telegram.\n' +
+    '- Sugestão de emojis por seção: 📊 título/resumo, 👥 ativos, 🔴 inadimplentes, 💰 receita, 👩‍🏫 professoras, 💸 custos, ✅ ou 📈 resultado positivo / 📉 se negativo, 📥 a receber/boletos pendentes, 📅 planos vencendo, 🧾 custos lançados, ⚠️ faltas frequentes.\n' +
+    '- Use *negrito* nos rótulos e valores em R$. Não exagere: 1 emoji por linha/seção, sem poluir.\n' +
+    '- Mantenha os números exatamente como nos DADOS, sem inventar.\n\n' +
     'Retorne JSON (sem markdown):\n' +
     '{\n' +
     '  "tipo": "consulta" ou "acao",\n' +
