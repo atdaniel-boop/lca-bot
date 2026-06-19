@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 8.6 - removido pro-rata automatico por data_matricula (descartado); adicionado handler inter_cobranca_excepcional: emite 1 boleto avulso (valor/vencimento/descricao proprios) acionado pelo botao Cobranca Excepcional do site via fila_boletos (obs 'excepcional|...')
+// Versão 8.7 - corrige 'Dados invalidos' do Inter ao emitir boleto: sanitiza CEP (vazio/zerado vira 22220000 valido), numero/endereco/nome sem caracteres problematicos, valor arredondado; valida digito do CPF antes (mensagem clara); detecta rejeicao do Inter (sem codigoSolicitacao) e mostra motivo amigavel em vez de seguir como sucesso
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '8.6'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '8.7'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -367,35 +367,66 @@ async function interCobrancasRobusto(opts) {
 }
 
 // Emitir boleto de cobrança
+// Valida o dígito verificador do CPF (o Inter rejeita CPF inválido com "Dados inválidos").
+function cpfValido(cpf) {
+  cpf = String(cpf||'').replace(/\D/g,'');
+  if (cpf.length !== 11 || /^(\d)\1{10}$/.test(cpf)) return false;
+  let s = 0;
+  for (let i=0;i<9;i++) s += parseInt(cpf[i])*(10-i);
+  let d1 = (s*10)%11; if (d1===10) d1=0;
+  if (d1 !== parseInt(cpf[9])) return false;
+  s = 0;
+  for (let i=0;i<10;i++) s += parseInt(cpf[i])*(11-i);
+  let d2 = (s*10)%11; if (d2===10) d2=0;
+  return d2 === parseInt(cpf[10]);
+}
+
 async function interEmitirBoleto(dados) {
   // dados: { valor, vencimento, nomePagador, cpfCnpj, email, descricao }
   const token = await interGetToken('boleto-cobranca.write');
+  // Sanitizar campos que o Inter valida (evita "Dados inválidos"):
+  const cpfLimpo = (dados.cpfCnpj||'').replace(/\D/g,'');
+  // CEP: precisa de 8 dígitos e não pode ser tudo zero. Fallback: CEP válido do Rio (Flamengo).
+  let cepLimpo = (dados.cep||'').replace(/\D/g,'').slice(0,8);
+  if (cepLimpo.length !== 8 || /^0+$/.test(cepLimpo)) cepLimpo = '22220000';
+  // Número: só dígitos ou "S/N". Endereço/nome sem caracteres problemáticos.
+  let numeroLimpo = String(dados.numero||'').replace(/[^0-9A-Za-z\/ ]/g,'').trim() || 'S/N';
+  if (numeroLimpo.length > 10) numeroLimpo = numeroLimpo.slice(0,10);
+  const enderecoLimpo = String(dados.endereco||'Nao informado').replace(/[^0-9A-Za-zÀ-ÿ.,\/ -]/g,'').trim().slice(0,90) || 'Nao informado';
+  const cidadeLimpa = String(dados.cidade||'Rio de Janeiro').replace(/[^0-9A-Za-zÀ-ÿ. -]/g,'').trim().slice(0,60) || 'Rio de Janeiro';
+  const ufLimpo = String(dados.uf||'RJ').replace(/[^A-Za-z]/g,'').trim().toUpperCase().slice(0,2) || 'RJ';
+  const nomeLimpo = String(dados.nomePagador||'').replace(/[^0-9A-Za-zÀ-ÿ. -]/g,'').trim().slice(0,100);
+  const valorNum = Math.round((parseFloat(dados.valor)||0)*100)/100;
   const body = {
     seuNumero:    dados.seuNumero || ('LCA-' + Date.now()),
-    valorNominal: dados.valor,
+    valorNominal: valorNum,
     dataVencimento: dados.vencimento, // YYYY-MM-DD
     numDiasAgenda: 30,
     pagador: {
-      cpfCnpj:    dados.cpfCnpj,
-      tipoPessoa: dados.cpfCnpj.replace(/\D/g,'').length === 11 ? 'FISICA' : 'JURIDICA',
-      nome:       dados.nomePagador,
+      cpfCnpj:    cpfLimpo,
+      tipoPessoa: cpfLimpo.length === 11 ? 'FISICA' : 'JURIDICA',
+      nome:       nomeLimpo,
       email:      dados.email || undefined,
-      endereco:   dados.endereco || 'Nao informado',
-      cidade:     dados.cidade || 'Rio de Janeiro',
-      uf:         dados.uf || 'RJ',
-      cep:        dados.cep || '20000000',
-      numero:     dados.numero || 'S/N',
-      complemento: dados.complemento || undefined,
-      bairro: dados.bairro || undefined
+      endereco:   enderecoLimpo,
+      cidade:     cidadeLimpa,
+      uf:         ufLimpo,
+      cep:        cepLimpo,
+      numero:     numeroLimpo,
+      complemento: dados.complemento ? String(dados.complemento).replace(/[^0-9A-Za-zÀ-ÿ.,\/ -]/g,'').slice(0,30) : undefined,
+      bairro: dados.bairro ? String(dados.bairro).replace(/[^0-9A-Za-zÀ-ÿ. -]/g,'').slice(0,40) : undefined
     },
     mensagem: {
-      linha1: dados.descricao || 'Mensalidade Pilates LCA Studio',
-      linha2: 'Ref: ' + (dados.referencia || new Date().toLocaleDateString('pt-BR'))
+      linha1: (dados.descricao || 'Mensalidade Pilates LCA Studio').slice(0,78),
+      linha2: ('Ref: ' + (dados.referencia || new Date().toLocaleDateString('pt-BR'))).slice(0,78)
     }
   };
   const r = await interReq('/cobranca/v3/cobrancas', 'POST', body, token, {
     'x-id-idempotente': require('crypto').randomUUID()
   });
+  // Se o Inter rejeitou, logar o corpo enviado para diagnóstico
+  if (r.status < 200 || r.status >= 300) {
+    console.error('[interEmitirBoleto] Inter rejeitou. status', r.status, '| resposta:', JSON.stringify(r.data||{}).slice(0,300), '| CEP enviado:', cepLimpo, '| numero:', numeroLimpo);
+  }
   return r.data;
 }
 
@@ -2029,6 +2060,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
     if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir boletos.';
+    if (!cpfValido(cpf)) return '⚠️ O CPF de *' + aluno.nome + '* (' + aluno.cpf + ') parece inválido. O banco recusa CPF com dígito verificador errado. Confira o cadastro.';
 
     const DURACAO = { mensal:1, trimestral:3, semestral:6 };
     const plano = aluno.tipo_plano || 'mensal';
@@ -2117,6 +2149,16 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           referencia: 'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc,
           seuNumero: 'LCA-' + aluno.id + '-' + mesStr
         });
+        // Se o Inter rejeitou (sem codigoSolicitacao), tratar como erro com mensagem clara
+        if (!result?.codigoSolicitacao) {
+          const motivo = result?.detail || result?.title || result?.message ||
+            (result?.violacoes && result.violacoes[0] && (result.violacoes[0].razao||result.violacoes[0].propriedade)) ||
+            'o banco recusou os dados';
+          resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - ❌ ' + String(motivo).slice(0,80));
+          erros++;
+          if (i < dur - 1) await new Promise(r => setTimeout(r, 800));
+          continue;
+        }
         const cod  = result?.codigoSolicitacao || result?.nossoNumero || '?';
         const link = result?.linkVisualizacaoBoleto || result?.link || '';
         // Gravar boleto na tabela e em pagamentos_pendentes do aluno
