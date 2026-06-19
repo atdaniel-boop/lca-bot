@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 8.4 - resumo financeiro e consultas com emojis por seção (instrução de estilo no prompt da IA): 📊 título, 👥 ativos, 🔴 inadimplentes, 💰 receita, 👩‍🏫 professoras, 💸 custos, 📈/📉 resultado, 📥 a receber, 📅 planos vencendo, ⚠️ faltas
+// Versão 8.6 - removido pro-rata automatico por data_matricula (descartado); adicionado handler inter_cobranca_excepcional: emite 1 boleto avulso (valor/vencimento/descricao proprios) acionado pelo botao Cobranca Excepcional do site via fila_boletos (obs 'excepcional|...')
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '8.4'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '8.6'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1968,6 +1968,62 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     'Qualquer dúvida, estamos à disposição! 🌿\nLCA Studio de Pilates';
 }
 
+  if (intencao === 'inter_cobranca_excepcional') {
+    const aluno = encontrarAluno(dados, p);
+    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
+    if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Necessário para emitir boleto.';
+    const valor = parseFloat(p?.valor) || 0;
+    if (!valor || valor <= 0) return '⚠️ Valor inválido para cobrança excepcional.';
+    const vencimento = p?.vencimento;
+    if (!vencimento) return '⚠️ Vencimento não informado para a cobrança excepcional.';
+    const descricao = (p?.descricao || 'Cobranca excepcional').slice(0,120);
+
+    // Endereço (mesma lógica do plano)
+    const _limpo = v => (!v || v === 'null' || v === 'undefined') ? '' : String(v).trim();
+    const endLogradouro = _limpo(aluno.logradouro) || _limpo(aluno.endereco) || 'Nao informado';
+    const endNumero     = _limpo(aluno.numero) || 'S/N';
+    const endComplemento = _limpo(aluno.complemento);
+    const endBairro     = _limpo(aluno.bairro);
+    const endCidadeRaw  = _limpo(aluno.cidade) || 'Rio de Janeiro-RJ';
+    const endCidade     = endCidadeRaw.split('-')[0].trim();
+    const endUF         = (endCidadeRaw.split('-')[1]||'RJ').trim();
+    const endCEP        = aluno.cep ? aluno.cep.replace(/\D/g,'').slice(0,8) : '20000000';
+    const fmtData2 = s => { const d=new Date(s+'T00:00:00'); return String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear(); };
+    const chaveExc = p?.chave || (vencimento.slice(0,7) + '-exc' + Date.now().toString().slice(-6));
+
+    try {
+      const res = await interEmitirBoleto({
+        valor: valor, vencimento: vencimento,
+        nomePagador: aluno.nome, cpfCnpj: cpf,
+        email: aluno.email || undefined,
+        endereco: endLogradouro, cidade: endCidade, uf: endUF, cep: endCEP,
+        numero: endNumero, complemento: endComplemento || undefined, bairro: endBairro || undefined,
+        descricao: descricao,
+        referencia: 'Cobranca excepcional',
+        seuNumero: 'LCA-' + aluno.id + '-EXC' + Date.now().toString().slice(-6)
+      });
+      if (res?.codigoSolicitacao) {
+        await gravarBoleto(aluno.id, chaveExc, res.codigoSolicitacao, 'LCA-' + aluno.id + '-EXC', valor, vencimento);
+      }
+      const link = res?.linkVisualizacaoBoleto || res?.link || '';
+      const cabec = '🧾 *Cobrança excepcional - ' + aluno.nome.split(' ')[0] + '*\n' +
+                    '📝 ' + descricao + '\n💰 ' + brl(valor) + ' | vence ' + fmtData2(vencimento);
+      if (link) {
+        try {
+          await tgSendPDF(chatId, link, 'Cobranca - ' + aluno.nome.split(' ')[0] + '.pdf', cabec);
+          return null;
+        } catch(ePdf) {
+          return cabec + '\n[ver boleto](' + link + ')';
+        }
+      }
+      return cabec + (res?.codigoSolicitacao ? '\n✓ Boleto emitido.' : '\n⚠️ Boleto pode não ter sido gerado.');
+    } catch(e) {
+      console.error('[cobranca_excepcional] erro:', e.message);
+      return '❌ Erro ao emitir cobrança excepcional de *' + aluno.nome.split(' ')[0] + '*: ' + e.message.slice(0,120);
+    }
+  }
+
   if (intencao === 'inter_emitir_plano') {
     const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
@@ -2008,9 +2064,9 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const MESES_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
     const fmtData = d => String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear();
 
-    const dtInicio = new Date(anoBase, mesBase, diaVenc);
-    const dtFimReal = new Date(anoBase, mesBase + dur, diaVenc - 1); // último dia do plano: dia anterior ao vencimento após dur meses
-    const periodoPlano = fmtData(dtInicio) + ' a ' + fmtData(dtFimReal);
+    let dtInicio = new Date(anoBase, mesBase, diaVenc);
+    let dtFimReal = new Date(anoBase, mesBase + dur, diaVenc - 1); // último dia do plano: dia anterior ao vencimento após dur meses
+    let periodoPlano = fmtData(dtInicio) + ' a ' + fmtData(dtFimReal);
     const planoLabel = plano.charAt(0).toUpperCase() + plano.slice(1);
 
     // Montar endereço sem null
@@ -2890,6 +2946,22 @@ async function processarFilaBoletos() {
               plano_novo: pedido.tipo_plano, valor: pedido.valor,
               meses_cancelar: partes.cancelar, meses_emitir: partes.emitir,
               pro_rata: partes.prorata },
+            dados, TELEGRAM_CHAT_ID
+          );
+          if (resultado) await tgSend(TELEGRAM_CHAT_ID, resultado);
+        } else if (pedido.obs && pedido.obs.startsWith('excepcional|')) {
+          // Cobrança excepcional: emite UM boleto avulso com valor/vencimento/descrição próprios.
+          const partesE = {};
+          pedido.obs.split('|').slice(1).forEach(s => {
+            const idx = s.indexOf(':');
+            if (idx > 0) partesE[s.slice(0,idx)] = s.slice(idx+1);
+          });
+          resultado = await executar(
+            'inter_cobranca_excepcional',
+            { aluno_id: aluno.id, aluno_nome: aluno.nome,
+              valor: parseFloat(partesE.valor)||pedido.valor,
+              vencimento: partesE.venc, descricao: partesE.desc || 'Cobranca excepcional',
+              chave: partesE.chave || '' },
             dados, TELEGRAM_CHAT_ID
           );
           if (resultado) await tgSend(TELEGRAM_CHAT_ID, resultado);
