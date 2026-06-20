@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 10.0 - corrigido erro 'normalizarTelefone is not defined' na mensagem WhatsApp: a funcao existia so no site. Bot agora formata o telefone internamente (DDD) XXXXX-XXXX sem depender da funcao do site
+// Versão 10.2 - telefone no aniversário normalizado igual ao site: 55+DDD+numero com formato (DDD) XXXXX-XXXX. Antes concatenava 55+digitos sem verificar DDD
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '10.0'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '10.2'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -427,6 +427,14 @@ async function interEmitirBoleto(dados) {
     valorNominal: valorNum,
     dataVencimento: dados.vencimento, // YYYY-MM-DD
     numDiasAgenda: 30,
+    multa: {
+      codigoMulta: 'PERCENTUAL',  // multa percentual sobre o valor
+      taxa: 2.00                   // 2% de multa após o vencimento
+    },
+    mora: {
+      codigoMora: 'TAXAMENSAL',   // juros mensais
+      taxa: 1.00                   // 1% ao mês
+    },
     pagador: {
       cpfCnpj:    cpfLimpo,
       tipoPessoa: cpfLimpo.length === 11 ? 'FISICA' : 'JURIDICA',
@@ -3029,8 +3037,18 @@ async function enviarAniversariantesHoje() {
       const ativo = a.ativo === 'SIM';
       const ola = fem ? 'a' : 'o';
       const bem = fem ? 'bem-vinda' : 'bem-vindo';
-      const tel = a.telefone ? a.telefone.replace(/[^0-9]/g,'') : '';
-      const telInfo = tel ? '📱 55' + tel : '📵 sem telefone';
+      // Normalizar telefone: garante 55 + DDD (assume 21 se sem DDD)
+      const telDigits = String(a.telefone||'').replace(/[^0-9]/g,'');
+      let telNorm = '';
+      if (telDigits.length === 13 && telDigits.startsWith('55')) telNorm = telDigits;
+      else if (telDigits.length === 11) telNorm = '55' + telDigits;
+      else if (telDigits.length === 10) telNorm = '55' + telDigits;
+      else if (telDigits.length === 9) telNorm = '5521' + telDigits;
+      else if (telDigits.length === 8) telNorm = '5521' + telDigits;
+      const telFmt = telNorm.length === 13
+        ? '(' + telNorm.slice(2,4) + ') ' + telNorm.slice(4,9) + '-' + telNorm.slice(9)
+        : telDigits;
+      const telInfo = telNorm ? '📱 ' + telNorm + ' | ' + telFmt : '📵 sem telefone';
       const status = ativo ? '🟢 Ativa(o)' : '🔴 Inativa(o)';
 
       let msg;
