@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 9.0 - CONFIRMADO via violacao do Inter ('O valor deve ser igual ou maior a data atual'): boletos saiam com vencimento retroativo. Protecao definitiva: a base dos boletos avanca mes a mes ate o 1o vencimento ser hoje ou futuro, independente do fluxo (manual, fila, com ou sem data_matricula/p.mes). Nenhum boleto sai mais no passado
+// Versão 9.1 - log completo de rejeicao Inter: BODY ENVIADO e RESPOSTA INTER completa (sem corte) para diagnostico definitivo; log da base calculada pelo loop de protecao de data
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '9.0'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '9.1'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -437,9 +437,11 @@ async function interEmitirBoleto(dados) {
   const r = await interReq('/cobranca/v3/cobrancas', 'POST', body, token, {
     'x-id-idempotente': require('crypto').randomUUID()
   });
-  // Se o Inter rejeitou, logar o corpo enviado para diagnóstico
+  // Se o Inter rejeitou, logar corpo enviado E resposta completa para diagnóstico definitivo
   if (r.status < 200 || r.status >= 300) {
-    console.error('[interEmitirBoleto] Inter rejeitou. status', r.status, '| resposta:', JSON.stringify(r.data||{}).slice(0,300), '| CEP enviado:', cepLimpo, '| numero:', numeroLimpo);
+    console.error('[interEmitirBoleto] REJEICAO Inter status', r.status);
+    console.error('[interEmitirBoleto] BODY ENVIADO:', JSON.stringify(body));
+    console.error('[interEmitirBoleto] RESPOSTA INTER:', JSON.stringify(r.data||{}));
   }
   return r.data;
 }
@@ -2125,6 +2127,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         primeiroVenc = new Date(anoBase, mesBase, diaVenc);
         guard++;
       }
+      console.log('[PLANO] base calculada:', anoBase + '-' + String(mesBase+1).padStart(2,'0'), '| 1º venc:', primeiroVenc.toISOString().slice(0,10), '| avanços:', guard);
     }
 
     const MESES_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
