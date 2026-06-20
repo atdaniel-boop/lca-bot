@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 10.7 - boleto avulso: vencimento automatico agora avanca para o proximo mes se o dia ja passou (igual ao plano); recuperar_cpfs: path correto rD.data.cobranca.pagador.cpfCnpj; multa/mora so incluidos quando vencimento e futuro
+// Versão 10.8 - multa/mora: removido campo 'data' e voltou para TAXAMENSAL (sem underline) conforme biblioteca Python oficial do Inter; campo 'taxa' como numero
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '10.7'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '10.8'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -429,8 +429,8 @@ async function interEmitirBoleto(dados) {
     numDiasAgenda: 30,
     // Multa e juros só aplicáveis quando o vencimento é futuro
     ...(new Date(dados.vencimento) >= new Date(new Date().toISOString().slice(0,10)) ? {
-      multa: { codigoMulta: 'PERCENTUAL', data: dados.vencimento, taxa: 2.00 },
-      mora:  { codigoMora:  'TAXA_MENSAL', data: dados.vencimento, taxa: 1.00 }
+      multa: { codigoMulta: 'PERCENTUAL', taxa: 2.00 },
+      mora:  { codigoMora: 'TAXAMENSAL', taxa: 1.00 }
     } : {}),
     pagador: {
       cpfCnpj:    cpfLimpo,
