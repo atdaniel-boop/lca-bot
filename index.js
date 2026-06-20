@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 9.9 - corrigido reenviar com filtro: mes/valor era incluido no nomeCandidato causando 'aluno nao encontrado'. Agora extrai o filtro primeiro, remove do texto, depois busca o aluno pelo nome limpo
+// Versão 10.0 - corrigido erro 'normalizarTelefone is not defined' na mensagem WhatsApp: a funcao existia so no site. Bot agora formata o telefone internamente (DDD) XXXXX-XXXX sem depender da funcao do site
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '9.9'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '10.0'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2038,8 +2038,12 @@ async function executar(intencao, p, dados, chatId) {
 function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   const primeiroNome = aluno.nome.split(' ')[0];
   const vezes = aluno.vezes_semana || 2;
-  const tel = normalizarTelefone ? normalizarTelefone(aluno.telefone) : '';
-  const linhaFone = tel ? '*WhatsApp:* +' + tel + '\n' : '';
+  // Formatar telefone: dígitos → (DDD) XXXXX-XXXX
+  const telDigitos = String(aluno.telefone||'').replace(/\D/g,'');
+  let telFmt = '';
+  if (telDigitos.length === 11) telFmt = '(' + telDigitos.slice(0,2) + ') ' + telDigitos.slice(2,7) + '-' + telDigitos.slice(7);
+  else if (telDigitos.length === 10) telFmt = '(' + telDigitos.slice(0,2) + ') ' + telDigitos.slice(2,6) + '-' + telDigitos.slice(6);
+  const linhaFone = telFmt ? '*WhatsApp:* +55' + telDigitos + ' | ' + telFmt + '\n' : '';
   return linhaFone +
     'Olá, ' + primeiroNome + '! 😊\n\n' +
     'Seguem os boletos referentes ao seu plano ' + planoLabel.toLowerCase() + ' no LCA Studio de Pilates.\n\n' +
