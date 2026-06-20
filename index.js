@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 9.5 - corrigida deteccao local de 'emitir boletos Nome': agora usa encontrarAluno (que trata ambiguidade) em vez de loop proprio que pegava o primeiro da lista. 'emitir boletos katia leal' agora encontra a Leal diretamente sem ambiguidade
+// Versão 9.6 - corrigido 'reenviar boletos katia leal' que pegava a Gonçalves (mesmo bug da detecção local com loop proprio); PDF: busca link individualmente via GET /cobrancas/{cod} se nao veio na criacao (Inter demora ~1.5s para gerar)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '9.5'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '9.6'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1123,13 +1123,13 @@ async function processarComIA(texto, dados, mes) {
       tL.includes('boleto')) {
     const palavrasIgnorar = ['reenviar','enviar','mandar','boleto','boletos','do','da','de','para','os','inter'];
     const palavras = tL.split(/\s+/).filter(p => p.length > 2 && !palavrasIgnorar.includes(p));
-    let alunoReenv = null;
-    for (const palavra of palavras) {
-      const al = dados.alunos.find(a => a.nome.toLowerCase().includes(palavra));
-      if (al) { alunoReenv = al; break; }
-    }
-    return { tipo: 'acao', intencao: 'inter_reenviar_boletos',
-      params: alunoReenv ? { aluno_id: alunoReenv.id, aluno_nome: alunoReenv.nome } : {} };
+    const nomeCandidato = palavras.join(' ');
+    const alunoReenv = nomeCandidato ? encontrarAluno(dados, { aluno_nome: nomeCandidato }) : null;
+    // Se ambiguidade, passa só o nome — o handler vai pedir confirmação
+    const paramsReenv = Array.isArray(alunoReenv)
+      ? { aluno_nome: nomeCandidato }
+      : (alunoReenv ? { aluno_id: alunoReenv.id, aluno_nome: alunoReenv.nome } : {});
+    return { tipo: 'acao', intencao: 'inter_reenviar_boletos', params: paramsReenv };
   }
   if ((tL.includes('emitir') || tL.includes('gerar')) && (tL.includes('plano') || tL.includes('boleto') || tL.includes('boletos')) &&
       !tL.includes('mensal') && !tL.includes('reenviar') && !tL.includes('cancelar')) {
@@ -2228,7 +2228,16 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           continue;
         }
         const cod  = result?.codigoSolicitacao || result?.nossoNumero || '?';
-        const link = result?.linkVisualizacaoBoleto || result?.link || '';
+        let link = result?.linkVisualizacaoBoleto || result?.link || '';
+        // O Inter às vezes não retorna o link imediatamente — buscar individualmente
+        if (!link && result?.codigoSolicitacao) {
+          try {
+            await new Promise(r => setTimeout(r, 1500)); // aguardar 1.5s para o Inter gerar
+            const token = await interGetToken('boleto-cobranca.read');
+            const rBol = await interReq('/cobranca/v3/cobrancas/' + result.codigoSolicitacao, 'GET', null, token);
+            link = rBol?.data?.linkVisualizacaoBoleto || rBol?.data?.link || '';
+          } catch(eLinkBol) { console.warn('[PDF] erro ao buscar link:', eLinkBol.message); }
+        }
         // Gravar boleto na tabela e em pagamentos_pendentes do aluno
         if (result?.codigoSolicitacao) {
           await gravarBoleto(aluno.id, mesStr, result.codigoSolicitacao, gerarSeuNumero(aluno.id, mesStr), valor, dtVenc.toISOString().slice(0,10));
