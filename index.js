@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 9.2 - 'emitir boletos Nome' agora detecta inter_emitir_plano (antes ia pro Gemini que classificava como inter_emitir_boleto avulso, gerando data/valor errados). Condicao ampliada: inclui 'boleto/boletos' alem de 'plano', e so redireciona se aluno tem plano tri/semestral ou texto tem 'plano'
+// Versão 9.4 - revertido gerarSeuNumero para formato original LCA-{id}-{YYYY-MM} (a mudança para compacto foi desnecessária e causou inconsistência). Fallback compacto só se id futuro crescer e estourar 15 chars. parseSeuNumero lê ambos os formatos para compatibilidade com boletos já emitidos
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '9.2'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '9.4'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -255,6 +255,13 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
 // Formatos suportados:
 //  - 'LCA-{id}-{YYYY-MM}'  → boletos emitidos pelo bot (id + mês)
 //  - '{numero}'            → boletos antigos (pré-bot): o seuNumero é o próprio ID do aluno (coluna # da aba Alunos)
+
+// Retorna mensagem de ambiguidade se encontrarAluno retornou array, ou null se ok.
+function ambiguidade(aluno, nomeBuscado) {
+  if (!Array.isArray(aluno)) return null;
+  return '⚠️ Há ' + aluno.length + ' alunos ativos com esse nome. Especifique o nome completo:\n' +
+    aluno.map((a,i) => (i+1) + '. ' + a.nome + ' (id ' + a.id + ')').join('\n');
+}
 // Retorna { alunoId: number|null, mes: string|null }.
 function parseSeuNumero(seuNum) {
   const sn = String(seuNum || '').trim();
@@ -272,11 +279,15 @@ function parseSeuNumero(seuNum) {
   return { alunoId: null, mes: null };
 }
 
-// Gera seuNumero compacto (≤15 chars, exigência do Inter) a partir do id e mês "YYYY-MM".
+// Gera seuNumero no formato original LCA-{id}-{YYYY-MM}, com proteção de 15 chars
+// caso o id cresça muito no futuro (o Inter rejeita seuNumero > 15 chars).
 function gerarSeuNumero(alunoId, mesYYYYMM) {
+  const sn = 'LCA-' + alunoId + '-' + (mesYYYYMM || '');
+  if (sn.length <= 15) return sn;
+  // Fallback compacto só se necessário (id muito grande): LCA-{id}-{YYMM}
   const m = String(mesYYYYMM||'').match(/^(\d{4})-(\d{2})$/);
-  if (m) return 'LCA-' + alunoId + '-' + m[1].slice(2) + m[2]; // LCA-{id}-{YYMM}
-  return ('LCA-' + alunoId + '-' + String(mesYYYYMM||'').replace(/\D/g,'')).slice(0,15);
+  if (m) return ('LCA-' + alunoId + '-' + m[1].slice(2) + m[2]).slice(0,15);
+  return sn.slice(0,15);
 }
 
 async function interSaldo() {
@@ -666,8 +677,11 @@ function encontrarAluno(dados, p) {
     });
     if (exatos.length) m = exatos;
   }
-  // Preferir ativo
-  return m.find(a => a.ativo === 'SIM') || m[0];
+  // Preferir ativo. Se ainda há ambiguidade entre ativos, retorna array para o chamador tratar.
+  const ativos = m.filter(a => a.ativo === 'SIM');
+  if (ativos.length === 1) return ativos[0];
+  if (ativos.length > 1) return ativos; // ambiguidade — chamador deve pedir confirmação
+  return m[0];
 }
 
 // Registra uma operação na tabela 'log_inter' do Supabase (auditoria exibida na aba API Inter do site).
@@ -1313,7 +1327,9 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'confirmar_pagamento') {
     const aluno = encontrarAluno(dados, p);
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     if (!p?.valor) return '❌ Informe o valor.';
     const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{});
     pags[mes] = p.valor;
@@ -1344,7 +1360,9 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'desfazer_pagamento') {
     const aluno = encontrarAluno(dados, p);
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const pags = Object.assign({}, typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{});
     const mesD = p?.mes || mes;
     if (!pags[mesD]) return '⚠️ ' + aluno.nome + ' não tem pagamento em ' + mesD + '.';
@@ -1401,7 +1419,9 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'checkin') {
     const aluno = encontrarAluno(dados, p);
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const status  = p?.status_checkin || 'presente';
     const dataCi  = p?.data || new Date().toISOString().slice(0,10);
     const DIAS_PT = ['Dom','Seg','Ter','Qua','Qui','Sex','Sab'];
@@ -1449,7 +1469,9 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'desfazer_checkin') {
     const aluno = encontrarAluno(dados, p);
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const dataCi = p?.data || new Date().toISOString().slice(0,10);
     const ch = (dados.changes?.checkins) || {};
     let removidos = 0;
@@ -1946,7 +1968,9 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'inter_emitir_boleto') {
     const aluno = encontrarAluno(dados, p);
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const hoje = new Date();
     const venc = p?.vencimento || new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10).toISOString().slice(0,10);
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
@@ -2019,7 +2043,9 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 
   if (intencao === 'inter_cobranca_excepcional') {
     const aluno = encontrarAluno(dados, p);
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
     if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Necessário para emitir boleto.';
     const valor = parseFloat(p?.valor) || 0;
@@ -2075,7 +2101,9 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 
   if (intencao === 'inter_emitir_plano') {
     const aluno = encontrarAluno(dados, p);
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
     if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir boletos.';
     if (!cpfValido(cpf)) return '⚠️ O CPF de *' + aluno.nome + '* (' + aluno.cpf + ') parece inválido. O banco recusa CPF com dígito verificador errado. Confira o cadastro.';
@@ -2491,7 +2519,9 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 
   if (intencao === 'inter_cancelar_boleto') {
     const aluno = encontrarAluno(dados, p);
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const mes = p?.mes || new Date().toISOString().slice(0,7);
     try {
       const r = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&mes=eq.' + mes + '&status=eq.aberto&select=id,codigo_solicitacao,valor,vencimento');
@@ -2545,7 +2575,9 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 
   if (intencao === 'calcular_rescisao') {
     const aluno = encontrarAluno(dados, p);
-    if (!aluno) return '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     if (aluno.tipo_plano === 'mensal') return '⚠️ ' + aluno.nome + ' tem plano mensal - não há multa de rescisão. Basta inativar.';
     const DUR = { trimestral:3, semestral:6 };
     const dur = DUR[aluno.tipo_plano]||3;
