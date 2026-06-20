@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 9.6 - corrigido 'reenviar boletos katia leal' que pegava a Gonçalves (mesmo bug da detecção local com loop proprio); PDF: busca link individualmente via GET /cobrancas/{cod} se nao veio na criacao (Inter demora ~1.5s para gerar)
+// Versão 9.8 - reenviar com filtro: 'reenviar boleto katia leal 164' envia só o de R$164; 'reenviar boleto katia leal junho' envia só o de junho; sem filtro envia todos. Detecta valor ou mes no comando
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '9.6'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '9.8'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1125,10 +1125,15 @@ async function processarComIA(texto, dados, mes) {
     const palavras = tL.split(/\s+/).filter(p => p.length > 2 && !palavrasIgnorar.includes(p));
     const nomeCandidato = palavras.join(' ');
     const alunoReenv = nomeCandidato ? encontrarAluno(dados, { aluno_nome: nomeCandidato }) : null;
+    // Detectar filtro: valor numérico (ex: "164") ou mês (ex: "junho") no comando
+    const MESES_NOMES = ['janeiro','fevereiro','março','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+    const filtroVal = tL.match(/\b(\d{2,6}[,.]?\d*)\b/)?.[1] || '';
+    const filtroMes = tL.split(/\s+/).find(w => MESES_NOMES.includes(w)) || '';
+    const filtro = filtroMes || filtroVal;
     // Se ambiguidade, passa só o nome — o handler vai pedir confirmação
     const paramsReenv = Array.isArray(alunoReenv)
-      ? { aluno_nome: nomeCandidato }
-      : (alunoReenv ? { aluno_id: alunoReenv.id, aluno_nome: alunoReenv.nome } : {});
+      ? { aluno_nome: nomeCandidato, filtro }
+      : (alunoReenv ? { aluno_id: alunoReenv.id, aluno_nome: alunoReenv.nome, filtro } : { filtro });
     return { tipo: 'acao', intencao: 'inter_reenviar_boletos', params: paramsReenv };
   }
   if ((tL.includes('emitir') || tL.includes('gerar')) && (tL.includes('plano') || tL.includes('boleto') || tL.includes('boletos')) &&
@@ -2031,8 +2036,11 @@ async function executar(intencao, p, dados, chatId) {
 function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   const primeiroNome = aluno.nome.split(' ')[0];
   const vezes = aluno.vezes_semana || 2;
-  return 'Olá, ' + primeiroNome + '! 😊\n\n' +
-    'Seguem os boletos referentes ao seu plano semestral no LCA Studio de Pilates.\n\n' +
+  const tel = normalizarTelefone ? normalizarTelefone(aluno.telefone) : '';
+  const linhaFone = tel ? '*WhatsApp:* +' + tel + '\n' : '';
+  return linhaFone +
+    'Olá, ' + primeiroNome + '! 😊\n\n' +
+    'Seguem os boletos referentes ao seu plano ' + planoLabel.toLowerCase() + ' no LCA Studio de Pilates.\n\n' +
     '📋 *Plano ' + planoLabel + ' - ' + vezes + 'x por semana*\n' +
     '📅 *Validade: ' + periodoPlano + '*\n' +
     '💰 *' + brl(valor) + '/mês*\n\n' +
@@ -2329,7 +2337,12 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 
   if (intencao === 'inter_reenviar_boletos') {
     const aluno = encontrarAluno(dados, p);
-    if (!aluno) return '❌ Informe o nome do aluno.\nEx: _"reenviar boletos Thalita"_';
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Informe o nome do aluno.\nEx: _"reenviar boletos Thalita"_';
+    // Filtro opcional: valor (ex: "164") ou mês (ex: "junho", "2026-06")
+    const filtro = (p?.filtro || '').toLowerCase().trim();
+    const MESES_NUM = {janeiro:'01',fevereiro:'02',março:'03',marco:'03',abril:'04',maio:'05',junho:'06',julho:'07',agosto:'08',setembro:'09',outubro:'10',novembro:'11',dezembro:'12'};
     try {
       // Buscar na tabela boletos local
       const r = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&select=id,mes,valor,codigo_solicitacao,vencimento,status&order=mes.asc');
@@ -2365,6 +2378,22 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       }
 
       if (!boletos.length) return 'ℹ️ Nenhum boleto encontrado para *' + aluno.nome.split(' ')[0] + '* na tabela local nem na API Inter.';
+
+      // Aplicar filtro por valor ou mês se informado
+      if (filtro) {
+        const filtroNum = parseFloat(filtro.replace(',','.'));
+        const filtroMes = MESES_NUM[filtro] || (filtro.match(/^\d{4}-\d{2}$/) ? filtro.slice(5,7) : null);
+        const boletosFiltrados = boletos.filter(b => {
+          if (!isNaN(filtroNum)) return Math.abs((b.valor||0) - filtroNum) < 1; // por valor
+          if (filtroMes) return (b.mes||'').slice(5,7) === filtroMes;           // por mês
+          return true;
+        });
+        if (!boletosFiltrados.length) {
+          return '⚠️ Nenhum boleto encontrado para *' + aluno.nome.split(' ')[0] + '* com filtro "' + filtro + '".\nBoletos disponíveis: ' +
+            boletos.map(b => b.mes + ' R$' + b.valor).join(', ');
+        }
+        boletos = boletosFiltrados;
+      }
 
       await tgSend(chatId, '📤 Reenviando ' + boletos.length + ' boleto(s) de *' + aluno.nome.split(' ')[0] + '*...');
       const MESES_PT2 = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
