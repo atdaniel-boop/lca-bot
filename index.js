@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 9.4 - revertido gerarSeuNumero para formato original LCA-{id}-{YYYY-MM} (a mudança para compacto foi desnecessária e causou inconsistência). Fallback compacto só se id futuro crescer e estourar 15 chars. parseSeuNumero lê ambos os formatos para compatibilidade com boletos já emitidos
+// Versão 9.5 - corrigida deteccao local de 'emitir boletos Nome': agora usa encontrarAluno (que trata ambiguidade) em vez de loop proprio que pegava o primeiro da lista. 'emitir boletos katia leal' agora encontra a Leal diretamente sem ambiguidade
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '9.4'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '9.5'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1133,17 +1133,17 @@ async function processarComIA(texto, dados, mes) {
   }
   if ((tL.includes('emitir') || tL.includes('gerar')) && (tL.includes('plano') || tL.includes('boleto') || tL.includes('boletos')) &&
       !tL.includes('mensal') && !tL.includes('reenviar') && !tL.includes('cancelar')) {
-    // Extrair nome do aluno do texto
     const palavrasIgnorar = ['emitir','gerar','boleto','boletos','plano','planos','do','da','de','para','inter'];
     const palavras = tL.split(/\s+/).filter(p => p.length > 2 && !palavrasIgnorar.includes(p));
-    let alunoEncontrado = null;
-    for (const palavra of palavras) {
-      const al = dados.alunos.find(a => a.nome.toLowerCase().includes(palavra));
-      if (al) { alunoEncontrado = al; break; }
-    }
-    // Só redireciona para inter_emitir_plano se o aluno tem plano multi-mês (tri/semestral)
-    // ou se o texto inclui "plano" explicitamente. "emitir boletos" sem nome vai pro Gemini decidir.
-    if (alunoEncontrado && (tL.includes('plano') || ['trimestral','semestral'].includes(alunoEncontrado.tipo_plano))) {
+    // Montar nome candidato e usar encontrarAluno (que trata ambiguidade)
+    const nomeCandidato = palavras.join(' ');
+    const alunoEncontrado = nomeCandidato ? encontrarAluno(dados, { aluno_nome: nomeCandidato }) : null;
+    if (alunoEncontrado && (tL.includes('plano') || (!Array.isArray(alunoEncontrado) && ['trimestral','semestral'].includes(alunoEncontrado.tipo_plano)))) {
+      // Se ambiguidade: não passa aluno_id, o handler vai pedir confirmação
+      if (Array.isArray(alunoEncontrado)) {
+        return { tipo: 'acao', intencao: 'inter_emitir_plano',
+                 params: { aluno_nome: nomeCandidato } };
+      }
       return { tipo: 'acao', intencao: 'inter_emitir_plano',
                params: { aluno_id: alunoEncontrado.id, aluno_nome: alunoEncontrado.nome } };
     }
