@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 8.9 - CAUSA REAL provavel do 'Dados invalidos': boletos usavam o mes ATUAL como base, gerando 1o vencimento retroativo (Inter recusa) quando a matricula e futura. Agora usa o mes da data_matricula como base. Tambem: mesStr/seuNumero usam o mes ORIGINAL (evita seuNumero duplicado ao remapear datas passadas); remapeio de data passada usa hoje+2 dias
+// Versão 9.0 - CONFIRMADO via violacao do Inter ('O valor deve ser igual ou maior a data atual'): boletos saiam com vencimento retroativo. Protecao definitiva: a base dos boletos avanca mes a mes ate o 1o vencimento ser hoje ou futuro, independente do fluxo (manual, fila, com ou sem data_matricula/p.mes). Nenhum boleto sai mais no passado
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '8.9'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '9.0'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2103,7 +2103,6 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
     } else if (aluno.data_matricula && /^\d{4}-\d{2}-\d{2}$/.test(aluno.data_matricula)) {
       // Usar o mês da data de matrícula como base (ex: matrícula 10/07 → 1º boleto em julho).
-      // Assim, aluno que começa no futuro não recebe boletos com vencimento retroativo.
       const pm = aluno.data_matricula.split('-');
       anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
     } else {
@@ -2112,6 +2111,22 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     }
 
     const diaVenc = aluno.dia_vencimento || 10;
+
+    // PROTEÇÃO: o Inter recusa boleto com vencimento retroativo ("O valor deve ser igual
+    // ou maior à data atual"). Se o 1º vencimento (base + diaVenc) já passou, avança a base
+    // mês a mês até o 1º vencimento ser hoje ou futuro. Garante que NENHUM boleto saia no passado.
+    {
+      const hojeD = new Date(); hojeD.setHours(0,0,0,0);
+      let primeiroVenc = new Date(anoBase, mesBase, diaVenc);
+      let guard = 0;
+      while (primeiroVenc < hojeD && guard < 24) {
+        mesBase++;
+        if (mesBase > 11) { mesBase = 0; anoBase++; }
+        primeiroVenc = new Date(anoBase, mesBase, diaVenc);
+        guard++;
+      }
+    }
+
     const MESES_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
     const fmtData = d => String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') + '/' + d.getFullYear();
 
