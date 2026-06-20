@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 8.7 - corrige 'Dados invalidos' do Inter ao emitir boleto: sanitiza CEP (vazio/zerado vira 22220000 valido), numero/endereco/nome sem caracteres problematicos, valor arredondado; valida digito do CPF antes (mensagem clara); detecta rejeicao do Inter (sem codigoSolicitacao) e mostra motivo amigavel em vez de seguir como sucesso
+// Versão 8.9 - CAUSA REAL provavel do 'Dados invalidos': boletos usavam o mes ATUAL como base, gerando 1o vencimento retroativo (Inter recusa) quando a matricula e futura. Agora usa o mes da data_matricula como base. Tambem: mesStr/seuNumero usam o mes ORIGINAL (evita seuNumero duplicado ao remapear datas passadas); remapeio de data passada usa hoje+2 dias
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '8.7'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '8.9'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -258,11 +258,25 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
 // Retorna { alunoId: number|null, mes: string|null }.
 function parseSeuNumero(seuNum) {
   const sn = String(seuNum || '').trim();
+  // Formato antigo: LCA-{id}-{YYYY-MM}
   const mLCA = sn.match(/^LCA-(\d+)-(\d{4}-\d{2})$/);
   if (mLCA) return { alunoId: parseInt(mLCA[1]), mes: mLCA[2] };
+  // Formato novo compacto: LCA-{id}-{YYMM} (cabe em 15 chars mesmo com id grande)
+  const mLCAc = sn.match(/^LCA-(\d+)-(\d{2})(\d{2})$/);
+  if (mLCAc) return { alunoId: parseInt(mLCAc[1]), mes: '20' + mLCAc[2] + '-' + mLCAc[3] };
+  // Cobrança excepcional: LCA-{id}-EXC...  (sem mês fixo)
+  const mEXC = sn.match(/^LCA-(\d+)-EXC/);
+  if (mEXC) return { alunoId: parseInt(mEXC[1]), mes: null };
   // Número puro = ID do aluno (boleto antigo). Sem mês embutido — será inferido pelo vencimento.
   if (/^\d+$/.test(sn)) return { alunoId: parseInt(sn), mes: null };
   return { alunoId: null, mes: null };
+}
+
+// Gera seuNumero compacto (≤15 chars, exigência do Inter) a partir do id e mês "YYYY-MM".
+function gerarSeuNumero(alunoId, mesYYYYMM) {
+  const m = String(mesYYYYMM||'').match(/^(\d{4})-(\d{2})$/);
+  if (m) return 'LCA-' + alunoId + '-' + m[1].slice(2) + m[2]; // LCA-{id}-{YYMM}
+  return ('LCA-' + alunoId + '-' + String(mesYYYYMM||'').replace(/\D/g,'')).slice(0,15);
 }
 
 async function interSaldo() {
@@ -398,7 +412,7 @@ async function interEmitirBoleto(dados) {
   const nomeLimpo = String(dados.nomePagador||'').replace(/[^0-9A-Za-zÀ-ÿ. -]/g,'').trim().slice(0,100);
   const valorNum = Math.round((parseFloat(dados.valor)||0)*100)/100;
   const body = {
-    seuNumero:    dados.seuNumero || ('LCA-' + Date.now()),
+    seuNumero:    (dados.seuNumero || ('LCA-' + Date.now())).slice(0,15),
     valorNominal: valorNum,
     dataVencimento: dados.vencimento, // YYYY-MM-DD
     numDiasAgenda: 30,
@@ -1959,13 +1973,13 @@ async function executar(intencao, p, dados, chatId) {
         complemento: (aluno.complemento && aluno.complemento !== 'null') ? aluno.complemento : undefined,
         descricao: 'Mensalidade Pilates LCA Studio - ' + aluno.nome.split(' ')[0],
         referencia: new Date().toLocaleDateString('pt-BR'),
-        seuNumero: 'LCA-' + aluno.id + '-' + mes
+        seuNumero: gerarSeuNumero(aluno.id, mes)
       });
       if (result?.codigoSolicitacao || result?.nossoNumero) {
         const cod = result.codigoSolicitacao || result.nossoNumero;
         const link = result.linkVisualizacaoBoleto || result.link || '';
         // Gravar boleto na tabela boletos
-        await gravarBoleto(aluno.id, mes, cod, 'LCA-' + aluno.id + '-' + mes, valorBoleto, venc);
+        await gravarBoleto(aluno.id, mes, cod, gerarSeuNumero(aluno.id, mes), valorBoleto, venc);
         const mesNomeAvulso = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt(mes.slice(5,7))-1];
         const anoAvulso = mes.slice(0,4);
         const nomeArq = 'Boleto - ' + aluno.nome.split(' ')[0] + ' - ' + mesNomeAvulso + ' ' + anoAvulso + '.pdf';
@@ -2032,7 +2046,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         numero: endNumero, complemento: endComplemento || undefined, bairro: endBairro || undefined,
         descricao: descricao,
         referencia: 'Cobranca excepcional',
-        seuNumero: 'LCA-' + aluno.id + '-EXC' + Date.now().toString().slice(-6)
+        seuNumero: ('LCA-' + aluno.id + 'E' + Date.now().toString().slice(-5)).slice(0,15)
       });
       if (res?.codigoSolicitacao) {
         await gravarBoleto(aluno.id, chaveExc, res.codigoSolicitacao, 'LCA-' + aluno.id + '-EXC', valor, vencimento);
@@ -2087,6 +2101,11 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     if (p?.mes) {
       const pm = p.mes.split('-');
       anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
+    } else if (aluno.data_matricula && /^\d{4}-\d{2}-\d{2}$/.test(aluno.data_matricula)) {
+      // Usar o mês da data de matrícula como base (ex: matrícula 10/07 → 1º boleto em julho).
+      // Assim, aluno que começa no futuro não recebe boletos com vencimento retroativo.
+      const pm = aluno.data_matricula.split('-');
+      anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
     } else {
       const hoje = new Date();
       anoBase = hoje.getFullYear(); mesBase = hoje.getMonth();
@@ -2117,16 +2136,17 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 
     for (let i = 0; i < dur; i++) {
       let dtVenc  = new Date(anoBase, mesBase + i, diaVenc);
-      // Se a data de vencimento já passou, usar hoje + 1 dia
+      // mês de referência ORIGINAL (para chave/seuNumero únicos, mesmo se a data for remapeada)
+      const dtOriginal = new Date(anoBase, mesBase + i, diaVenc);
+      const mesStr  = dtOriginal.getFullYear() + '-' + String(dtOriginal.getMonth()+1).padStart(2,'0');
+      // Se a data de vencimento já passou, usar hoje + 2 dias (Inter recusa data retroativa)
       const hojeDate = new Date(); hojeDate.setHours(0,0,0,0);
       if (dtVenc < hojeDate) {
-        dtVenc = new Date(hojeDate.getTime() + 24*60*60*1000);
-        console.log('[PLANO] Boleto ' + i+1 + ': data ' + new Date(anoBase, mesBase + i, diaVenc).toISOString().slice(0,10) + ' já passou - usando ' + dtVenc.toISOString().slice(0,10));
+        dtVenc = new Date(hojeDate.getTime() + 2*24*60*60*1000);
+        console.log('[PLANO] Boleto ' + (i+1) + ': venc original ' + dtOriginal.toISOString().slice(0,10) + ' já passou - usando ' + dtVenc.toISOString().slice(0,10));
       }
       const anoVenc = dtVenc.getFullYear();
-      const mesVenc = String(dtVenc.getMonth()+1).padStart(2,'0');
-      const mesStr  = anoVenc + '-' + mesVenc;
-      const mesNome = MESES_PT[dtVenc.getMonth()];
+      const mesNome = MESES_PT[dtOriginal.getMonth()];
       const numBoleto = i + 1;
 
       const descricao =
@@ -2147,7 +2167,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           bairro: endBairro || undefined,
           descricao,
           referencia: 'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc,
-          seuNumero: 'LCA-' + aluno.id + '-' + mesStr
+          seuNumero: gerarSeuNumero(aluno.id, mesStr)
         });
         // Se o Inter rejeitou (sem codigoSolicitacao), tratar como erro com mensagem clara
         if (!result?.codigoSolicitacao) {
@@ -2163,7 +2183,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         const link = result?.linkVisualizacaoBoleto || result?.link || '';
         // Gravar boleto na tabela e em pagamentos_pendentes do aluno
         if (result?.codigoSolicitacao) {
-          await gravarBoleto(aluno.id, mesStr, result.codigoSolicitacao, 'LCA-' + aluno.id + '-' + mesStr, valor, dtVenc.toISOString().slice(0,10));
+          await gravarBoleto(aluno.id, mesStr, result.codigoSolicitacao, gerarSeuNumero(aluno.id, mesStr), valor, dtVenc.toISOString().slice(0,10));
         }
         // Registrar em pagamentos_pendentes para aparecer no histórico financeiro
         try {
@@ -2392,7 +2412,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         const diaVenc = aluno.dia_vencimento || 10;
         const [ano, mes2] = mesProRata.split('-').map(Number);
         const dtVenc = new Date(ano, mes2-1, diaVenc);
-        const seuNum = 'LCA-' + aluno.id + '-' + mesProRata + '-PR';
+        const seuNum = (gerarSeuNumero(aluno.id, mesProRata) + 'P').slice(0,15);
         const descPR = 'LCA Pilates - Pró-rata ' + (aluno.nome.split(' ')[0]) + ' ' + (mes2+'/'+ano);
         await interEmitirBoleto({
           seuNumero: seuNum, valor: proRata,
@@ -2416,7 +2436,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       try {
         const [ano, mesN] = mes.split('-').map(Number);
         const dtVenc = new Date(ano, mesN-1, diaVencNovo);
-        const seuNum = 'LCA-' + aluno.id + '-' + mes;
+        const seuNum = gerarSeuNumero(aluno.id, mes);
         const desc = 'LCA Pilates - ' + DUR_LABEL[novoPlano] + ' ' + novoFreq + 'x - ' + aluno.nome.split(' ')[0];
         await interEmitirBoleto({
           seuNumero: seuNum, valor: novoValor,
@@ -3760,8 +3780,9 @@ async function main() {
 
     } else if (req.method === 'OPTIONS') {
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Comando-Token');
       res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+      res.setHeader('Access-Control-Max-Age', '86400');
       res.writeHead(204);
       res.end();
     } else {
