@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 9.1 - log completo de rejeicao Inter: BODY ENVIADO e RESPOSTA INTER completa (sem corte) para diagnostico definitivo; log da base calculada pelo loop de protecao de data
+// Versão 9.2 - 'emitir boletos Nome' agora detecta inter_emitir_plano (antes ia pro Gemini que classificava como inter_emitir_boleto avulso, gerando data/valor errados). Condicao ampliada: inclui 'boleto/boletos' alem de 'plano', e so redireciona se aluno tem plano tri/semestral ou texto tem 'plano'
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '9.1'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '9.2'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1117,8 +1117,8 @@ async function processarComIA(texto, dados, mes) {
     return { tipo: 'acao', intencao: 'inter_reenviar_boletos',
       params: alunoReenv ? { aluno_id: alunoReenv.id, aluno_nome: alunoReenv.nome } : {} };
   }
-  if ((tL.includes('emitir') || tL.includes('gerar')) && tL.includes('plano') &&
-      !tL.includes('mensal')) {
+  if ((tL.includes('emitir') || tL.includes('gerar')) && (tL.includes('plano') || tL.includes('boleto') || tL.includes('boletos')) &&
+      !tL.includes('mensal') && !tL.includes('reenviar') && !tL.includes('cancelar')) {
     // Extrair nome do aluno do texto
     const palavrasIgnorar = ['emitir','gerar','boleto','boletos','plano','planos','do','da','de','para','inter'];
     const palavras = tL.split(/\s+/).filter(p => p.length > 2 && !palavrasIgnorar.includes(p));
@@ -1127,10 +1127,12 @@ async function processarComIA(texto, dados, mes) {
       const al = dados.alunos.find(a => a.nome.toLowerCase().includes(palavra));
       if (al) { alunoEncontrado = al; break; }
     }
-    const paramsPlano = alunoEncontrado
-      ? { aluno_id: alunoEncontrado.id, aluno_nome: alunoEncontrado.nome }
-      : {};
-    return { tipo: 'acao', intencao: 'inter_emitir_plano', params: paramsPlano };
+    // Só redireciona para inter_emitir_plano se o aluno tem plano multi-mês (tri/semestral)
+    // ou se o texto inclui "plano" explicitamente. "emitir boletos" sem nome vai pro Gemini decidir.
+    if (alunoEncontrado && (tL.includes('plano') || ['trimestral','semestral'].includes(alunoEncontrado.tipo_plano))) {
+      return { tipo: 'acao', intencao: 'inter_emitir_plano',
+               params: { aluno_id: alunoEncontrado.id, aluno_nome: alunoEncontrado.nome } };
+    }
   }
   // Boletos vencidos/atrasados — detectar independente de mencionar "inter"
   const temBoleto = tL.includes('boleto') || tL.includes('cobrança') || tL.includes('cobranca');
