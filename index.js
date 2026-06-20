@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 10.9 - recuperar_cpfs: agora busca TODAS as cobranças do Inter (últimos 2 anos) em vez de depender da tabela boletos (que tinha só 3 registros). Cruza por nome normalizado. Multa TAXAMENSAL sem underline.
+// Versão 11.0 - removidos campos multa/mora do payload (Inter rejeitava em todas as variações testadas). Configurar multa 2% e juros 1%/mês diretamente no portal Inter (Cobranças > Configurações da carteira)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '10.9'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.0'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -427,11 +427,6 @@ async function interEmitirBoleto(dados) {
     valorNominal: valorNum,
     dataVencimento: dados.vencimento, // YYYY-MM-DD
     numDiasAgenda: 30,
-    // Multa e juros só aplicáveis quando o vencimento é futuro
-    ...(new Date(dados.vencimento) >= new Date(new Date().toISOString().slice(0,10)) ? {
-      multa: { codigoMulta: 'PERCENTUAL', taxa: 2.00 },
-      mora:  { codigoMora: 'TAXAMENSAL', taxa: 1.00 }
-    } : {}),
     pagador: {
       cpfCnpj:    cpfLimpo,
       tipoPessoa: cpfLimpo.length === 11 ? 'FISICA' : 'JURIDICA',
