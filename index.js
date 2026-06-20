@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 10.2 - telefone no aniversário normalizado igual ao site: 55+DDD+numero com formato (DDD) XXXXX-XXXX. Antes concatenava 55+digitos sem verificar DDD
+// Versão 10.3 - novo comando 'recuperar cpfs': varre boletos no Supabase, consulta cada um no Inter, extrai CPF do pagador e gera SQL de UPDATE para restaurar CPFs perdidos
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '10.2'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '10.3'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1117,6 +1117,10 @@ async function processarComIA(texto, dados, mes) {
   if (tL === 'confirmar correcao boletos' || tL === 'confirmar correção boletos') {
     return { tipo: 'acao', intencao: 'corrigir_boletos_aplicar', params: {} };
   }
+  if (tL.includes('recuperar') && tL.includes('cpf')) {
+    return { tipo: 'acao', intencao: 'recuperar_cpfs', params: {} };
+  }
+
   if (temInter && (tL.includes('saldo') || tL.includes('quanto tem'))) {
     return { tipo: 'acao', intencao: 'inter_saldo', params: {} };
   }
@@ -1503,6 +1507,52 @@ async function executar(intencao, p, dados, chatId) {
     if (!removidos) return '⚠️ Nenhum check-in encontrado para *' + aluno.nome + '* em ' + dataCi + '.';
     if (dados.changes) { dados.changes.checkins = ch; await saveChanges(dados.changes); }
     return '✅ Check-in desfeito!\n*' + aluno.nome + '* - ' + dataCi.slice(8) + '/' + dataCi.slice(5,7);
+  }
+
+  if (intencao === 'recuperar_cpfs') {
+    // Varre boletos no Supabase, consulta cada um no Inter, extrai CPF do pagador,
+    // e gera SQL de UPDATE para restaurar os CPFs perdidos.
+    try {
+      await tgSend(chatId, '⏳ Buscando CPFs dos pagadores no Banco Inter...\n(pode demorar 1-2 minutos)');
+      const token = await interGetToken('boleto-cobranca.read');
+      // Buscar todos os boletos com codigo_solicitacao
+      const rBols = await sbGet('boletos', 'select=id,aluno_id,codigo_solicitacao,seu_numero&order=aluno_id.asc');
+      const boletos = Array.isArray(rBols) ? rBols : (rBols?.data || []);
+      // Mapear aluno_id → CPF (um por aluno, do primeiro boleto que retornar)
+      const cpfPorAluno = {};
+      let consultados = 0, encontrados = 0;
+      for (const b of boletos) {
+        if (!b.codigo_solicitacao || cpfPorAluno[b.aluno_id] !== undefined) continue;
+        try {
+          await new Promise(r => setTimeout(r, 300)); // evitar rate limit
+          const rD = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao, 'GET', null, token);
+          const cpf = rD?.data?.pagador?.cpfCnpj || '';
+          cpfPorAluno[b.aluno_id] = cpf ? cpf.replace(/\D/g,'') : '';
+          if (cpf) encontrados++;
+          consultados++;
+        } catch(eD) { cpfPorAluno[b.aluno_id] = ''; }
+      }
+      // Cruzar com alunos sem CPF
+      const rAlunos = await sbGet('alunos', "select=id,nome,cpf&order=id.asc");
+      const alunos = Array.isArray(rAlunos) ? rAlunos : (rAlunos?.data || []);
+      const semCpf = alunos.filter(a => !a.cpf || a.cpf.trim() === '');
+      const atualizacoes = semCpf
+        .filter(a => cpfPorAluno[a.id])
+        .map(a => ({ id: a.id, nome: a.nome, cpf: cpfPorAluno[a.id] }));
+      if (!atualizacoes.length) {
+        return '⚠️ Nenhum CPF recuperado. ' + consultados + ' boletos consultados, ' + encontrados + ' com CPF.\nAlunos sem CPF: ' + semCpf.length;
+      }
+      // Gerar SQL
+      const sql = atualizacoes.map(a =>
+        "UPDATE alunos SET cpf='" + a.cpf + "' WHERE id=" + a.id + '; -- ' + a.nome
+      ).join('\n');
+      const resumo = '✅ CPFs recuperados do Inter: ' + atualizacoes.length + ' aluno(s)\n\n' +
+        atualizacoes.map(a => '• ' + a.nome + ': ' + a.cpf).join('\n') +
+        '\n\nSQL gerado (rode no Supabase):\n```\n' + sql + '\n```';
+      return resumo;
+    } catch(eRec) {
+      return '❌ Erro ao recuperar CPFs: ' + eRec.message;
+    }
   }
 
   if (intencao === 'inter_saldo') {
