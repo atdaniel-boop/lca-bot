@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.0 - removidos campos multa/mora do payload (Inter rejeitava em todas as variações testadas). Configurar multa 2% e juros 1%/mês diretamente no portal Inter (Cobranças > Configurações da carteira)
+// Versão 11.1 - boleto avulso: usa chave 'YYYY-MM-avNNNNN' e seuNumero 'LCA-{id}-YYYYMMAi' para nao colidir com boletos do plano no mesmo mes. Cancelamento: aceita filtro por valor ou mes, lista os abertos quando ha ambiguidade
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.0'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.1'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1113,6 +1113,24 @@ async function processarComIA(texto, dados, mes) {
     return { tipo: 'acao', intencao: 'recuperar_cpfs', params: {} };
   }
 
+  if (tL.includes('cancelar') && tL.includes('boleto')) {
+    const palavrasIgnorar = ['cancelar','boleto','boletos','do','da','de','para','os','inter'];
+    const MESES_NOMES = ['janeiro','fevereiro','março','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+    const MESES_NUM = {janeiro:'01',fevereiro:'02',março:'03',marco:'03',abril:'04',maio:'05',junho:'06',julho:'07',agosto:'08',setembro:'09',outubro:'10',novembro:'11',dezembro:'12'};
+    const filtroMesNome = tL.split(/\s+/).find(w => MESES_NOMES.includes(w)) || '';
+    const filtroValMatch = tL.match(/\b(\d{2,6}(?:[,.]\d+)?)\b/);
+    const filtroVal = filtroValMatch ? filtroValMatch[1].replace(',','.') : '';
+    const filtroMes = filtroMesNome ? (new Date().getFullYear() + '-' + MESES_NUM[filtroMesNome]) : '';
+    const tLsem = tL.replace(filtroMesNome,'').replace(filtroVal,'').replace(/\s+/g,' ').trim();
+    const palavras = tLsem.split(/\s+/).filter(p => p.length > 2 && !palavrasIgnorar.includes(p));
+    const nomeCandidato = palavras.join(' ');
+    const alunoCanc = nomeCandidato ? encontrarAluno(dados, { aluno_nome: nomeCandidato }) : null;
+    const paramsCanc = Array.isArray(alunoCanc)
+      ? { aluno_nome: nomeCandidato, mes: filtroMes, valor: filtroVal }
+      : (alunoCanc ? { aluno_id: alunoCanc.id, aluno_nome: alunoCanc.nome, mes: filtroMes, valor: filtroVal } : { mes: filtroMes, valor: filtroVal });
+    return { tipo: 'acao', intencao: 'inter_cancelar_boleto', params: paramsCanc };
+  }
+
   if (temInter && (tL.includes('saldo') || tL.includes('quanto tem'))) {
     return { tipo: 'acao', intencao: 'inter_saldo', params: {} };
   }
@@ -2054,6 +2072,11 @@ async function executar(intencao, p, dados, chatId) {
       ctx[chatId] = { intencao: 'inter_emitir_boleto', aluno_id: aluno.id, aluno_nome: aluno.nome, aguardando: 'valor', mes };
       return '⚠️ Não encontrei o valor do plano de *' + aluno.nome.split(' ')[0] + '*.\nQual o valor? (ex: 329)';
     }
+    // Usar o mês do vencimento real como chave (evita seuNumero com mês errado)
+    const mesVencAvulso = venc.slice(0,7); // YYYY-MM do vencimento
+    // Chave única para boleto avulso: YYYY-MM-av-TIMESTAMP (não colide com boletos do plano)
+    const chaveAvulso = mesVencAvulso + '-av' + Date.now().toString().slice(-5);
+    const seuNumAvulso = ('LCA-' + aluno.id + '-' + mesVencAvulso.replace('-','') + 'A').slice(0,15);
     try {
       const result = await interEmitirBoleto({
         valor: valorBoleto, vencimento: venc,
@@ -2067,15 +2090,14 @@ async function executar(intencao, p, dados, chatId) {
         complemento: (aluno.complemento && aluno.complemento !== 'null') ? aluno.complemento : undefined,
         descricao: 'Mensalidade Pilates LCA Studio - ' + aluno.nome.split(' ')[0],
         referencia: new Date().toLocaleDateString('pt-BR'),
-        seuNumero: gerarSeuNumero(aluno.id, mes)
+        seuNumero: seuNumAvulso
       });
       if (result?.codigoSolicitacao || result?.nossoNumero) {
         const cod = result.codigoSolicitacao || result.nossoNumero;
         const link = result.linkVisualizacaoBoleto || result.link || '';
-        // Gravar boleto na tabela boletos
-        await gravarBoleto(aluno.id, mes, cod, gerarSeuNumero(aluno.id, mes), valorBoleto, venc);
-        const mesNomeAvulso = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt(mes.slice(5,7))-1];
-        const anoAvulso = mes.slice(0,4);
+        await gravarBoleto(aluno.id, chaveAvulso, cod, seuNumAvulso, valorBoleto, venc);
+        const mesNomeAvulso = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt(mesVencAvulso.slice(5,7))-1];
+        const anoAvulso = mesVencAvulso.slice(0,4);
         const nomeArq = 'Boleto - ' + aluno.nome.split(' ')[0] + ' - ' + mesNomeAvulso + ' ' + anoAvulso + '.pdf';
         const caption = '✅ *Boleto emitido!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorBoleto) + '\n📅 Vencimento: ' + venc.split('-').reverse().join('/') + '\n🔑 Código: ' + cod;
         if (link) {
@@ -2626,17 +2648,39 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
       : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const mes = p?.mes || new Date().toISOString().slice(0,7);
+    const filtroValor = p?.valor ? parseFloat(p.valor) : null;
     try {
-      const r = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&mes=eq.' + mes + '&status=eq.aberto&select=id,codigo_solicitacao,valor,vencimento');
-      const boletos = Array.isArray(r) ? r : (r?.data || []);
-      if (!boletos.length) return 'ℹ️ Nenhum boleto em aberto para *' + aluno.nome.split(' ')[0] + '* em ' + mes + '.';
+      // Buscar todos os boletos em aberto do aluno
+      const r = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.aberto&select=id,mes,codigo_solicitacao,valor,vencimento&order=vencimento.asc');
+      let boletos = Array.isArray(r) ? r : (r?.data || []);
+      if (!boletos.length) return 'ℹ️ Nenhum boleto em aberto para *' + aluno.nome.split(' ')[0] + '*.';
+      // Filtrar: por mês específico se informado, ou por valor se informado
+      let boletosFiltrados = boletos;
+      if (filtroValor) {
+        boletosFiltrados = boletos.filter(b => Math.abs((b.valor||0) - filtroValor) < 1);
+      } else if (p?.mes) {
+        boletosFiltrados = boletos.filter(b => (b.mes||'').startsWith(mes));
+      }
+      if (!boletosFiltrados.length) {
+        // Mostrar o que existe para o usuário escolher
+        return 'ℹ️ Nenhum boleto encontrado com esse filtro.\nBoletos em aberto de *' + aluno.nome.split(' ')[0] + '*:\n' +
+          boletos.map(b => '• ' + (b.mes||'?') + ' R$' + b.valor + ' vence ' + (b.vencimento||'?').split('-').reverse().join('/')).join('\n') +
+          '\n\nUse: _"cancelar boleto ' + aluno.nome.split(' ')[0] + ' julho"_ ou _"cancelar boleto ' + aluno.nome.split(' ')[0] + ' 329"_';
+      }
+      // Se mais de 1 boleto e sem filtro específico, perguntar
+      if (boletosFiltrados.length > 1 && !filtroValor && !p?.mes) {
+        return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + boletosFiltrados.length + ' boletos em aberto. Qual cancelar?\n' +
+          boletosFiltrados.map(b => '• ' + (b.mes||'?') + ' R$' + b.valor + ' vence ' + (b.vencimento||'?').split('-').reverse().join('/')).join('\n') +
+          '\n\nUse: _"cancelar boleto ' + aluno.nome.split(' ')[0] + ' julho"_ ou _"cancelar boleto ' + aluno.nome.split(' ')[0] + ' 100"_';
+      }
       let cancelados = 0;
-      for (const b of boletos) {
+      for (const b of boletosFiltrados) {
         await interCancelarBoleto(b.codigo_solicitacao);
         await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
         cancelados++;
       }
-      return '✅ *' + cancelados + ' boleto(s) cancelado(s) no Inter!*\n\n👤 ' + aluno.nome + '\n📅 Mês: ' + mes + '\n\n_Pagamento recebido por outro meio._';
+      return '✅ *' + cancelados + ' boleto(s) cancelado(s) no Inter!*\n\n👤 ' + aluno.nome + '\n' +
+        boletosFiltrados.map(b => '• ' + (b.mes||'?') + ' R$' + b.valor).join('\n');
     } catch(e) {
       return '❌ Erro ao cancelar boleto: ' + e.message;
     }
