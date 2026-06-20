@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 9.8 - reenviar com filtro: 'reenviar boleto katia leal 164' envia só o de R$164; 'reenviar boleto katia leal junho' envia só o de junho; sem filtro envia todos. Detecta valor ou mes no comando
+// Versão 9.9 - corrigido reenviar com filtro: mes/valor era incluido no nomeCandidato causando 'aluno nao encontrado'. Agora extrai o filtro primeiro, remove do texto, depois busca o aluno pelo nome limpo
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '9.8'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '9.9'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1122,15 +1122,17 @@ async function processarComIA(texto, dados, mes) {
   if ((tL.includes('reenviar') || tL.includes('enviar') || tL.includes('mandar')) &&
       tL.includes('boleto')) {
     const palavrasIgnorar = ['reenviar','enviar','mandar','boleto','boletos','do','da','de','para','os','inter'];
-    const palavras = tL.split(/\s+/).filter(p => p.length > 2 && !palavrasIgnorar.includes(p));
+    const MESES_NOMES = ['janeiro','fevereiro','março','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+    // Extrair filtro ANTES de montar o nome (para não contaminar a busca do aluno)
+    const filtroMes = tL.split(/\s+/).find(w => MESES_NOMES.includes(w)) || '';
+    const filtroValMatch = tL.match(/\b(\d{3,6}(?:[,.]\d+)?)\b/);
+    const filtroVal = filtroValMatch ? filtroValMatch[1] : '';
+    const filtro = filtroMes || filtroVal;
+    // Remover o filtro do texto antes de extrair o nome
+    const tLsemFiltro = filtro ? tL.replace(filtro, '').replace(/\s+/g,' ').trim() : tL;
+    const palavras = tLsemFiltro.split(/\s+/).filter(p => p.length > 2 && !palavrasIgnorar.includes(p));
     const nomeCandidato = palavras.join(' ');
     const alunoReenv = nomeCandidato ? encontrarAluno(dados, { aluno_nome: nomeCandidato }) : null;
-    // Detectar filtro: valor numérico (ex: "164") ou mês (ex: "junho") no comando
-    const MESES_NOMES = ['janeiro','fevereiro','março','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
-    const filtroVal = tL.match(/\b(\d{2,6}[,.]?\d*)\b/)?.[1] || '';
-    const filtroMes = tL.split(/\s+/).find(w => MESES_NOMES.includes(w)) || '';
-    const filtro = filtroMes || filtroVal;
-    // Se ambiguidade, passa só o nome — o handler vai pedir confirmação
     const paramsReenv = Array.isArray(alunoReenv)
       ? { aluno_nome: nomeCandidato, filtro }
       : (alunoReenv ? { aluno_id: alunoReenv.id, aluno_nome: alunoReenv.nome, filtro } : { filtro });
