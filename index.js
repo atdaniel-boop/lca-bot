@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 10.5 - multa/mora: taxa como string '2.00'/'1.00' e codigoMora TAXA_MENSAL (Inter rejeitava numero e TAXAMENSAL sem underline)
+// Versão 10.7 - boleto avulso: vencimento automatico agora avanca para o proximo mes se o dia ja passou (igual ao plano); recuperar_cpfs: path correto rD.data.cobranca.pagador.cpfCnpj; multa/mora so incluidos quando vencimento e futuro
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '10.5'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '10.7'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -427,14 +427,11 @@ async function interEmitirBoleto(dados) {
     valorNominal: valorNum,
     dataVencimento: dados.vencimento, // YYYY-MM-DD
     numDiasAgenda: 30,
-    multa: {
-      codigoMulta: 'PERCENTUAL',
-      taxa: '2.00'
-    },
-    mora: {
-      codigoMora: 'TAXA_MENSAL',
-      taxa: '1.00'
-    },
+    // Multa e juros só aplicáveis quando o vencimento é futuro
+    ...(new Date(dados.vencimento) >= new Date(new Date().toISOString().slice(0,10)) ? {
+      multa: { codigoMulta: 'PERCENTUAL', data: dados.vencimento, taxa: 2.00 },
+      mora:  { codigoMora:  'TAXA_MENSAL', data: dados.vencimento, taxa: 1.00 }
+    } : {}),
     pagador: {
       cpfCnpj:    cpfLimpo,
       tipoPessoa: cpfLimpo.length === 11 ? 'FISICA' : 'JURIDICA',
@@ -1527,7 +1524,7 @@ async function executar(intencao, p, dados, chatId) {
           await new Promise(r => setTimeout(r, 300)); // evitar rate limit
           const rD = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao, 'GET', null, token);
           if (consultados === 0) console.log('[recuperar_cpfs] estrutura resposta Inter:', JSON.stringify(rD?.data || {}).slice(0, 500));
-          const cpf = rD?.data?.pagador?.cpfCnpj || rD?.data?.cpfCnpj || rD?.data?.cobranca?.pagador?.cpfCnpj || '';
+          const cpf = rD?.data?.cobranca?.pagador?.cpfCnpj || rD?.data?.pagador?.cpfCnpj || '';
           cpfPorAluno[b.aluno_id] = cpf ? cpf.replace(/\D/g,'') : '';
           if (cpf) encontrados++;
           consultados++;
@@ -2037,8 +2034,10 @@ async function executar(intencao, p, dados, chatId) {
     if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
       ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
       : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
-    const hoje = new Date();
-    const venc = p?.vencimento || new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10).toISOString().slice(0,10);
+    const hoje = new Date(); hoje.setHours(0,0,0,0);
+    let vencDate = new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10);
+    if (vencDate < hoje) vencDate = new Date(hoje.getFullYear(), hoje.getMonth()+1, aluno.dia_vencimento||10);
+    const venc = p?.vencimento || vencDate.toISOString().slice(0,10);
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
     if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir o boleto.';
     // Calcular valor automaticamente
