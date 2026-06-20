@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 10.8 - multa/mora: removido campo 'data' e voltou para TAXAMENSAL (sem underline) conforme biblioteca Python oficial do Inter; campo 'taxa' como numero
+// Versão 10.9 - recuperar_cpfs: agora busca TODAS as cobranças do Inter (últimos 2 anos) em vez de depender da tabela boletos (que tinha só 3 registros). Cruza por nome normalizado. Multa TAXAMENSAL sem underline.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '10.8'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '10.9'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1507,47 +1507,53 @@ async function executar(intencao, p, dados, chatId) {
   }
 
   if (intencao === 'recuperar_cpfs') {
-    // Varre boletos no Supabase, consulta cada um no Inter, extrai CPF do pagador,
-    // e gera SQL de UPDATE para restaurar os CPFs perdidos.
     try {
-      await tgSend(chatId, '⏳ Buscando CPFs dos pagadores no Banco Inter...\n(pode demorar 1-2 minutos)');
+      await tgSend(chatId, '⏳ Buscando boletos no Banco Inter (últimos 2 anos)...\n(pode demorar 2-3 minutos)');
       const token = await interGetToken('boleto-cobranca.read');
-      // Buscar todos os boletos com codigo_solicitacao
-      const rBols = await sbGet('boletos', 'select=id,aluno_id,codigo_solicitacao,seu_numero&order=aluno_id.asc');
-      const boletos = Array.isArray(rBols) ? rBols : (rBols?.data || []);
-      // Mapear aluno_id → CPF (um por aluno, do primeiro boleto que retornar)
-      const cpfPorAluno = {};
-      let consultados = 0, encontrados = 0;
-      for (const b of boletos) {
-        if (!b.codigo_solicitacao || cpfPorAluno[b.aluno_id] !== undefined) continue;
-        try {
-          await new Promise(r => setTimeout(r, 300)); // evitar rate limit
-          const rD = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao, 'GET', null, token);
-          if (consultados === 0) console.log('[recuperar_cpfs] estrutura resposta Inter:', JSON.stringify(rD?.data || {}).slice(0, 500));
-          const cpf = rD?.data?.cobranca?.pagador?.cpfCnpj || rD?.data?.pagador?.cpfCnpj || '';
-          cpfPorAluno[b.aluno_id] = cpf ? cpf.replace(/\D/g,'') : '';
-          if (cpf) encontrados++;
-          consultados++;
-        } catch(eD) { cpfPorAluno[b.aluno_id] = ''; }
+      // Buscar todas as cobranças pagas no Inter diretamente (independente da tabela boletos)
+      const hoje = new Date();
+      const dataFim = hoje.toISOString().slice(0,10);
+      const dataIni = new Date(hoje.getFullYear()-2, hoje.getMonth(), hoje.getDate()).toISOString().slice(0,10);
+      const params = new URLSearchParams({ dataInicial: dataIni, dataFinal: dataFim, itensPorPagina: 1000, paginaAtual: 0 });
+      const rCob = await interReq('/cobranca/v3/cobrancas?' + params.toString(), 'GET', null, token);
+      const cobList = rCob?.data?.cobrancas || rCob?.data?.content || [];
+      console.log('[recuperar_cpfs] cobranças encontradas no Inter:', cobList.length);
+      // Montar mapa nome_normalizado → CPF
+      const cpfPorNome = {};
+      for (const c of cobList) {
+        const cob = c.cobranca || c;
+        const cpf = (cob.pagador?.cpfCnpj || '').replace(/\D/g,'');
+        const nome = (cob.pagador?.nome || '').trim().toLowerCase().replace(/\s+/g,' ');
+        if (cpf && cpf !== '00000000000' && nome) cpfPorNome[nome] = cpf;
       }
       // Cruzar com alunos sem CPF
-      const rAlunos = await sbGet('alunos', "select=id,nome,cpf&order=id.asc");
+      const rAlunos = await sbGet('alunos', 'select=id,nome,cpf&order=id.asc');
       const alunos = Array.isArray(rAlunos) ? rAlunos : (rAlunos?.data || []);
       const semCpf = alunos.filter(a => !a.cpf || a.cpf.trim() === '');
-      const atualizacoes = semCpf
-        .filter(a => cpfPorAluno[a.id])
-        .map(a => ({ id: a.id, nome: a.nome, cpf: cpfPorAluno[a.id] }));
-      if (!atualizacoes.length) {
-        return '⚠️ Nenhum CPF recuperado. ' + consultados + ' boletos consultados, ' + encontrados + ' com CPF.\nAlunos sem CPF: ' + semCpf.length;
+      const atualizacoes = [];
+      for (const a of semCpf) {
+        const nomeNorm = a.nome.trim().toLowerCase().replace(/\s+/g,' ');
+        let cpf = cpfPorNome[nomeNorm] || '';
+        if (!cpf) {
+          // Match por primeiros dois tokens do nome
+          const partes = nomeNorm.split(' ').slice(0,2).join(' ');
+          const match = Object.entries(cpfPorNome).find(([n]) => n.startsWith(partes));
+          if (match) cpf = match[1];
+        }
+        if (cpf) atualizacoes.push({ id: a.id, nome: a.nome, cpf });
       }
-      // Gerar SQL
+      if (!atualizacoes.length) {
+        return '⚠️ Nenhum CPF recuperado.\n' +
+          'Cobranças no Inter (2 anos): ' + cobList.length + ' | Nomes únicos: ' + Object.keys(cpfPorNome).length + '\n' +
+          'Alunos sem CPF: ' + semCpf.length + '\n\n' +
+          'Os nomes dos alunos no sistema não casaram com os nomes nos boletos do Inter.\nUse a planilha Excel para restaurar os CPFs manualmente.';
+      }
       const sql = atualizacoes.map(a =>
         "UPDATE alunos SET cpf='" + a.cpf + "' WHERE id=" + a.id + '; -- ' + a.nome
       ).join('\n');
-      const resumo = '✅ CPFs recuperados do Inter: ' + atualizacoes.length + ' aluno(s)\n\n' +
+      return '✅ *' + atualizacoes.length + ' CPFs recuperados do Inter*\n\n' +
         atualizacoes.map(a => '• ' + a.nome + ': ' + a.cpf).join('\n') +
-        '\n\nSQL gerado (rode no Supabase):\n```\n' + sql + '\n```';
-      return resumo;
+        '\n\nRode no Supabase:\n```\n' + sql + '\n```';
     } catch(eRec) {
       return '❌ Erro ao recuperar CPFs: ' + eRec.message;
     }
