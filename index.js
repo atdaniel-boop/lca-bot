@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 10.3 - novo comando 'recuperar cpfs': varre boletos no Supabase, consulta cada um no Inter, extrai CPF do pagador e gera SQL de UPDATE para restaurar CPFs perdidos
+// Versão 10.5 - multa/mora: taxa como string '2.00'/'1.00' e codigoMora TAXA_MENSAL (Inter rejeitava numero e TAXAMENSAL sem underline)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '10.3'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '10.5'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -428,12 +428,12 @@ async function interEmitirBoleto(dados) {
     dataVencimento: dados.vencimento, // YYYY-MM-DD
     numDiasAgenda: 30,
     multa: {
-      codigoMulta: 'PERCENTUAL',  // multa percentual sobre o valor
-      taxa: 2.00                   // 2% de multa após o vencimento
+      codigoMulta: 'PERCENTUAL',
+      taxa: '2.00'
     },
     mora: {
-      codigoMora: 'TAXAMENSAL',   // juros mensais
-      taxa: 1.00                   // 1% ao mês
+      codigoMora: 'TAXA_MENSAL',
+      taxa: '1.00'
     },
     pagador: {
       cpfCnpj:    cpfLimpo,
@@ -1526,7 +1526,8 @@ async function executar(intencao, p, dados, chatId) {
         try {
           await new Promise(r => setTimeout(r, 300)); // evitar rate limit
           const rD = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao, 'GET', null, token);
-          const cpf = rD?.data?.pagador?.cpfCnpj || '';
+          if (consultados === 0) console.log('[recuperar_cpfs] estrutura resposta Inter:', JSON.stringify(rD?.data || {}).slice(0, 500));
+          const cpf = rD?.data?.pagador?.cpfCnpj || rD?.data?.cpfCnpj || rD?.data?.cobranca?.pagador?.cpfCnpj || '';
           cpfPorAluno[b.aluno_id] = cpf ? cpf.replace(/\D/g,'') : '';
           if (cpf) encontrados++;
           consultados++;
