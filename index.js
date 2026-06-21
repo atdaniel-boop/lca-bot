@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.1 - boleto avulso: usa chave 'YYYY-MM-avNNNNN' e seuNumero 'LCA-{id}-YYYYMMAi' para nao colidir com boletos do plano no mesmo mes. Cancelamento: aceita filtro por valor ou mes, lista os abertos quando ha ambiguidade
+// Versão 11.2 - revisão completa: (1) confirmar_pagamento limpa chaves exc/av; (2) aReceberMes soma chaves exc/av; (3) confirmar_cheque corrigido; (4) webhook limpa exc/av; (5) rotina automática limpa exc/av; (6) calcVencimentoPlanoBot normaliza chaves; (7) alterar_plano atualiza pagamentos_pendentes; (8) boleto avulso registra em pagamentos_pendentes
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.1'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.2'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -774,10 +774,11 @@ function calcVencimentoPlanoBot(a) {
   // Fallback: último mês com valor (pago ou pendente) + 1 mês no dia de vencimento
   const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
   const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+  // Normalizar para YYYY-MM (chaves exc/av têm formato YYYY-MM-excXXX → pegar só YYYY-MM)
   const meses = [...new Set([
-    ...Object.keys(pend).filter(k=>(pend[k]||0)>0),
-    ...Object.keys(pags).filter(k=>(pags[k]||0)>0)
-  ])].sort();
+    ...Object.keys(pend).filter(k=>(pend[k]||0)>0).map(k=>k.slice(0,7)),
+    ...Object.keys(pags).filter(k=>(pags[k]||0)>0).map(k=>k.slice(0,7))
+  ].filter(m => /^\d{4}-\d{2}$/.test(m)))].sort();
   if (!meses.length) return null;
   const lp = meses[meses.length-1].split('-');
   const diaV = parseInt(a.dia_vencimento||10);
@@ -867,7 +868,9 @@ function buildContexto(dados, mes) {
   let aReceberMes = 0, nAReceber = 0;
   dados.alunos.forEach(a => {
     const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
-    if (pend[mes] > 0) { aReceberMes += pend[mes]; nAReceber++; }
+    const totalPendMes = Object.keys(pend).filter(k => k === mes || k.startsWith(mes + '-'))
+      .reduce((s, k) => s + (pend[k] || 0), 0);
+    if (totalPendMes > 0) { aReceberMes += totalPendMes; nAReceber++; }
   });
   const receitaEsperada = receitaMes + aReceberMes;          // se todos os pendentes pagarem
   const resultadoEsperado = receitaEsperada; // resultado calculado abaixo após custos/prof
@@ -1366,7 +1369,10 @@ async function executar(intencao, p, dados, chatId) {
     let pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
     pend = Object.assign({}, pend);
     let tinhaPend = false;
-    if (pend[mes]) { delete pend[mes]; tinhaPend = true; }
+    // Limpar chave exata E chaves exc/av do mesmo mês
+    Object.keys(pend).forEach(k => {
+      if (k === mes || k.startsWith(mes + '-')) { delete pend[k]; tinhaPend = true; }
+    });
     const hist = (aluno.historico_alteracoes||[]);
     hist.push({ data: new Date().toLocaleDateString('pt-BR'), tipo:'pagamento_bot',
       desc: 'Pagamento ' + mes + ' via Bot Telegram: ' + brl(p.valor) });
@@ -2096,6 +2102,10 @@ async function executar(intencao, p, dados, chatId) {
         const cod = result.codigoSolicitacao || result.nossoNumero;
         const link = result.linkVisualizacaoBoleto || result.link || '';
         await gravarBoleto(aluno.id, chaveAvulso, cod, seuNumAvulso, valorBoleto, venc);
+        // Registrar em pagamentos_pendentes para aparecer no histórico financeiro
+        const pendAvulso = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(Object.assign({},aluno.pagamentos_pendentes||{}));
+        pendAvulso[chaveAvulso] = valorBoleto;
+        await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos_pendentes: pendAvulso });
         const mesNomeAvulso = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt(mesVencAvulso.slice(5,7))-1];
         const anoAvulso = mesVencAvulso.slice(0,4);
         const nomeArq = 'Boleto - ' + aluno.nome.split(' ')[0] + ' - ' + mesNomeAvulso + ' ' + anoAvulso + '.pdf';
@@ -2410,12 +2420,13 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     // Verificar se há cheque pendente
     const hist = aluno.historico_alteracoes || [];
     const eCheque = hist.some(h => h.tipo==='cheque_recebido' && h.desc && h.desc.includes(mes));
-    if (!pend[mes] || !eCheque) return 'ℹ️ Nenhum cheque aguardando para *' + aluno.nome.split(' ')[0] + '* em ' + mes + '.';
-    const val = pend[mes];
-    // Confirmar pagamento
+    const valCheque = Object.keys(pend).filter(k => k === mes || k.startsWith(mes + '-')).reduce((s,k) => s+(pend[k]||0), 0);
+    if (!valCheque || !eCheque) return 'ℹ️ Nenhum cheque aguardando para *' + aluno.nome.split(' ')[0] + '* em ' + mes + '.';
+    const val = valCheque;
+    // Confirmar pagamento — limpar chave exata e exc/av do mesmo mês
     const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
     pags[mes] = val;
-    delete pend[mes];
+    Object.keys(pend).forEach(k => { if (k === mes || k.startsWith(mes + '-')) delete pend[k]; });
     const histNovo = [...hist, { data: new Date().toLocaleDateString('pt-BR'), tipo: 'cheque_compensado', desc: 'Cheque compensado - ' + mes + ' - ' + brl(val) }];
     await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: histNovo });
     await logOp('cheque_compensado', aluno.nome + ' - ' + mes, aluno.id, val, mes);
@@ -2635,7 +2646,23 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       mesesEmitir.map(function(m){ var p=m.split('-'); return '  • ' + p[1]+'/'+p[0] + ' — R$' + brl(novoValor).replace('R$',''); }).join('\n') + '\n';
     if (errosEmissao.length) msgBot += '⚠️ Erros emissão: ' + errosEmissao.join(' | ') + '\n';
 
-    // 4. Log
+    // 4. Atualizar pagamentos_pendentes do aluno
+    if (emitidos > 0 || mesesCancelar.length > 0) {
+      const pendA = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(Object.assign({},aluno.pagamentos_pendentes||{}));
+      // Remover meses cancelados dos pendentes
+      mesesCancelar.forEach(m => {
+        Object.keys(pendA).forEach(k => { if (k === m || k.startsWith(m + '-')) delete pendA[k]; });
+      });
+      // Adicionar novos meses emitidos
+      mesesEmitir.forEach(m => { pendA[m] = novoValor; });
+      await sbPatch('alunos', 'id=eq.' + aluno.id, {
+        tipo_plano: novoPlano, vezes_semana: novoFreq,
+        valor_referencia: novoValor,
+        pagamentos_pendentes: pendA
+      });
+    }
+
+    // 5. Log
     await logOp('alterar_plano', aluno.nome + ' — ' + aluno.tipo_plano + '→' + novoPlano + ' R$' + novoValor + '/mês', aluno.id, novoValor, new Date().toISOString().slice(0,7), { cancelados: mesesCancelar, emitidos: mesesEmitir, proRata });
 
     msgBot += '\n✅ Alteração concluída!';
@@ -3417,13 +3444,14 @@ async function verificarBoletosPagosInter() {
       if ((pags[mes]||0) > 0) continue; // já confirmado
       // (2) Só se o mês está em pagamentos_pendentes (boleto que o sistema espera receber)
       const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
-      if (!(pend[mes] > 0)) continue; // não estava esperando esse mês → não baixa
+      const pendMesTotal = Object.keys(pend).filter(k => k === mes || k.startsWith(mes + '-')).reduce((s,k) => s+(pend[k]||0), 0);
+      if (!(pendMesTotal > 0)) continue; // não estava esperando esse mês → não baixa
 
       // Confirmar pagamento
       try {
         pags[mes] = valor;
-        const tinhaPend = (pend[mes]||0) > 0;
-        if (tinhaPend) delete pend[mes];
+        const tinhaPend = pendMesTotal > 0;
+        if (tinhaPend) Object.keys(pend).forEach(k => { if (k === mes || k.startsWith(mes + '-')) delete pend[k]; });
         const hist = aluno.historico_alteracoes || [];
         hist.push({ data: new Date().toLocaleDateString('pt-BR'), tipo: 'pagamento',
           desc: 'Pagamento ' + mes + ' via boleto Inter (rotina automática): ' + brl(valor) });
@@ -3908,8 +3936,8 @@ async function main() {
                 } else {
                   pags[mes] = valorFinal;
                   const pend = typeof aluno.pagamentos_pendentes === 'string' ? JSON.parse(aluno.pagamentos_pendentes || '{}') : (aluno.pagamentos_pendentes || {});
-                  const tinhaPend = (pend[mes] || 0) > 0;
-                  if (tinhaPend) delete pend[mes];
+                  const tinhaPend = Object.keys(pend).some(k => (k === mes || k.startsWith(mes + '-')) && (pend[k]||0) > 0);
+                  if (tinhaPend) Object.keys(pend).forEach(k => { if (k === mes || k.startsWith(mes + '-')) delete pend[k]; });
                   const hist = aluno.historico_alteracoes || [];
                   hist.push({ data: new Date().toLocaleDateString('pt-BR'), tipo: 'pagamento',
                     desc: 'Pagamento ' + mes + ' via boleto Inter (automático): ' + brl(valorFinal) });
