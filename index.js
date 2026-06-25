@@ -2538,16 +2538,81 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       }
       // Enviar mensagem para copiar no WhatsApp
       if (enviados > 0) {
-        const planoLabelR = (aluno.tipo_plano||'mensal').charAt(0).toUpperCase()+(aluno.tipo_plano||'mensal').slice(1);
-        const hoje = new Date();
-        const dtIniR = new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10);
-        const DURACAO = {mensal:1,trimestral:3,semestral:6};
-        const durR = DURACAO[aluno.tipo_plano]||1;
-        const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR-1, (aluno.dia_vencimento||10)-1);
-        const fmtR = d => String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();
-        const periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
-        await tgSend(chatId, '✂️ *Copie a mensagem abaixo e envie no WhatsApp da aluna:*');
-        await tgSend(chatId, msgWhatsApp(aluno, planoLabelR, periodoR, boletos[0]?.valor||0, aluno.dia_vencimento||10));
+        // Detectar se os boletos reenviados são avulsos/excepcionais pela chave "mes"
+        const mesRef = boletos[0]?.mes || '';
+        const isAvulso = mesRef.includes('-av') || mesRef.includes('-exc');
+
+        if (isAvulso) {
+          // Boleto avulso/excepcional: mensagem simplificada sem período de plano
+          const vencFmtR = (boletos[0]?.vencimento||'').split('-').reverse().join('/');
+          const primeiroNome = aluno.nome.split(' ')[0];
+          const telDigitos = String(aluno.telefone||'').replace(/\D/g,'');
+          let telFmt = '';
+          if (telDigitos.length === 11) telFmt = '(' + telDigitos.slice(0,2) + ') ' + telDigitos.slice(2,7) + '-' + telDigitos.slice(7);
+          else if (telDigitos.length === 10) telFmt = '(' + telDigitos.slice(0,2) + ') ' + telDigitos.slice(2,6) + '-' + telDigitos.slice(6);
+          const linhaFoneAv = telFmt ? '*WhatsApp:* +55' + telDigitos + ' | ' + telFmt + '\n' : '';
+          await tgSend(chatId, '✂️ *Copie a mensagem abaixo e envie no WhatsApp da aluna:*');
+          await tgSend(chatId,
+            linhaFoneAv +
+            'Olá, ' + primeiroNome + '! 😊\n\n' +
+            'Segue o boleto referente à cobrança avulsa no LCA Studio de Pilates.\n\n' +
+            '💰 *' + brl(boletos[0]?.valor||0) + '* | vence ' + vencFmtR + '\n\n' +
+            'Você também pode pagar via Pix utilizando o QR Code impresso no boleto.\n\n' +
+            'Qualquer dúvida, estamos à disposição! 🌿\nLCA Studio de Pilates'
+          );
+        } else {
+          // Boleto de plano: buscar período real no historico_alteracoes
+          const planoLabelR = (aluno.tipo_plano||'mensal').charAt(0).toUpperCase()+(aluno.tipo_plano||'mensal').slice(1);
+          const fmtR = d => String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();
+          let periodoR = '';
+          try {
+            const rAlR = await sbGet('alunos', 'select=historico_alteracoes&id=eq.' + aluno.id);
+            const alR = (Array.isArray(rAlR) ? rAlR[0] : rAlR?.data?.[0]) || {};
+            const histR = alR.historico_alteracoes || [];
+            // Pegar a renovação mais recente relevante ao mês do boleto reenviado
+            const mesRefNum = mesRef.slice(0,7); // YYYY-MM
+            const entradas = histR.filter(h => h.tipo === 'renovacao' || h.tipo === 'alteracao');
+            // Encontrar a entrada cujo período cobre o mês do boleto
+            let melhorHist = null;
+            for (const h of entradas.slice().reverse()) {
+              if (h.desc && h.desc.includes(' a ')) {
+                // Extrair datas do campo desc: "... DD/MM/YYYY a DD/MM/YYYY"
+                const m = h.desc.match(/(\d{2}\/\d{2}\/\d{4}) a (\d{2}\/\d{2}\/\d{4})/);
+                if (m) {
+                  const [, iniStr, fimStr] = m;
+                  const toISO = s => s.split('/').reverse().join('-');
+                  if (mesRefNum >= toISO(iniStr).slice(0,7) && mesRefNum <= toISO(fimStr).slice(0,7)) {
+                    melhorHist = { ini: iniStr, fim: fimStr };
+                    break;
+                  }
+                }
+              }
+            }
+            if (melhorHist) {
+              periodoR = melhorHist.ini + ' a ' + melhorHist.fim;
+            } else {
+              // Fallback: calcular a partir de data_inicio do aluno se existir, senão usar vencimento do boleto
+              const DURACAO = {mensal:1,trimestral:3,semestral:6};
+              const durR = DURACAO[aluno.tipo_plano]||1;
+              const diaVenc = aluno.dia_vencimento||10;
+              const vencStr = boletos[0]?.vencimento || '';
+              const dtIniR = vencStr
+                ? new Date(vencStr.slice(0,4), parseInt(vencStr.slice(5,7))-1, diaVenc)
+                : new Date();
+              const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR-1, diaVenc-1);
+              periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
+            }
+          } catch(eHR) {
+            console.error('[reenvio] erro ao buscar histórico:', eHR.message);
+            const DURACAO = {mensal:1,trimestral:3,semestral:6};
+            const durR = DURACAO[aluno.tipo_plano]||1;
+            const dtIniR = new Date();
+            const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR-1, (aluno.dia_vencimento||10)-1);
+            periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
+          }
+          await tgSend(chatId, '✂️ *Copie a mensagem abaixo e envie no WhatsApp da aluna:*');
+          await tgSend(chatId, msgWhatsApp(aluno, planoLabelR, periodoR, boletos[0]?.valor||0, aluno.dia_vencimento||10));
+        }
       }
       return enviados > 0 ? null : '⚠️ Não foi possível reenviar. Tente emitir novamente.';
     } catch(e) { return '❌ Erro: ' + e.message; }
