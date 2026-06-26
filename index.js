@@ -484,8 +484,10 @@ async function gravarBoleto(alunoId, mes, codigoSolicitacao, seuNumero, valor, v
 // Busca e cancela no Inter o boleto a receber de um aluno em um mês específico (usado em alteração/rescisão de plano).
 async function cancelarBoletoPorMes(alunoId, mes) {
   try {
-    const r = await sbGet('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto&select=id,codigo_solicitacao');
-    const boletos = Array.isArray(r) ? r : (r?.data || []);
+    // Buscar boleto exato (plano) E boletos avulsos/excepcionais do mesmo mês (chave YYYY-MM-avXXX / YYYY-MM-excXXX)
+    const r = await sbGet('boletos', 'aluno_id=eq.' + alunoId + '&status=eq.aberto&select=id,mes,codigo_solicitacao');
+    const todos = Array.isArray(r) ? r : (r?.data || []);
+    const boletos = todos.filter(b => b.mes === mes || (b.mes||'').startsWith(mes + '-av') || (b.mes||'').startsWith(mes + '-exc'));
     for (const b of boletos) {
       if (b.codigo_solicitacao) {
         await interCancelarBoleto(b.codigo_solicitacao);
@@ -2993,6 +2995,42 @@ async function processar(msg) {
     }
   }
 
+  // Detecção rápida: "[nome] pagou [mês/valor]" → confirmar_pagamento sem chamar Gemini
+  // Só ativa se for afirmação, não pergunta/consulta
+  {
+    const tPagou = texto.toLowerCase().trim();
+    // Excluir perguntas e consultas explícitas
+    const ehPergunta = tPagou.endsWith('?') ||
+      /^(quem|quantos|qual|algum|alguém|será|já|ja|o|a |ele|ela)\b/.test(tPagou) ||
+      tPagou.includes('pagou?') || tPagou.includes('já pagou') || tPagou.includes('ja pagou') ||
+      tPagou.includes('pagou mesmo') || tPagou.includes('confirmou') ||
+      tPagou.includes('verificar') || tPagou.includes('checar') || tPagou.includes('checar') ||
+      tPagou.includes('pagou hoje') || tPagou.includes('pagou ontem');
+    if (!ehPergunta && tPagou.includes('pagou')) {
+      // Tentar encontrar aluno pelo nome no texto (parte antes de "pagou")
+      const parteNome = texto.replace(/pagou.*/i, '').trim();
+      if (parteNome.length >= 3) {
+        const candidato = encontrarAluno(dados, { aluno_nome: parteNome });
+        if (candidato && !Array.isArray(candidato)) {
+          clearTimeout(_timer);
+          _respondeu = true;
+          await tgSend(chatId, '⏳ Processando...');
+          // Checar se tem valor explícito no texto (ex: "Katia pagou 164,50 junho")
+          const valorMatch = texto.match(/(\d+([.,]\d+)?)/);
+          const valorRapido = valorMatch ? parseFloat(valorMatch[1].replace(',','.')) : null;
+          if (!valorRapido) {
+            // Sem valor → solicitar via contexto
+            ctx[chatId] = { aguardando: 'valor', intencao: 'confirmar_pagamento', aluno_id: candidato.id, aluno_nome: candidato.nome, mes };
+            return tgSend(chatId, '💰 Qual o valor pago por *' + candidato.nome.split(' ')[0] + '* em ' + mes + '?');
+          }
+          const resultado = await executar('confirmar_pagamento', { aluno_id: candidato.id, aluno_nome: candidato.nome, valor: valorRapido, mes }, dados, chatId);
+          if (resultado === null) return;
+          return tgSend(chatId, resultado || '❌ Erro ao confirmar.');
+        }
+      }
+    }
+  }
+
   // Processar com IA
   let aiResult;
   try { aiResult = await processarComIA(texto, dados, mes); }
@@ -3050,7 +3088,9 @@ async function processar(msg) {
       const inads = dados.alunos.filter(function(a) {
         if (a.ativo !== 'SIM') return false;
         var pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
-        return !(pags[mes]||0);
+        // Considerar pago se tem chave exata YYYY-MM OU qualquer chave avulsa/exc do mesmo mês
+        var pagou = !!(pags[mes]||0) || Object.keys(pags).some(function(k){ return k.startsWith(mes+'-') && (pags[k]||0) > 0; });
+        return !pagou;
       });
       resp3 = inads.length
         ? '*Inadimplentes em '+mes+' ('+inads.length+'):*\n' + inads.map(a=>'- '+a.nome+' ('+a.tipo_plano+')').join('\n')
@@ -3087,7 +3127,7 @@ async function processar(msg) {
         fallback = pv.length
           ? '*Planos vencendo (próx. 30 dias):*\n' + pv.map(p=>'- '+p.nome+' - '+p.plano+', vence '+p.dataVenc+' ('+p.dias+' dias)').join('\n')
           : 'Nenhum plano vencendo nos próximos 30 dias.';
-      } else if (tL2.includes('inadim') || tL2.includes('pagou')) {
+      } else if (tL2.includes('inadim') || tL2.includes('não pagou') || tL2.includes('nao pagou')) {
         const mesAtual = mes;
         const inads = dados.alunos.filter(function(a) {
           if (a.ativo !== 'SIM') return false;
@@ -3580,7 +3620,8 @@ async function rotinaAlertaInadimplencia() {
       if (a.ativo !== 'SIM') return false;
       if (parseInt(a.dia_vencimento||0) !== diaOntem) return false;
       const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
-      return !(pags[mesAtualStr] > 0);
+      const pagouD = !!(pags[mesAtualStr]||0) || Object.keys(pags).some(k => k.startsWith(mesAtualStr+'-') && (pags[k]||0) > 0);
+      return !pagouD;
     });
 
     if (!vencidosOntem.length) return;
@@ -3658,8 +3699,10 @@ async function rotinaAbandonoSilencioso() {
     const abandonos = dados.alunos.filter(a => {
       if (a.ativo !== 'SIM' || a.tipo_plano !== 'mensal') return false;
       const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
-      // Sem pagamento no mês atual E no anterior
-      return !(pags[mesAtualStr] > 0) && !(pags[mesAnterior] > 0);
+      // Sem pagamento no mês atual E no anterior (considera chaves avulsas também)
+      const pagouAtual = !!(pags[mesAtualStr]||0) || Object.keys(pags).some(k => k.startsWith(mesAtualStr+'-') && (pags[k]||0) > 0);
+      const pagouAnt   = !!(pags[mesAnterior]||0) || Object.keys(pags).some(k => k.startsWith(mesAnterior+'-') && (pags[k]||0) > 0);
+      return !pagouAtual && !pagouAnt;
     });
 
     if (!abandonos.length) return;
@@ -3712,7 +3755,8 @@ async function rotinaResumoSemanal() {
     const inadimplentes = ativos.filter(a => {
       const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
       const diaV = parseInt(a.dia_vencimento||31);
-      return !(pags[mesAtualStr] > 0) && diaV < hoje.getDate();
+      const pagouS = !!(pags[mesAtualStr]||0) || Object.keys(pags).some(k => k.startsWith(mesAtualStr+'-') && (pags[k]||0) > 0);
+      return !pagouS && diaV < hoje.getDate();
     });
 
     // Saldo Inter
