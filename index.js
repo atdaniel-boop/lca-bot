@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.3 - backup completo: (1) getDados agora inclui nfse_ativo/cpf/dias/desc, pref_envio, contato_emerg, grau_emerg, tel_emerg, historico, aulas_monica; (2) backup inclui tabela boletos; campos ausentes corrigidos
+// Versão 11.6 - fix: confirmação de pagamento busca valor automaticamente no boleto aberto ou valor_referencia antes de perguntar
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.3'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.6'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -3014,12 +3014,24 @@ async function processar(msg) {
         if (candidato && !Array.isArray(candidato)) {
           clearTimeout(_timer);
           _respondeu = true;
-          await tgSend(chatId, '⏳ Processando...');
-          // Checar se tem valor explícito no texto (ex: "Katia pagou 164,50 junho")
+          // 1. Valor explícito no texto (ex: "Katia pagou 164,50 junho")
           const valorMatch = texto.match(/(\d+([.,]\d+)?)/);
-          const valorRapido = valorMatch ? parseFloat(valorMatch[1].replace(',','.')) : null;
+          let valorRapido = valorMatch ? parseFloat(valorMatch[1].replace(',','.')) : null;
+          // 2. Sem valor no texto → buscar no boleto aberto do mês
           if (!valorRapido) {
-            // Sem valor → solicitar via contexto
+            try {
+              const rBol = await sbGet('boletos', 'aluno_id=eq.' + candidato.id + '&status=eq.aberto&select=valor,mes');
+              const bols = Array.isArray(rBol) ? rBol : (rBol?.data || []);
+              const bolMes = bols.find(b => b.mes === mes || (b.mes||'').startsWith(mes + '-'));
+              if (bolMes?.valor) valorRapido = parseFloat(bolMes.valor);
+            } catch(eBol) { console.error('[pagou] erro ao buscar boleto:', eBol.message); }
+          }
+          // 3. Fallback: valor_referencia do aluno
+          if (!valorRapido && candidato.valor_referencia) {
+            valorRapido = parseFloat(candidato.valor_referencia);
+          }
+          // 4. Ainda sem valor → perguntar
+          if (!valorRapido) {
             ctx[chatId] = { aguardando: 'valor', intencao: 'confirmar_pagamento', aluno_id: candidato.id, aluno_nome: candidato.nome, mes };
             return tgSend(chatId, '💰 Qual o valor pago por *' + candidato.nome.split(' ')[0] + '* em ' + mes + '?');
           }
