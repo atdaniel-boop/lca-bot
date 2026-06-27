@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.6 - fix: confirmação de pagamento busca valor automaticamente no boleto aberto ou valor_referencia antes de perguntar
+// Versão 11.7 - fix: resumo semanal usa nome composto quando há ambiguidade de primeiro nome (inadimplentes e pagamentos da semana)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.6'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.7'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -3750,18 +3750,26 @@ async function rotinaResumoSemanal() {
       }
     });
 
+    // Função: retorna nome curto sem ambiguidade (2 palavras se outro aluno tem o mesmo primeiro nome)
+    const nomeResumido = (aluno, lista) => {
+      const pn = aluno.nome.split(' ')[0];
+      const ambiguo = lista.some(b => b.id !== aluno.id && b.nome.split(' ')[0] === pn);
+      return ambiguo ? aluno.nome.split(' ').slice(0,2).join(' ') : pn;
+    };
+
     // Pagamentos dos últimos 7 dias (via historico_alteracoes tipo pagamento)
     const seteDiasAtras = new Date(hoje.getTime() - 7*86400000);
-    let recebidosSemana = [];
+    let recebidosSemanaObj = [];
     ativos.forEach(a => {
       (a.historico_alteracoes||[]).forEach(h => {
         if (h.tipo !== 'pagamento' || !h.data) return;
         const dp = h.data.split('/');
         if (dp.length !== 3) return;
         const dt = new Date(parseInt(dp[2]), parseInt(dp[1])-1, parseInt(dp[0]));
-        if (dt >= seteDiasAtras) recebidosSemana.push(a.nome.split(' ')[0]);
+        if (dt >= seteDiasAtras) recebidosSemanaObj.push({ id: a.id, nome: a.nome });
       });
     });
+    const recebidosSemana = [...new Map(recebidosSemanaObj.map(x=>[x.id,x])).values()];
 
     // Inadimplentes do mês
     const inadimplentes = ativos.filter(a => {
@@ -3786,9 +3794,9 @@ async function rotinaResumoSemanal() {
       '📊 *Resumo semanal — ' + hoje.toLocaleDateString('pt-BR') + '*\n\n' +
       '🏦 Saldo Inter: *' + saldoStr + '*\n' +
       '💰 Receita ' + mesAtualStr + ': *' + brl(recMesTotal) + '* (' + nPagos + '/' + ativos.length + ' pagos)\n' +
-      '📥 Pagamentos na semana: ' + (recebidosSemana.length ? recebidosSemana.length + ' (' + [...new Set(recebidosSemana)].slice(0,8).join(', ') + ')' : 'nenhum') + '\n' +
+      '📥 Pagamentos na semana: ' + (recebidosSemana.length ? recebidosSemana.length + ' (' + recebidosSemana.slice(0,8).map(a=>nomeResumido(a,recebidosSemana)).join(', ') + ')' : 'nenhum') + '\n' +
       '🔴 Inadimplentes (venc. passado): ' + inadimplentes.length +
-      (inadimplentes.length ? '\n   ' + inadimplentes.slice(0,10).map(a=>a.nome.split(' ')[0]).join(', ') : '') +
+      (inadimplentes.length ? '\n   ' + inadimplentes.slice(0,10).map(a=>nomeResumido(a,inadimplentes)).join(', ') : '') +
       '\n\n_Bom fim de semana!_ 🙌');
     console.log('[resumo-semanal] enviado');
   } catch(e) { console.error('[resumo-semanal] erro:', e.message); }
