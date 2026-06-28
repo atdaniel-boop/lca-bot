@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.7 - fix: resumo semanal usa nome composto quando há ambiguidade de primeiro nome (inadimplentes e pagamentos da semana)
+// Versão 11.8 - fix: rotina de detecção de Pix normaliza acentos antes de comparar nomes (ex: "jose" batia com "José")
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.7'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.8'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -3432,13 +3432,15 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
 
     const dados = await getDados();
     const preposicoes = ['de','da','do','das','dos','e'];
+    // Normalizar acentos para comparação de nomes
+    const semAcento = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 
     for (const t of pixRecebidos) {
       const valor = parseFloat(t.valor||0);
       // Extrair nome do pagador: "PIX RECEBIDO - Cp :XXXXXXXX-NOME COMPLETO"
       const mPix = (t.descricao||'').match(/Cp\s*:\s*\d+-(.+)/i);
       if (!mPix || !mPix[1] || mPix[1].trim().length < 3) continue;
-      const nomePagador = mPix[1].trim().toLowerCase();
+      const nomePagador = semAcento(mPix[1].trim());
       const partesPag = nomePagador.split(/\s+/).filter(p => !preposicoes.includes(p));
 
       const chave = hojeStr + '|' + valor + '|' + nomePagador;
@@ -3447,7 +3449,7 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       // Match: primeiro E segundo nome do aluno presentes no nome do pagador
       const candidatos = dados.alunos.filter(a => {
         if (a.ativo !== 'SIM') return false;
-        const partesAluno = a.nome.toLowerCase().split(/\s+/).filter(p => !preposicoes.includes(p));
+        const partesAluno = semAcento(a.nome).split(/\s+/).filter(p => !preposicoes.includes(p));
         if (partesAluno.length < 2) return false;
         return partesPag.includes(partesAluno[0]) && partesPag.includes(partesAluno[1]);
       });
