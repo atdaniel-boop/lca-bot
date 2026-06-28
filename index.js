@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.8 - fix: rotina de detecção de Pix normaliza acentos antes de comparar nomes (ex: "jose" batia com "José")
+// Versão 11.10 - fix: categoria de custo normalizada antes de salvar (despesas leda→despesas_leda, professoras→outro etc); prompt Gemini agora lista categorias válidas
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.8'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.10'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1285,7 +1285,7 @@ function detectarAlunoNoTexto(dados, tL) {
     '    "aluno_nome": string ou null,\n' +
     '    "valor": numero — PRIORIDADE ABSOLUTA: se o usuario digitou um numero no texto, use EXATAMENTE esse numero, mesmo que diferente do historico. Apenas se NENHUM numero foi digitado, use o ultimo pagamento do aluno. Ou null,\n' +
     '    "mes": "YYYY-MM" ou null (atual ' + mes + '),\n' +
-    '    "categoria": string ou null,\n' +
+    '    "categoria": uma das categorias válidas ou null — aluguel | energia | plano_saude | tributos | despesas_leda | equipamento | marketing | internet | outro. Exemplos: "despesas leda" → despesas_leda, "luz" → energia, "aluguel" → aluguel,\n' +
     '    "descricao": string ou null,\n' +
     '    "professora": string ou null,\n' +
     '    "horas": numero ou null,\n' +
@@ -1338,8 +1338,19 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'lancar_custo') {
     if (!p?.valor || !p?.categoria) return '❌ Informe o valor e a categoria.';
+    // Normalizar categoria para garantir valores válidos do sistema
+    const _catMap = {
+      'despesas_leda':'despesas_leda','despesas leda':'despesas_leda','leda':'despesas_leda',
+      'aluguel':'aluguel','energia':'energia','luz':'energia','eletricidade':'energia',
+      'plano_saude':'plano_saude','plano saude':'plano_saude','saude':'plano_saude',
+      'tributos':'tributos','simples':'tributos','imposto':'tributos',
+      'internet':'internet','mls':'internet','wifi':'internet',
+      'equipamento':'equipamento','marketing':'marketing',
+      'professoras':'outro','professora':'outro'
+    };
+    const catNorm = _catMap[(p.categoria||'').toLowerCase()] || p.categoria;
     const desc = (p.descricao||p.categoria) + ' [via Bot Telegram]';
-    await sbPost('custos', { descricao: desc, valor: p.valor, categoria: p.categoria, mes });
+    await sbPost('custos', { descricao: desc, valor: p.valor, categoria: catNorm, mes });
     await logOp('custo_lancado', (p.descricao||p.categoria) + ' - ' + mes, null, p.valor, mes, { categoria: p.categoria });
     const cat = p.descricao||p.categoria;
     return '✅ Custo lançado!\n*' + cat + '* - ' + brl(p.valor) + ' - ' + mes + '\n_Para desfazer: "apagar custo ' + p.categoria + ' ' + mes + '"_';
