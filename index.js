@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.12 - fix: "cancelar todos boletos X" falhava porque "todos" ficava no nome candidato; adicionado à lista de palavras ignoradas
+// Versão 11.13 - fix: cancelar boletos busca direto no Inter quando Supabase não encontra boletos em aberto
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.12'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.13'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2755,10 +2755,32 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const mes = p?.mes || new Date().toISOString().slice(0,7);
     const filtroValor = p?.valor ? parseFloat(p.valor) : null;
     try {
-      // Buscar todos os boletos em aberto do aluno
-      const r = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.aberto&select=id,mes,codigo_solicitacao,valor,vencimento&order=vencimento.asc');
-      let boletos = Array.isArray(r) ? r : (r?.data || []);
-      if (!boletos.length) return 'ℹ️ Nenhum boleto em aberto para *' + aluno.nome.split(' ')[0] + '*.';
+      // Buscar boletos no Supabase E no Inter (para cobrir casos onde Supabase está desatualizado)
+      const rSupa = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.aberto&select=id,mes,codigo_solicitacao,valor,vencimento&order=vencimento.asc');
+      let boletosSupa = Array.isArray(rSupa) ? rSupa : (rSupa?.data || []);
+
+      // Se não encontrou no Supabase OU flag todos=true, buscar também direto no Inter
+      const preps2 = ['de','da','do','das','dos','e'];
+      const partesA = aluno.nome.toLowerCase().split(/\s+/).filter(x => !preps2.includes(x));
+      const rInter = await interCobrancasRobusto({ situacao: 'A_RECEBER' });
+      const boletoInter = (rInter?.cobrancas || []).filter(item => {
+        const bc = item.cobranca || item;
+        const psn = parseSeuNumero(bc.seuNumero);
+        if (psn.alunoId === aluno.id) return true;
+        const nomePag = (bc.pagador?.nome || '').toLowerCase().split(/\s+/).filter(x => !preps2.includes(x));
+        return partesA[0] && partesA[1] && nomePag.includes(partesA[0]) && nomePag.includes(partesA[1]);
+      }).map(item => {
+        const bc = item.cobranca || item;
+        const psn = parseSeuNumero(bc.seuNumero);
+        return { codigo_solicitacao: bc.codigoSolicitacao, mes: psn.mes || (bc.dataVencimento||'').slice(0,7), valor: bc.valor, vencimento: bc.dataVencimento, _interOnly: true };
+      });
+
+      // Mesclar: preferir Supabase, complementar com Inter
+      const codsSupa = new Set(boletosSupa.map(b => b.codigo_solicitacao));
+      const extras = boletoInter.filter(b => !codsSupa.has(b.codigo_solicitacao));
+      let boletos = [...boletosSupa, ...extras];
+
+      if (!boletos.length) return 'ℹ️ Nenhum boleto em aberto para *' + aluno.nome.split(' ')[0] + '* (Supabase + Inter).';
       // Filtrar: por mês específico se informado, ou por valor se informado
       let boletosFiltrados = boletos;
       if (filtroValor) {
