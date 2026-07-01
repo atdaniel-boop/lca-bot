@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.14 - fix: valor dos boletos do Inter exibia undefined (normalizado via valorNominal/valor/valorTotal)
+// Versão 11.15 - fix: fechamento mensal exibe resultado do mês com % vs anterior; nome composto quando há ambiguidade
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.14'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.15'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -3869,8 +3869,15 @@ async function rotinaFechamentoMensal() {
       const pr = typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});
       if (pags[mesFechadoStr] > 0) { recFechado += pags[mesFechadoStr] - (pr[mesFechadoStr]||0); nPagFechado++; }
       if (pags[mesAnterior2] > 0) recAnt += pags[mesAnterior2] - (pr[mesAnterior2]||0);
-      if (a.ativo === 'SIM' && !(pags[mesFechadoStr] > 0)) inadimplentes.push(a.nome.split(' ')[0]);
+      if (a.ativo === 'SIM' && !(pags[mesFechadoStr] > 0)) inadimplentes.push(a);
     });
+
+    // Nome sem ambiguidade: 2 palavras se há outro inadimplente com mesmo primeiro nome
+    const nomeInad = (a) => {
+      const pn = a.nome.split(' ')[0];
+      return inadimplentes.some(b => b.id !== a.id && b.nome.split(' ')[0] === pn)
+        ? a.nome.split(' ').slice(0,2).join(' ') : pn;
+    };
 
     // Custos do mês fechado
     let custosTotal = 0;
@@ -3888,18 +3895,30 @@ async function rotinaFechamentoMensal() {
       }
     });
 
-    const varPct = recAnt > 0 ? Math.round(((recFechado-recAnt)/recAnt)*100) : 0;
-    const varStr = varPct > 0 ? '+' + varPct + '%' : varPct + '%';
+    const resultado = recFechado - custosTotal - kellyTotal;
+    const varRecPct = recAnt > 0 ? Math.round(((recFechado-recAnt)/recAnt)*100) : 0;
+    const varRecStr = varRecPct > 0 ? '+' + varRecPct + '%' : varRecPct + '%';
+
+    // Resultado do mês anterior para comparação
+    let custosAnt = 0, kellyAnt = 0;
+    (dados.custos||[]).forEach(cu => { if ((cu.mes||'') === mesAnterior2) custosAnt += parseFloat(cu.valor||0); });
+    (dados.aulas||[]).forEach(au => { if (au.prof_id === 'kelly' && (au.mes||'') === mesAnterior2) kellyAnt += (parseFloat(au.horas||au.vh||0)) * vhKelly; });
+    const resultadoAnt = recAnt - custosAnt - kellyAnt;
+    const varResPct = resultadoAnt > 0 ? Math.round(((resultado-resultadoAnt)/resultadoAnt)*100) : 0;
+    const varResStr = varResPct > 0 ? '+' + varResPct + '%' : varResPct + '%';
+    const resSinal = resultado >= 0 ? '✅' : '🔴';
+
     const mesNome = MESES_PT3[mesFechado.getMonth()] + '/' + mesFechado.getFullYear();
 
     await tgSend(TELEGRAM_CHAT_ID,
       '📈 *Fechamento mensal — ' + mesNome + '*\n\n' +
-      '💰 Receita: *' + brl(recFechado) + '* (' + varStr + ' vs mês anterior)\n' +
+      '💰 Receita: *' + brl(recFechado) + '* (' + varRecStr + ' vs mês anterior)\n' +
       '👥 Pagantes: ' + nPagFechado + '\n' +
       '💸 Custos lançados: ' + brl(custosTotal) + '\n' +
       '🧘 Aulas Kelly: ' + brl(kellyTotal) + '\n' +
+      resSinal + ' *Resultado: ' + brl(resultado) + '* (' + varResStr + ' vs mês anterior)\n' +
       '🔴 Não pagaram: ' + inadimplentes.length +
-      (inadimplentes.length ? ' (' + inadimplentes.slice(0,10).join(', ') + (inadimplentes.length>10?'...':'') + ')' : '') +
+      (inadimplentes.length ? ' (' + inadimplentes.slice(0,10).map(nomeInad).join(', ') + (inadimplentes.length>10?'...':'') + ')' : '') +
       '\n\n_Use o Relatório Contábil no site para detalhes completos._');
     console.log('[fechamento-mensal] enviado:', mesNome);
   } catch(e) { console.error('[fechamento-mensal] erro:', e.message); }
