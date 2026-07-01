@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.11 - fix: rescisão no site enfileira cancelamentos Inter via fila_boletos; bot processa acao=cancelar na fila; "cancelar todos boletos X" cancela sem pedir confirmação
+// Versão 11.12 - fix: "cancelar todos boletos X" falhava porque "todos" ficava no nome candidato; adicionado à lista de palavras ignoradas
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.11'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.12'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -1119,7 +1119,7 @@ async function processarComIA(texto, dados, mes) {
   }
 
   if (tL.includes('cancelar') && tL.includes('boleto')) {
-    const palavrasIgnorar = ['cancelar','boleto','boletos','do','da','de','para','os','inter'];
+    const palavrasIgnorar = ['cancelar','boleto','boletos','todos','todo','todas','do','da','de','para','os','as','inter'];
     const MESES_NOMES = ['janeiro','fevereiro','março','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
     const MESES_NUM = {janeiro:'01',fevereiro:'02',março:'03',marco:'03',abril:'04',maio:'05',junho:'06',julho:'07',agosto:'08',setembro:'09',outubro:'10',novembro:'11',dezembro:'12'};
     const filtroMesNome = tL.split(/\s+/).find(w => MESES_NOMES.includes(w)) || '';
@@ -1132,7 +1132,7 @@ async function processarComIA(texto, dados, mes) {
     const alunoCanc = nomeCandidato ? encontrarAluno(dados, { aluno_nome: nomeCandidato }) : null;
     const paramsCanc = Array.isArray(alunoCanc)
       ? { aluno_nome: nomeCandidato, mes: filtroMes, valor: filtroVal }
-      : (alunoCanc ? { aluno_id: alunoCanc.id, aluno_nome: alunoCanc.nome, mes: filtroMes, valor: filtroVal } : { mes: filtroMes, valor: filtroVal });
+      : (alunoCanc ? { aluno_id: alunoCanc.id, aluno_nome: alunoCanc.nome, mes: filtroMes, valor: filtroVal, todos: tL.includes('todos') || tL.includes('todo') } : { mes: filtroMes, valor: filtroVal });
     return { tipo: 'acao', intencao: 'inter_cancelar_boleto', params: paramsCanc };
   }
 
