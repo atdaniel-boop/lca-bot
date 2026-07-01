@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.13 - fix: cancelar boletos busca direto no Inter quando Supabase não encontra boletos em aberto
+// Versão 11.14 - fix: valor dos boletos do Inter exibia undefined (normalizado via valorNominal/valor/valorTotal)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.13'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.14'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2772,7 +2772,10 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       }).map(item => {
         const bc = item.cobranca || item;
         const psn = parseSeuNumero(bc.seuNumero);
-        return { codigo_solicitacao: bc.codigoSolicitacao, mes: psn.mes || (bc.dataVencimento||'').slice(0,7), valor: bc.valor, vencimento: bc.dataVencimento, _interOnly: true };
+        // valor pode vir como string "329.00" ou número — normalizar
+        const valBruto = bc.valorNominal || bc.valor || bc.valorTotal || 0;
+        const valNum = parseFloat(String(valBruto).replace(',','.')) || 0;
+        return { codigo_solicitacao: bc.codigoSolicitacao, mes: psn.mes || (bc.dataVencimento||'').slice(0,7), valor: valNum, vencimento: bc.dataVencimento, _interOnly: true };
       });
 
       // Mesclar: preferir Supabase, complementar com Inter
