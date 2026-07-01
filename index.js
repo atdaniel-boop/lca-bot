@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.10 - fix: categoria de custo normalizada antes de salvar (despesas leda→despesas_leda, professoras→outro etc); prompt Gemini agora lista categorias válidas
+// Versão 11.11 - fix: rescisão no site enfileira cancelamentos Inter via fila_boletos; bot processa acao=cancelar na fila; "cancelar todos boletos X" cancela sem pedir confirmação
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.10'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.11'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2772,11 +2772,15 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           boletos.map(b => '• ' + (b.mes||'?') + ' R$' + b.valor + ' vence ' + (b.vencimento||'?').split('-').reverse().join('/')).join('\n') +
           '\n\nUse: _"cancelar boleto ' + aluno.nome.split(' ')[0] + ' julho"_ ou _"cancelar boleto ' + aluno.nome.split(' ')[0] + ' 329"_';
       }
-      // Se mais de 1 boleto e sem filtro específico, perguntar
-      if (boletosFiltrados.length > 1 && !filtroValor && !p?.mes) {
-        return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + boletosFiltrados.length + ' boletos em aberto. Qual cancelar?\n' +
+      // Se mais de 1 boleto e sem filtro específico:
+      // "cancelar todos boletos X" ou "cancelar boletos X" → cancela tudo
+      // "cancelar boleto X" → pede confirmação listando os boletos
+      const cancelarTodos = p?.todos === true || (p?.aluno_nome && !p?.mes && !filtroValor);
+      if (boletosFiltrados.length > 1 && !filtroValor && !p?.mes && !cancelarTodos) {
+        return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + boletosFiltrados.length + ' boletos em aberto:\n' +
           boletosFiltrados.map(b => '• ' + (b.mes||'?') + ' R$' + b.valor + ' vence ' + (b.vencimento||'?').split('-').reverse().join('/')).join('\n') +
-          '\n\nUse: _"cancelar boleto ' + aluno.nome.split(' ')[0] + ' julho"_ ou _"cancelar boleto ' + aluno.nome.split(' ')[0] + ' 100"_';
+          '\n\nPara cancelar todos: _"cancelar todos boletos ' + aluno.nome.split(' ')[0] + '"_' +
+          '\nPara cancelar um: _"cancelar boleto ' + aluno.nome.split(' ')[0] + ' julho"_';
       }
       let cancelados = 0;
       for (const b of boletosFiltrados) {
@@ -3359,6 +3363,14 @@ async function processarFilaBoletos() {
         await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'processando' });
 
         let resultado;
+        // Ação de cancelamento (enfileirada pela rescisão no site)
+        if (pedido.acao === 'cancelar' && pedido.codigo_solicitacao) {
+          await interCancelarBoleto(pedido.codigo_solicitacao);
+          await sbPatch('boletos', 'codigo_solicitacao=eq.' + pedido.codigo_solicitacao, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+          await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido' });
+          console.log('[fila_boletos] Boleto cancelado:', pedido.codigo_solicitacao, 'aluno_id:', pedido.aluno_id);
+          continue;
+        }
         if (pedido.obs && pedido.obs.startsWith('alteracao_plano|')) {
           // Pedido de alteração de plano: cancelar e emitir conforme parâmetros
           const partes = {};
