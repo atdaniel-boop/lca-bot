@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.16 - fix: calcVencimentoPlanoBot não usa mais último pagamento no fallback (evita distorção por pagamentos antecipados); usa data_matricula + ciclos
+// Versão 11.18 - fix: vencimento = início ciclo + (dur-1) meses; Carina vence jul/2026 e não ago/2026
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.16'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.18'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -773,34 +773,30 @@ function calcVencimentoPlanoBot(a) {
     while (mesVenc > 12) { mesVenc -= 12; anoVenc++; }
     return new Date(anoVenc, mesVenc-1, diaVenc);
   }
-  // Fallback: usar data_matricula + duração do plano se disponível
-  // Não usar último pagamento pois pagamentos antecipados distorcem o cálculo
-  if (a.data_matricula) {
-    const dm = a.data_matricula.split('-');
-    const anoMat = parseInt(dm[0]), mesMat = parseInt(dm[1]);
-    const diaV = parseInt(a.dia_vencimento||10);
-    // Calcular quantos ciclos já passaram desde a matrícula
-    const hojeF = new Date(); hojeF.setHours(0,0,0,0);
-    let anoV = anoMat, mesV = mesMat + dur;
-    while (mesV > 12) { mesV -= 12; anoV++; }
-    let dtVenc = new Date(anoV, mesV-1, diaV);
-    // Avançar ciclos até encontrar o próximo vencimento
-    while (dtVenc < hojeF) {
-      mesV += dur;
-      while (mesV > 12) { mesV -= 12; anoV++; }
-      dtVenc = new Date(anoV, mesV-1, diaV);
-    }
-    return dtVenc;
-  }
-  // Último recurso: último pagamento regular (excluindo avulsos/exc)
+  // Fallback: encontrar início do ciclo atual (bloco de "dur" meses consecutivos mais recente)
+  // Vencimento = início do ciclo + dur meses
+  const diaV = parseInt(a.dia_vencimento||10);
   const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
-  const meses = Object.keys(pags)
-    .filter(k => /^\d{4}-\d{2}$/.test(k) && (pags[k]||0) > 0)
-    .sort();
+  const pend = typeof a.pagamentos_pendentes==='string'?JSON.parse(a.pagamentos_pendentes||'{}'):(a.pagamentos_pendentes||{});
+  const mesesSet = {};
+  Object.keys(pags).forEach(k => { if(/^\d{4}-\d{2}$/.test(k) && (pags[k]||0)>0) mesesSet[k]=1; });
+  Object.keys(pend).forEach(k => { if(/^\d{4}-\d{2}$/.test(k) && (pend[k]||0)>0) mesesSet[k]=1; });
+  const meses = Object.keys(mesesSet).sort();
   if (!meses.length) return null;
-  const lp = meses[meses.length-1].split('-');
-  const diaV2 = parseInt(a.dia_vencimento||10);
-  return new Date(parseInt(lp[0]), parseInt(lp[1]), diaV2);
+  const mesToDate = s => { const p=s.split('-'); return new Date(parseInt(p[0]), parseInt(p[1])-1, 1); };
+  const diffM = (a,b) => (b.getFullYear()-a.getFullYear())*12+(b.getMonth()-a.getMonth());
+  // Retroceder do último mês para encontrar início do bloco consecutivo atual
+  let inicioBloco = meses[meses.length-1];
+  for (let i = meses.length-2; i >= 0 && meses.length-1-i < dur; i--) {
+    if (diffM(mesToDate(meses[i]), mesToDate(meses[i+1])) !== 1) break;
+    inicioBloco = meses[i];
+  }
+  const pIni = inicioBloco.split('-');
+  // Vencimento = início do ciclo + (dur-1) = último mês do ciclo, no dia de vencimento
+  let mesVenc = parseInt(pIni[1]) + (dur - 1);
+  let anoVenc = parseInt(pIni[0]);
+  while (mesVenc > 12) { mesVenc -= 12; anoVenc++; }
+  return new Date(anoVenc, mesVenc-1, diaV);
 }
 
 async function getDados() {
