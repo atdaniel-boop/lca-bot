@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.18 - fix: vencimento = início ciclo + (dur-1) meses; Carina vence jul/2026 e não ago/2026
+// Versão 11.21 - fix: bot notifica Telegram após emitir plano da fila; site não pré-preenche pagamentos_pendentes para planos boleto
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.18'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.21'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -767,9 +767,8 @@ function calcVencimentoPlanoBot(a) {
     const dp = ult.data.split('/');
     const anoRen = parseInt(dp[2]), mesRen = parseInt(dp[1]), diaRen = parseInt(dp[0]);
     const diaVenc = ult.dia_venc || a.dia_vencimento || 1;
-    let mesInicio = mesRen, anoInicio = anoRen;
-    if (diaRen > diaVenc) { mesInicio++; if (mesInicio>12){mesInicio=1;anoInicio++;} }
-    let mesVenc = mesInicio + dur, anoVenc = anoInicio;
+    // Vencimento = mês da renovação + dur, no dia de vencimento
+    let mesVenc = mesRen + dur, anoVenc = anoRen;
     while (mesVenc > 12) { mesVenc -= 12; anoVenc++; }
     return new Date(anoVenc, mesVenc-1, diaVenc);
   }
@@ -2312,11 +2311,25 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const resultados = [];
     let erros = 0;
 
+    // Identificar meses já pagos ou com boleto pendente para pular (ex: pagamento antecipado)
+    const mesesJaCobertos = new Set([
+      ...Object.keys(pags).filter(k => /^\d{4}-\d{2}$/.test(k) && (pags[k]||0) > 0),
+      ...Object.keys(pend).filter(k => /^\d{4}-\d{2}$/.test(k) && (pend[k]||0) > 0)
+    ]);
+    const mesesPulados = [];
+
     for (let i = 0; i < dur; i++) {
       let dtVenc  = new Date(anoBase, mesBase + i, diaVenc);
       // mês de referência ORIGINAL (para chave/seuNumero únicos, mesmo se a data for remapeada)
       const dtOriginal = new Date(anoBase, mesBase + i, diaVenc);
       const mesStr  = dtOriginal.getFullYear() + '-' + String(dtOriginal.getMonth()+1).padStart(2,'0');
+
+      // Pular meses já cobertos (pago ou boleto já emitido)
+      if (mesesJaCobertos.has(mesStr)) {
+        mesesPulados.push(mesStr);
+        console.log('[PLANO] Pulando ' + mesStr + ' — já coberto (pago ou boleto pendente)');
+        continue;
+      }
       // Se a data de vencimento já passou, usar hoje + 2 dias (Inter recusa data retroativa)
       const hojeDate = new Date(); hojeDate.setHours(0,0,0,0);
       if (dtVenc < hojeDate) {
@@ -2425,8 +2438,10 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       } catch(eHist) { console.error('[emitir_plano] erro ao registrar renovacao no historico:', eHist.message); }
     }
 
+    const boletosEmitidos = dur - mesesPulados.length;
     const resumo = status + ' *Plano ' + planoLabel + ' - ' + aluno.nome.split(' ')[0] + '*\n' +
-      '📋 ' + periodoPlano + '\n💰 ' + brl(valor) + '/mês × ' + dur + ' boletos' +
+      '📋 ' + periodoPlano + '\n💰 ' + brl(valor) + '/mês × ' + boletosEmitidos + ' boleto(s)' +
+      (mesesPulados.length ? '\n⏭️ Pulados (' + mesesPulados.length + ' já cobertos): ' + mesesPulados.join(', ') : '') +
       (resultados.length ? '\n\n' + resultados.join('\n') : '') +
       (erros === 0 ? '\n\n_Baixa automática via webhook quando pagos._' : '');
     // Enviar mensagem para copiar no WhatsApp
@@ -3449,6 +3464,7 @@ async function processarFilaBoletos() {
             TELEGRAM_CHAT_ID,
             new Date().toISOString().slice(0,7)
           );
+          if (resultado) await tgSend(TELEGRAM_CHAT_ID, resultado);
         }
 
         await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: (pedido.obs||'') + ' [processado]' });
