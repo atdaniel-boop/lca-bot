@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.21 - fix: bot notifica Telegram após emitir plano da fila; site não pré-preenche pagamentos_pendentes para planos boleto
+// Versão 11.22 - fix: emissão de plano só pula meses pagos ou com boleto real no Inter (não pagamentos_pendentes sem boleto)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.21'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.22'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2311,10 +2311,16 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const resultados = [];
     let erros = 0;
 
-    // Identificar meses já pagos ou com boleto pendente para pular (ex: pagamento antecipado)
+    // Identificar meses já cobertos para pular:
+    // 1. Meses efetivamente PAGOS (pagamentos[YYYY-MM] > 0)
+    // 2. Meses com boleto JÁ EMITIDO no Inter (tabela boletos com status=aberto)
+    // NÃO usar pagamentos_pendentes — pode ter resquícios de cadastros anteriores sem boleto real
+    const rBoletosExist = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.aberto&select=mes');
+    const boletosExist = Array.isArray(rBoletosExist) ? rBoletosExist : (rBoletosExist?.data || []);
+    const mesesComBoleto = new Set(boletosExist.map(b => (b.mes||'').slice(0,7)).filter(m => /^\d{4}-\d{2}$/.test(m)));
     const mesesJaCobertos = new Set([
       ...Object.keys(pags).filter(k => /^\d{4}-\d{2}$/.test(k) && (pags[k]||0) > 0),
-      ...Object.keys(pend).filter(k => /^\d{4}-\d{2}$/.test(k) && (pend[k]||0) > 0)
+      ...mesesComBoleto
     ]);
     const mesesPulados = [];
 
