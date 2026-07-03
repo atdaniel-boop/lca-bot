@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.22 - fix: emissão de plano só pula meses pagos ou com boleto real no Inter (não pagamentos_pendentes sem boleto)
+// Versão 11.23 - fix: fallback vencimento = último mês do bloco + 1 (Rosa fev-jul → vence ago)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.22'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.23'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -790,11 +790,11 @@ function calcVencimentoPlanoBot(a) {
     if (diffM(mesToDate(meses[i]), mesToDate(meses[i+1])) !== 1) break;
     inicioBloco = meses[i];
   }
-  const pIni = inicioBloco.split('-');
-  // Vencimento = início do ciclo + (dur-1) = último mês do ciclo, no dia de vencimento
-  let mesVenc = parseInt(pIni[1]) + (dur - 1);
-  let anoVenc = parseInt(pIni[0]);
-  while (mesVenc > 12) { mesVenc -= 12; anoVenc++; }
+  // Vencimento = último mês do bloco + 1, no dia de vencimento
+  const pUlt = meses[meses.length-1].split('-');
+  let mesVenc = parseInt(pUlt[1]) + 1;
+  let anoVenc = parseInt(pUlt[0]);
+  if (mesVenc > 12) { mesVenc = 1; anoVenc++; }
   return new Date(anoVenc, mesVenc-1, diaV);
 }
 
