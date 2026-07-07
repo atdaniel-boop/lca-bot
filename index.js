@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.25 - fix: precedência de operadores no caption do tgSendPDF (caption||" sem parênteses); emissão de plano tenta 2ª vez buscar link do boleto antes de desistir, e avisa claramente quando PDF não pôde ser enviado
+// Versão 11.26 - fix crítico: cancelamento de boleto (todos os 3 caminhos) não limpava pagamentos_pendentes, deixando boleto "aguardando" no site mesmo já cancelado no Inter
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.25'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.26'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -494,6 +494,19 @@ async function cancelarBoletoPorMes(alunoId, mes) {
         await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
         console.log('[cancelarBoleto] aluno=' + alunoId + ' mes=' + mes + ' cod=' + b.codigo_solicitacao);
       }
+    }
+    // Limpar pagamentos_pendentes do aluno para refletir no site
+    if (boletos.length) {
+      try {
+        const rAlC = await sbGet('alunos', 'select=pagamentos_pendentes&id=eq.' + alunoId);
+        const alC = (Array.isArray(rAlC) ? rAlC[0] : rAlC?.data?.[0]) || {};
+        const pendC = typeof alC.pagamentos_pendentes==='string'?JSON.parse(alC.pagamentos_pendentes||'{}'):(alC.pagamentos_pendentes||{});
+        let mudou = false;
+        Object.keys(pendC).forEach(k => {
+          if (k === mes || k.startsWith(mes + '-')) { delete pendC[k]; mudou = true; }
+        });
+        if (mudou) await sbPatch('alunos', 'id=eq.' + alunoId, { pagamentos_pendentes: pendC });
+      } catch(ePendC) { console.error('[cancelarBoletoPorMes] erro ao limpar pendentes:', ePendC.message); }
     }
     return boletos.length;
   } catch(e) {
@@ -2870,6 +2883,18 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       for (const b of boletosFiltrados) {
         await interCancelarBoleto(b.codigo_solicitacao);
         await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+        // Limpar pagamentos_pendentes do aluno para refletir no site (senão fica "aguardando" para sempre)
+        try {
+          const rAlC = await sbGet('alunos', 'select=pagamentos_pendentes&id=eq.' + aluno.id);
+          const alC = (Array.isArray(rAlC) ? rAlC[0] : rAlC?.data?.[0]) || {};
+          const pendC = typeof alC.pagamentos_pendentes==='string'?JSON.parse(alC.pagamentos_pendentes||'{}'):(alC.pagamentos_pendentes||{});
+          const mesB = (b.mes||'').slice(0,7);
+          let mudou = false;
+          Object.keys(pendC).forEach(k => {
+            if (k === b.mes || k.slice(0,7) === mesB) { delete pendC[k]; mudou = true; }
+          });
+          if (mudou) await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos_pendentes: pendC });
+        } catch(ePendC) { console.error('[cancelar_boleto] erro ao limpar pendentes:', ePendC.message); }
         cancelados++;
       }
       return '✅ *' + cancelados + ' boleto(s) cancelado(s) no Inter!*\n\n👤 ' + aluno.nome + '\n' +
@@ -3451,6 +3476,20 @@ async function processarFilaBoletos() {
         if (pedido.acao === 'cancelar' && pedido.codigo_solicitacao) {
           await interCancelarBoleto(pedido.codigo_solicitacao);
           await sbPatch('boletos', 'codigo_solicitacao=eq.' + pedido.codigo_solicitacao, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+          // Limpar pagamentos_pendentes do aluno para refletir no site
+          if (pedido.aluno_id && pedido.mes) {
+            try {
+              const rAlF = await sbGet('alunos', 'select=pagamentos_pendentes&id=eq.' + pedido.aluno_id);
+              const alF = (Array.isArray(rAlF) ? rAlF[0] : rAlF?.data?.[0]) || {};
+              const pendF = typeof alF.pagamentos_pendentes==='string'?JSON.parse(alF.pagamentos_pendentes||'{}'):(alF.pagamentos_pendentes||{});
+              const mesF = (pedido.mes||'').slice(0,7);
+              let mudouF = false;
+              Object.keys(pendF).forEach(k => {
+                if (k === pedido.mes || k.slice(0,7) === mesF) { delete pendF[k]; mudouF = true; }
+              });
+              if (mudouF) await sbPatch('alunos', 'id=eq.' + pedido.aluno_id, { pagamentos_pendentes: pendF });
+            } catch(ePendF) { console.error('[fila_boletos] erro ao limpar pendentes:', ePendF.message); }
+          }
           await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido' });
           console.log('[fila_boletos] Boleto cancelado:', pedido.codigo_solicitacao, 'aluno_id:', pedido.aluno_id);
           continue;
