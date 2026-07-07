@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.30 - fix crítico: emitir plano usava sempre a ÚLTIMA renovação do histórico (podia ser duplicata de execução com bug anterior); agora escolhe a renovação correta com base no último pagamento confirmado
+// Versão 11.32 - fix: quando PDF do boleto não está pronto na emissão, bot agenda reenvio automático via fila (até 5 tentativas a cada 2 min) em vez de só avisar e desistir
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.30'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.32'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2481,7 +2481,16 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
             resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ⚠️ PDF falhou, [ver boleto](' + link + ')');
           }
         } else {
-          resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ⚠️ PDF indisponível ainda (cod: ' + cod + ') — use "reenviar boletos" em alguns minutos');
+          resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ⏳ PDF ainda gerando, reenvio automático agendado');
+          // Agendar reenvio automático via fila (processada a cada 2 min)
+          try {
+            await sbPost('fila_boletos', {
+              aluno_id: aluno.id, aluno_nome: aluno.nome,
+              acao: 'reenviar_pdf', codigo_solicitacao: cod, mes: mesStr,
+              chat_id: chatId,
+              criado_em: new Date().toISOString()
+            });
+          } catch(eFilaR) { console.error('[PDF plano ' + numBoleto + '] erro ao agendar reenvio:', eFilaR.message); }
         }
       } catch(e) {
         resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - ❌ ' + e.message.slice(0,60));
@@ -2682,23 +2691,46 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
             const rAlR = await sbGet('alunos', 'select=historico_alteracoes&id=eq.' + aluno.id);
             const alR = (Array.isArray(rAlR) ? rAlR[0] : rAlR?.data?.[0]) || {};
             const histR = alR.historico_alteracoes || [];
+            const pagsR = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
             // Pegar a renovação mais recente relevante ao mês do boleto reenviado
             const mesRefNum = mesRef.slice(0,7); // YYYY-MM
             const entradas = histR.filter(h => h.tipo === 'renovacao' || h.tipo === 'alteracao');
-            // Encontrar a entrada cujo período cobre o mês do boleto
-            let melhorHist = null;
-            for (const h of entradas.slice().reverse()) {
+            // Coletar TODAS as entradas cujo período cobre o mês do boleto (pode haver duplicatas)
+            const candidatasHist = [];
+            for (const h of entradas) {
               if (h.desc && h.desc.includes(' a ')) {
-                // Extrair datas do campo desc: "... DD/MM/YYYY a DD/MM/YYYY"
                 const m = h.desc.match(/(\d{2}\/\d{2}\/\d{4}) a (\d{2}\/\d{2}\/\d{4})/);
                 if (m) {
                   const [, iniStr, fimStr] = m;
                   const toISO = s => s.split('/').reverse().join('-');
                   if (mesRefNum >= toISO(iniStr).slice(0,7) && mesRefNum <= toISO(fimStr).slice(0,7)) {
-                    melhorHist = { ini: iniStr, fim: fimStr };
-                    break;
+                    candidatasHist.push({ ini: iniStr, fim: fimStr, data: h.data });
                   }
                 }
+              }
+            }
+            // Se há mais de uma candidata (duplicata), escolher a mais ANTIGA cujo início
+            // seja <= mês seguinte ao último pagamento confirmado (evita duplicata posterior)
+            let melhorHist = null;
+            if (candidatasHist.length === 1) {
+              melhorHist = candidatasHist[0];
+            } else if (candidatasHist.length > 1) {
+              const mesesPagosR = Object.keys(pagsR).filter(k => /^\d{4}-\d{2}$/.test(k) && (pagsR[k]||0) > 0).sort();
+              const ultimoPagoR = mesesPagosR.length ? mesesPagosR[mesesPagosR.length-1] : null;
+              const ordenadas = candidatasHist.slice().sort((a,b) => {
+                const toISO = s => s.split('/').reverse().join('-');
+                return toISO(a.ini).localeCompare(toISO(b.ini));
+              });
+              if (ultimoPagoR) {
+                const [anoP, mesP] = ultimoPagoR.split('-').map(Number);
+                melhorHist = ordenadas.find(c => {
+                  const toISO = s => s.split('/').reverse().join('-');
+                  const iniISO = toISO(c.ini);
+                  const anoH = parseInt(iniISO.slice(0,4)), mesH = parseInt(iniISO.slice(5,7));
+                  return (anoH < anoP) || (anoH === anoP && mesH <= mesP + 1);
+                }) || ordenadas[0];
+              } else {
+                melhorHist = ordenadas[0];
               }
             }
             if (melhorHist) {
@@ -3512,6 +3544,36 @@ async function processarFilaBoletos() {
         await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'processando' });
 
         let resultado;
+        // Ação de reenvio de PDF que não estava pronto na hora da emissão
+        if (pedido.acao === 'reenviar_pdf' && pedido.codigo_solicitacao) {
+          try {
+            const token = await interGetToken('boleto-cobranca.read');
+            const det = await interReq('/cobranca/v3/cobrancas/' + pedido.codigo_solicitacao, 'GET', null, token);
+            const cob = det?.cobranca || det?.data?.cobranca || det?.data || det;
+            const link = cob?.linkVisualizacaoBoleto || cob?.link || det?.linkVisualizacaoBoleto || det?.link || '';
+            if (link) {
+              const mesNomeR = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt((pedido.mes||'').slice(5,7))-1] || pedido.mes;
+              const nomeArqR = 'Boleto - ' + mesNomeR + ' - ' + (pedido.aluno_nome||'').split(' ')[0] + '.pdf';
+              await tgSendPDF(pedido.chat_id || TELEGRAM_CHAT_ID, link, nomeArqR,
+                '📄 Boleto ' + mesNomeR + ' - ' + (pedido.aluno_nome||'') + ' (reenvio automático)');
+              await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: 'PDF reenviado' });
+              console.log('[fila_boletos] PDF reenviado com sucesso:', pedido.codigo_solicitacao);
+            } else {
+              // Ainda sem link — reagendar mais uma vez (até 5 tentativas via campo obs como contador)
+              const tentativas = parseInt(pedido.obs || '0') + 1;
+              if (tentativas < 5) {
+                await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'pendente', obs: String(tentativas) });
+              } else {
+                await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'PDF nunca ficou pronto após 5 tentativas' });
+                await tgSend(pedido.chat_id || TELEGRAM_CHAT_ID, '⚠️ Não consegui obter o PDF do boleto de *' + (pedido.aluno_nome||'') + '* (' + (pedido.mes||'') + ') após várias tentativas. Use "reenviar boletos" manualmente mais tarde.');
+              }
+            }
+          } catch(ePdfR) {
+            console.error('[fila_boletos] erro ao reenviar PDF:', ePdfR.message);
+            await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: ePdfR.message.slice(0,150) });
+          }
+          continue;
+        }
         // Ação de cancelamento (enfileirada pela rescisão no site)
         if (pedido.acao === 'cancelar' && pedido.codigo_solicitacao) {
           let jaEstavaCancelado = false;
