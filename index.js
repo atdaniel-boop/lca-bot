@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.29 - fix CRÍTICO: interReq nunca lançava erro em status HTTP de falha (sempre resolve), então interCancelarBoleto nunca disparava exceção — todo o tratamento de "já cancelado" desde v11.21 nunca funcionou de verdade. Agora lança erro corretamente
+// Versão 11.30 - fix crítico: emitir plano usava sempre a ÚLTIMA renovação do histórico (podia ser duplicata de execução com bug anterior); agora escolhe a renovação correta com base no último pagamento confirmado
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.29'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.30'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2278,14 +2278,35 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     }
     const valor = valorAuto;
 
-    // Buscar a renovação mais recente do histórico (registrada pelo site ou por comando anterior)
-    // para usar como base do ciclo — evita recalcular a partir de "hoje" e pular meses
+    // Buscar a renovação correta do histórico: a que cobre o período ainda não pago
+    // (não necessariamente a última entrada — pode haver duplicatas de execuções anteriores)
     let renovacaoExistente = null;
     try {
       const histAtual = typeof aluno.historico_alteracoes==='string'
         ? JSON.parse(aluno.historico_alteracoes||'[]') : (aluno.historico_alteracoes||[]);
       const renovacoes = histAtual.filter(h => h.tipo === 'renovacao' && h.data);
-      if (renovacoes.length) renovacaoExistente = renovacoes[renovacoes.length-1];
+      if (renovacoes.length) {
+        // Último mês efetivamente pago (chave YYYY-MM exata)
+        const mesesPagos = Object.keys(pags).filter(k => /^\d{4}-\d{2}$/.test(k) && (pags[k]||0) > 0).sort();
+        const ultimoPago = mesesPagos.length ? mesesPagos[mesesPagos.length-1] : null;
+        // Escolher a renovação mais ANTIGA cujo mês seja <= mês seguinte ao último pago
+        // (evita usar uma renovação duplicada/posterior criada por bug de execução anterior)
+        const candidatas = renovacoes.slice().sort((a,b) => {
+          const da = a.data.split('/'), db = b.data.split('/');
+          return new Date(parseInt(da[2]),parseInt(da[1])-1,parseInt(da[0])) - new Date(parseInt(db[2]),parseInt(db[1])-1,parseInt(db[0]));
+        });
+        if (ultimoPago) {
+          const [anoP, mesP] = ultimoPago.split('-').map(Number);
+          renovacaoExistente = candidatas.find(h => {
+            const dp = h.data.split('/');
+            const anoH = parseInt(dp[2]), mesH = parseInt(dp[1]);
+            // A renovação deve começar no mês pago ou até 1 mês depois (tolerância)
+            return (anoH < anoP) || (anoH === anoP && mesH <= mesP + 1);
+          }) || candidatas[0];
+        } else {
+          renovacaoExistente = candidatas[0];
+        }
+      }
     } catch(eHR) { console.error('[emitir_plano] erro ao ler histórico:', eHR.message); }
 
     let anoBase, mesBase;
