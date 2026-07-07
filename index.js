@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.26 - fix crítico: cancelamento de boleto (todos os 3 caminhos) não limpava pagamentos_pendentes, deixando boleto "aguardando" no site mesmo já cancelado no Inter
+// Versão 11.27 - fix: cancelamento de boleto já cancelado no Inter agora é tratado como sucesso silencioso (avisa "já estava cancelado" em vez de erro genérico)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.26'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.27'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2880,8 +2880,18 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           '\nPara cancelar um: _"cancelar boleto ' + aluno.nome.split(' ')[0] + ' julho"_';
       }
       let cancelados = 0;
+      let jaCancelados = 0;
       for (const b of boletosFiltrados) {
-        await interCancelarBoleto(b.codigo_solicitacao);
+        try {
+          await interCancelarBoleto(b.codigo_solicitacao);
+        } catch(eCanc) {
+          const msgErro = (eCanc.message||'').toLowerCase();
+          if (msgErro.includes('cancelad') || msgErro.includes('já está') || msgErro.includes('baixad')) {
+            jaCancelados++;
+          } else {
+            throw eCanc;
+          }
+        }
         await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
         // Limpar pagamentos_pendentes do aluno para refletir no site (senão fica "aguardando" para sempre)
         try {
@@ -2898,7 +2908,8 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         cancelados++;
       }
       return '✅ *' + cancelados + ' boleto(s) cancelado(s) no Inter!*\n\n👤 ' + aluno.nome + '\n' +
-        boletosFiltrados.map(b => '• ' + (b.mes||'?') + ' R$' + b.valor).join('\n');
+        boletosFiltrados.map(b => '• ' + (b.mes||'?') + ' R$' + b.valor).join('\n') +
+        (jaCancelados ? '\n\nℹ️ ' + jaCancelados + ' já estava(m) cancelado(s) no Inter — apenas sincronizei o sistema.' : '');
     } catch(e) {
       return '❌ Erro ao cancelar boleto: ' + e.message;
     }
@@ -3474,7 +3485,19 @@ async function processarFilaBoletos() {
         let resultado;
         // Ação de cancelamento (enfileirada pela rescisão no site)
         if (pedido.acao === 'cancelar' && pedido.codigo_solicitacao) {
-          await interCancelarBoleto(pedido.codigo_solicitacao);
+          let jaEstavaCancelado = false;
+          try {
+            await interCancelarBoleto(pedido.codigo_solicitacao);
+          } catch(eCanc) {
+            // Inter recusa cancelar um boleto que já está cancelado/baixado — tratar como sucesso
+            const msgErro = (eCanc.message||'').toLowerCase();
+            if (msgErro.includes('cancelad') || msgErro.includes('já está') || msgErro.includes('baixad')) {
+              jaEstavaCancelado = true;
+              console.log('[fila_boletos] Boleto já estava cancelado no Inter:', pedido.codigo_solicitacao);
+            } else {
+              throw eCanc; // erro real, propagar para o catch externo
+            }
+          }
           await sbPatch('boletos', 'codigo_solicitacao=eq.' + pedido.codigo_solicitacao, { status: 'cancelado', cancelado_em: new Date().toISOString() });
           // Limpar pagamentos_pendentes do aluno para refletir no site
           if (pedido.aluno_id && pedido.mes) {
@@ -3490,8 +3513,12 @@ async function processarFilaBoletos() {
               if (mudouF) await sbPatch('alunos', 'id=eq.' + pedido.aluno_id, { pagamentos_pendentes: pendF });
             } catch(ePendF) { console.error('[fila_boletos] erro ao limpar pendentes:', ePendF.message); }
           }
-          await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido' });
-          console.log('[fila_boletos] Boleto cancelado:', pedido.codigo_solicitacao, 'aluno_id:', pedido.aluno_id);
+          await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: jaEstavaCancelado ? 'já estava cancelado no Inter' : 'cancelado' });
+          if (jaEstavaCancelado) {
+            await tgSend(TELEGRAM_CHAT_ID, 'ℹ️ Boleto de *' + (pedido.aluno_nome||'?') + '* (' + (pedido.mes||'') + ') já estava cancelado no Inter — apenas sincronizei o sistema.');
+          } else {
+            console.log('[fila_boletos] Boleto cancelado:', pedido.codigo_solicitacao, 'aluno_id:', pedido.aluno_id);
+          }
           continue;
         }
         if (pedido.obs && pedido.obs.startsWith('alteracao_plano|')) {
