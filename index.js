@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.27 - fix: cancelamento de boleto já cancelado no Inter agora é tratado como sucesso silencioso (avisa "já estava cancelado" em vez de erro genérico)
+// Versão 11.29 - fix CRÍTICO: interReq nunca lançava erro em status HTTP de falha (sempre resolve), então interCancelarBoleto nunca disparava exceção — todo o tratamento de "já cancelado" desde v11.21 nunca funcionou de verdade. Agora lança erro corretamente
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.27'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.29'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -463,6 +463,13 @@ async function interCancelarBoleto(codigoSolicitacao) {
   const token = await interGetToken();
   const r = await interReq('/cobranca/v3/cobrancas/' + codigoSolicitacao + '/cancelar', 'POST',
     { motivoCancelamento: 'PAGAMENTO_EM_OUTRA_FORMA' }, token);
+  // interReq sempre resolve mesmo com erro HTTP — precisamos checar o status manualmente
+  if (r && r.status && (r.status < 200 || r.status >= 300)) {
+    const motivo = r.data?.detail || r.data?.title || r.data?.message ||
+      (r.data?.violacoes && r.data.violacoes[0] && (r.data.violacoes[0].razao||r.data.violacoes[0].propriedade)) ||
+      JSON.stringify(r.data).slice(0,150);
+    throw new Error('[' + r.status + '] ' + motivo);
+  }
   return r;
 }
 
@@ -3473,7 +3480,8 @@ async function processarFilaBoletos() {
           await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'aluno não encontrado' });
           continue;
         }
-        if (!aluno.cpf) {
+        // CPF só é necessário para EMISSÃO de boleto novo — cancelamento não precisa
+        if (!aluno.cpf && pedido.acao !== 'cancelar') {
           await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'sem CPF' });
           await tgSend(TELEGRAM_CHAT_ID, '⚠️ Não foi possível emitir boletos de *' + aluno.nome + '* automaticamente: CPF não cadastrado.\nCadastre o CPF e emita manualmente: _"emitir plano ' + aluno.nome.split(' ')[0] + '"_');
           continue;
