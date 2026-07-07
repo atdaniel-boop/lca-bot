@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.23 - fix: fallback vencimento = último mês do bloco + 1 (Rosa fev-jul → vence ago)
+// Versão 11.25 - fix: precedência de operadores no caption do tgSendPDF (caption||" sem parênteses); emissão de plano tenta 2ª vez buscar link do boleto antes de desistir, e avisa claramente quando PDF não pôde ser enviado
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.23'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '11.25'; // fonte única da versão — usada no log, health check, ajuda e backup
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -546,7 +546,7 @@ async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption) {
   const parts = [
     '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
     '--' + boundary + '\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown',
-    '--' + boundary + '\r\nContent-Disposition: form-data; name="caption"\r\n\r\n' + caption||'',
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="caption"\r\n\r\n' + (caption||''),
     '--' + boundary + '\r\nContent-Disposition: form-data; name="document"; filename="' + safeFilename + '"\r\nContent-Type: application/pdf\r\n\r\n'
   ];
   const header = Buffer.from(parts.join('\r\n'));
@@ -598,7 +598,7 @@ async function tgSendPDF(chatId, pdfUrl, filename, caption) {
   const parts = [
     '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
     '--' + boundary + '\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown',
-    '--' + boundary + '\r\nContent-Disposition: form-data; name="caption"\r\n\r\n' + caption||'',
+    '--' + boundary + '\r\nContent-Disposition: form-data; name="caption"\r\n\r\n' + (caption||''),
     '--' + boundary + '\r\nContent-Disposition: form-data; name="document"; filename="' + safeFilename + '"\r\nContent-Type: application/pdf\r\n\r\n'
   ];
 
@@ -2258,10 +2258,24 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     }
     const valor = valorAuto;
 
+    // Buscar a renovação mais recente do histórico (registrada pelo site ou por comando anterior)
+    // para usar como base do ciclo — evita recalcular a partir de "hoje" e pular meses
+    let renovacaoExistente = null;
+    try {
+      const histAtual = typeof aluno.historico_alteracoes==='string'
+        ? JSON.parse(aluno.historico_alteracoes||'[]') : (aluno.historico_alteracoes||[]);
+      const renovacoes = histAtual.filter(h => h.tipo === 'renovacao' && h.data);
+      if (renovacoes.length) renovacaoExistente = renovacoes[renovacoes.length-1];
+    } catch(eHR) { console.error('[emitir_plano] erro ao ler histórico:', eHR.message); }
+
     let anoBase, mesBase;
     if (p?.mes) {
       const pm = p.mes.split('-');
       anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
+    } else if (renovacaoExistente) {
+      // Usar o mês da renovação já registrada como início do ciclo
+      const dp = renovacaoExistente.data.split('/');
+      anoBase = parseInt(dp[2]); mesBase = parseInt(dp[1]) - 1;
     } else if (aluno.data_matricula && /^\d{4}-\d{2}-\d{2}$/.test(aluno.data_matricula)) {
       // Usar o mês da data de matrícula como base (ex: matrícula 10/07 → 1º boleto em julho).
       const pm = aluno.data_matricula.split('-');
@@ -2273,10 +2287,10 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 
     const diaVenc = aluno.dia_vencimento || 10;
 
-    // PROTEÇÃO: o Inter recusa boleto com vencimento retroativo ("O valor deve ser igual
-    // ou maior à data atual"). Se o 1º vencimento (base + diaVenc) já passou, avança a base
-    // mês a mês até o 1º vencimento ser hoje ou futuro. Garante que NENHUM boleto saia no passado.
-    {
+    // PROTEÇÃO: o Inter recusa boleto com vencimento retroativo. Só aplicar quando NÃO há
+    // renovação existente — nesse caso o loop de "pular meses já cobertos" abaixo já lida
+    // com meses passados sem distorcer o início real do ciclo.
+    if (!renovacaoExistente) {
       const hojeD = new Date(); hojeD.setHours(0,0,0,0);
       let primeiroVenc = new Date(anoBase, mesBase, diaVenc);
       let guard = 0;
@@ -2287,6 +2301,8 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         guard++;
       }
       console.log('[PLANO] base calculada:', anoBase + '-' + String(mesBase+1).padStart(2,'0'), '| 1º venc:', primeiroVenc.toISOString().slice(0,10), '| avanços:', guard);
+    } else {
+      console.log('[PLANO] usando renovação existente como base:', anoBase + '-' + String(mesBase+1).padStart(2,'0'));
     }
 
     const MESES_PT = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
@@ -2405,16 +2421,26 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         } catch(ePend) { console.error('[emitir_plano] erro ao gravar pendente:', ePend.message); }
         // Enviar PDF com nome correto
         const nomeArq = 'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc + ' - ' + aluno.nome.split(' ')[0] + '.pdf';
+        // Se ainda sem link, tentar buscar novamente com delay maior antes de desistir
+        if (!link && cod !== '?') {
+          try {
+            await new Promise(r => setTimeout(r, 2500));
+            const token2 = await interGetToken('boleto-cobranca.read');
+            const rBol2 = await interReq('/cobranca/v3/cobrancas/' + cod, 'GET', null, token2);
+            link = rBol2?.data?.linkVisualizacaoBoleto || rBol2?.data?.link || '';
+          } catch(eLink2) { console.warn('[PDF plano ' + numBoleto + '] 2ª tentativa de link falhou:', eLink2.message); }
+        }
         if (link) {
           try {
             await tgSendPDF(chatId,link, nomeArq,
               '📄 Boleto ' + numBoleto + '/' + dur + ' - ' + mesNome + ' ' + anoVenc + ' | vence ' + fmtData(dtVenc) + ' | ' + brl(valor));
+            resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ✅ PDF enviado acima');
           } catch(ePdf) {
             console.error('[PDF plano ' + numBoleto + ']', ePdf.message);
-            resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - [ver](' + link + ')');
+            resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ⚠️ PDF falhou, [ver boleto](' + link + ')');
           }
         } else {
-          resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - cod: ' + cod);
+          resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ⚠️ PDF indisponível ainda (cod: ' + cod + ') — use "reenviar boletos" em alguns minutos');
         }
       } catch(e) {
         resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - ❌ ' + e.message.slice(0,60));
@@ -2424,9 +2450,9 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     }
 
     const status = erros === 0 ? '✅' : erros === dur ? '❌' : '⚠️';
-    // Registrar a renovação no histórico (igual ao site) para que o cálculo de vencimento
-    // use a data real em vez de inferir pelos boletos. Só registra se algo foi emitido.
-    if (erros < dur) {
+    // Registrar a renovação no histórico apenas se NÃO havia uma já cobrindo este período
+    // (evita duplicar quando o comando apenas completa a emissão de uma renovação existente)
+    if (erros < dur && !renovacaoExistente) {
       try {
         const rAlH = await sbGet('alunos', 'select=historico_alteracoes&id=eq.' + aluno.id);
         const alH = (Array.isArray(rAlH) ? rAlH[0] : rAlH?.data?.[0]) || {};
