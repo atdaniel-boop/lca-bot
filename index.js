@@ -1,10 +1,11 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 11.32 - fix: quando PDF do boleto não está pronto na emissão, bot agenda reenvio automático via fila (até 5 tentativas a cada 2 min) em vez de só avisar e desistir
+// Versão 12.0 - bot dividido em 4 partes (parte2 passou de 100KB); ordem de deploy: parte1 + parte2 + parte3 + parte4 (sequencial). Sem mudanças funcionais nesta versão, apenas reorganização de arquivos
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '11.32'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.0'; // fonte única da versão — usada no log, health check, ajuda e backup
+const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '210213875'; // ID numérico de @atdaniel83
@@ -2253,6 +2254,12 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
       ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
       : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (_emissaoEmAndamento.has(aluno.id)) {
+      return '⏳ Já existe uma emissão de plano em andamento para *' + aluno.nome + '*. Aguarde 1 minuto e confira o histórico financeiro antes de tentar de novo (evita duplicar boletos).';
+    }
+    // Lock com auto-liberação em 2 min, para não travar para sempre se algo falhar sem passar pelo finally
+    _emissaoEmAndamento.add(aluno.id);
+    setTimeout(() => _emissaoEmAndamento.delete(aluno.id), 120000);
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
     if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir boletos.';
     if (!cpfValido(cpf)) return '⚠️ O CPF de *' + aluno.nome + '* (' + aluno.cpf + ') parece inválido. O banco recusa CPF com dígito verificador errado. Confira o cadastro.';
@@ -2531,8 +2538,11 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       await tgSend(chatId, '✂️ *Copie a mensagem abaixo e envie no WhatsApp da aluna:*');
       await tgSend(chatId, msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc));
     }
+    _emissaoEmAndamento.delete(aluno.id);
     return resumo;
   }
+
+// ── bot_parte3.js — continuação de executar() iniciada em bot_parte2.js ────────
 
   if (intencao === 'confirmar_cheque') {
     const aluno = encontrarAluno(dados, p);
@@ -3158,15 +3168,15 @@ async function processar(msg) {
   if (!_mesMatch) { var _mm = _tL.match(/(\d{2})\/(\d{4})/); if (_mm) _mesMatch = _mm[2]+'-'+_mm[1]; }
   if (!_mesMatch) { var _mm2 = _tL.match(/(\d{4})-(\d{2})/); if (_mm2) _mesMatch = _mm2[0]; }
   const mes = _mesMatch || new Date().toISOString().slice(0,7);
-  // Timeout geral - responde se demorar mais de 45s
+  // Timeout geral - responde se demorar mais de 90s (emissão de plano com vários boletos pode levar tempo)
   let _timedOut = false;
   const _timer = setTimeout(() => {
     _timedOut = true;
     // Limpar contexto pendente para evitar que a próxima mensagem seja interpretada como valor
     if (ctx[chatId]) delete ctx[chatId];
     // Só envia aviso se ainda não respondeu
-    if (!_respondeu) tgSend(chatId, '⚠️ Demorou mais que o esperado. Tente novamente em alguns segundos.');
-  }, 45000);
+    if (!_respondeu) tgSend(chatId, '⚠️ Está demorando mais que o esperado, mas a operação pode ainda estar em andamento no Inter. Aguarde 1 minuto e confira antes de tentar de novo (evita duplicar boletos).');
+  }, 90000);
   let _respondeu = false;
 
   let dados;
