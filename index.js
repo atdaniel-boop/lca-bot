@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.4 - TESTE multa/juros: tentativa 4 — adicionado campo "data" (dia seguinte ao vencimento) em multa e mora, baseado no padrão DataMulta/DataMora usado por outras integrações reais com a API v3 do Inter (biblioteca renatojdev/bancointer-python, atualizada para v3)
+// Versão 12.5 - TESTE multa/juros: CONFIRMADO pelo suporte Inter — taxa deve ser fração decimal (0.02 = 2%25), não percentual inteiro (2). Corrigido para 0.02 e 0.01
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.4'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.5'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -505,17 +505,17 @@ async function interEmitirBoletoTESTE_MultaJuros(dados) {
       linha2: ('Ref: ' + new Date().toLocaleDateString('pt-BR')).slice(0,78)
     },
     // ─── Campos de teste: multa e mora ───
-    // Hipótese: falta o campo "data" (data em que passa a incidir) — padrão comum em boletos:
-    // multa/mora começam a contar a partir do dia seguinte ao vencimento.
+    // CONFIRMADO pelo suporte Inter: taxa deve ser fração decimal, não percentual inteiro.
+    // 2% → 0.02 | 1% → 0.01 (não 2 e 1)
     multa: {
       codigoMulta: 'PERCENTUAL',
       data: dataMultaMora,
-      taxa: 2.00
+      taxa: 0.02
     },
     mora: {
       codigoMora: 'TAXAMENSAL',
       data: dataMultaMora,
-      taxa: 1.00
+      taxa: 0.01
     }
   };
 
