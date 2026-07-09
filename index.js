@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.3 - TESTE multa/juros: tentativa 3 — taxa como string ("2.00") e sem campo valor quando codigoMulta=PERCENTUAL (tentativas anteriores com number+valor:0 continuaram dando "Não foi possível converter o valor")
+// Versão 12.4 - TESTE multa/juros: tentativa 4 — adicionado campo "data" (dia seguinte ao vencimento) em multa e mora, baseado no padrão DataMulta/DataMora usado por outras integrações reais com a API v3 do Inter (biblioteca renatojdev/bancointer-python, atualizada para v3)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.3'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.4'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -477,6 +477,10 @@ async function interEmitirBoletoTESTE_MultaJuros(dados) {
   const ufLimpo = String(dados.uf||'RJ').replace(/[^A-Za-z]/g,'').trim().toUpperCase().slice(0,2) || 'RJ';
   const nomeLimpo = String(dados.nomePagador||'').replace(/[^0-9A-Za-zÀ-ÿ. -]/g,'').trim().slice(0,100);
   const valorNum = Math.round((parseFloat(dados.valor)||0)*100)/100;
+  // Data em que multa/mora passam a incidir: dia seguinte ao vencimento
+  const dtVencObj = new Date(dados.vencimento + 'T00:00:00');
+  const dtMultaMora = new Date(dtVencObj.getTime() + 86400000);
+  const dataMultaMora = dtMultaMora.toISOString().slice(0,10);
 
   const body = {
     seuNumero:    (dados.seuNumero || ('LCATST-' + Date.now())).slice(0,15),
@@ -501,15 +505,17 @@ async function interEmitirBoletoTESTE_MultaJuros(dados) {
       linha2: ('Ref: ' + new Date().toLocaleDateString('pt-BR')).slice(0,78)
     },
     // ─── Campos de teste: multa e mora ───
-    // Tentativa: quando codigoMulta=PERCENTUAL, o Inter pode não aceitar 'valor' junto (só 'taxa')
-    // Alguns bancos exigem taxa como string. Testando ambos os ajustes de uma vez.
+    // Hipótese: falta o campo "data" (data em que passa a incidir) — padrão comum em boletos:
+    // multa/mora começam a contar a partir do dia seguinte ao vencimento.
     multa: {
       codigoMulta: 'PERCENTUAL',
-      taxa: '2.00'
+      data: dataMultaMora,
+      taxa: 2.00
     },
     mora: {
       codigoMora: 'TAXAMENSAL',
-      taxa: '1.00'
+      data: dataMultaMora,
+      taxa: 1.00
     }
   };
 
