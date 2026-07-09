@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.1 - TESTE isolado: comando "testar boleto multa [nome] [valor]" tenta emitir boleto com multa 2% e juros 1% (schema objeto multa/mora conforme doc Inter v3). Área de teste claramente demarcada em bot_parte1.js e bot_parte4.js, sem afetar fluxo normal — reversível removendo os blocos marcados
+// Versão 12.2 - TESTE multa/juros ajustado: adicionado campo "valor:0" obrigatório junto de "taxa" no objeto multa/mora (erro anterior: "Não foi possível converter o valor" na propriedade multa — schema confirmado via bibliotecas de integração real com a API Inter)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.1'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.2'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -504,11 +504,13 @@ async function interEmitirBoletoTESTE_MultaJuros(dados) {
     // Schema conforme documentação Inter API v3 Cobranças
     multa: {
       codigoMulta: 'PERCENTUAL',
-      taxa: 2 // 2%
+      taxa: 2.00,
+      valor: 0
     },
     mora: {
       codigoMora: 'TAXAMENSAL',
-      taxa: 1 // 1% ao mês
+      taxa: 1.00,
+      valor: 0
     }
   };
 
