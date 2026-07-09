@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.2 - TESTE multa/juros ajustado: adicionado campo "valor:0" obrigatório junto de "taxa" no objeto multa/mora (erro anterior: "Não foi possível converter o valor" na propriedade multa — schema confirmado via bibliotecas de integração real com a API Inter)
+// Versão 12.3 - TESTE multa/juros: tentativa 3 — taxa como string ("2.00") e sem campo valor quando codigoMulta=PERCENTUAL (tentativas anteriores com number+valor:0 continuaram dando "Não foi possível converter o valor")
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.2'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.3'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -501,16 +501,15 @@ async function interEmitirBoletoTESTE_MultaJuros(dados) {
       linha2: ('Ref: ' + new Date().toLocaleDateString('pt-BR')).slice(0,78)
     },
     // ─── Campos de teste: multa e mora ───
-    // Schema conforme documentação Inter API v3 Cobranças
+    // Tentativa: quando codigoMulta=PERCENTUAL, o Inter pode não aceitar 'valor' junto (só 'taxa')
+    // Alguns bancos exigem taxa como string. Testando ambos os ajustes de uma vez.
     multa: {
       codigoMulta: 'PERCENTUAL',
-      taxa: 2.00,
-      valor: 0
+      taxa: '2.00'
     },
     mora: {
       codigoMora: 'TAXAMENSAL',
-      taxa: 1.00,
-      valor: 0
+      taxa: '1.00'
     }
   };
 
