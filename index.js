@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.0 - bot dividido em 4 partes (parte2 passou de 100KB); ordem de deploy: parte1 + parte2 + parte3 + parte4 (sequencial). Sem mudanças funcionais nesta versão, apenas reorganização de arquivos
+// Versão 12.1 - TESTE isolado: comando "testar boleto multa [nome] [valor]" tenta emitir boleto com multa 2% e juros 1% (schema objeto multa/mora conforme doc Inter v3). Área de teste claramente demarcada em bot_parte1.js e bot_parte4.js, sem afetar fluxo normal — reversível removendo os blocos marcados
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.0'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.1'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -457,6 +457,78 @@ async function interEmitirBoleto(dados) {
   }
   return r.data;
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// ÁREA DE TESTE — Multa e Juros em boleto avulso (INÍCIO)
+// Isolada de propósito: não é chamada por nenhum fluxo normal do bot.
+// Só é acionada pelo comando "testar boleto multa" no chat.
+// Para remover este teste por completo: apagar tudo entre as marcações
+// INÍCIO e FIM desta seção. Nada fora daqui depende dela.
+// ════════════════════════════════════════════════════════════════════════════
+async function interEmitirBoletoTESTE_MultaJuros(dados) {
+  const token = await interGetToken('boleto-cobranca.write');
+  const cpfLimpo = (dados.cpfCnpj||'').replace(/\D/g,'');
+  let cepLimpo = (dados.cep||'').replace(/\D/g,'').slice(0,8);
+  if (cepLimpo.length !== 8 || /^0+$/.test(cepLimpo)) cepLimpo = '22220000';
+  let numeroLimpo = String(dados.numero||'').replace(/[^0-9A-Za-z\/ ]/g,'').trim() || 'S/N';
+  if (numeroLimpo.length > 10) numeroLimpo = numeroLimpo.slice(0,10);
+  const enderecoLimpo = String(dados.endereco||'Nao informado').replace(/[^0-9A-Za-zÀ-ÿ.,\/ -]/g,'').trim().slice(0,90) || 'Nao informado';
+  const cidadeLimpa = String(dados.cidade||'Rio de Janeiro').replace(/[^0-9A-Za-zÀ-ÿ. -]/g,'').trim().slice(0,60) || 'Rio de Janeiro';
+  const ufLimpo = String(dados.uf||'RJ').replace(/[^A-Za-z]/g,'').trim().toUpperCase().slice(0,2) || 'RJ';
+  const nomeLimpo = String(dados.nomePagador||'').replace(/[^0-9A-Za-zÀ-ÿ. -]/g,'').trim().slice(0,100);
+  const valorNum = Math.round((parseFloat(dados.valor)||0)*100)/100;
+
+  const body = {
+    seuNumero:    (dados.seuNumero || ('LCATST-' + Date.now())).slice(0,15),
+    valorNominal: valorNum,
+    dataVencimento: dados.vencimento,
+    numDiasAgenda: 30,
+    pagador: {
+      cpfCnpj:    cpfLimpo,
+      tipoPessoa: cpfLimpo.length === 11 ? 'FISICA' : 'JURIDICA',
+      nome:       nomeLimpo,
+      email:      dados.email || undefined,
+      endereco:   enderecoLimpo,
+      cidade:     cidadeLimpa,
+      uf:         ufLimpo,
+      cep:        cepLimpo,
+      numero:     numeroLimpo,
+      complemento: dados.complemento ? String(dados.complemento).replace(/[^0-9A-Za-zÀ-ÿ.,\/ -]/g,'').slice(0,30) : undefined,
+      bairro: dados.bairro ? String(dados.bairro).replace(/[^0-9A-Za-zÀ-ÿ. -]/g,'').slice(0,40) : undefined
+    },
+    mensagem: {
+      linha1: (dados.descricao || 'TESTE multa e juros').slice(0,78),
+      linha2: ('Ref: ' + new Date().toLocaleDateString('pt-BR')).slice(0,78)
+    },
+    // ─── Campos de teste: multa e mora ───
+    // Schema conforme documentação Inter API v3 Cobranças
+    multa: {
+      codigoMulta: 'PERCENTUAL',
+      taxa: 2 // 2%
+    },
+    mora: {
+      codigoMora: 'TAXAMENSAL',
+      taxa: 1 // 1% ao mês
+    }
+  };
+
+  const r = await interReq('/cobranca/v3/cobrancas', 'POST', body, token, {
+    'x-id-idempotente': require('crypto').randomUUID()
+  });
+  console.log('[TESTE multa/juros] BODY ENVIADO:', JSON.stringify(body));
+  console.log('[TESTE multa/juros] STATUS:', r.status);
+  console.log('[TESTE multa/juros] RESPOSTA INTER:', JSON.stringify(r.data||{}));
+  if (r.status < 200 || r.status >= 300) {
+    const motivo = r.data?.detail || r.data?.title ||
+      (r.data?.violacoes && r.data.violacoes.map(v => v.razao||v.propriedade).join('; ')) ||
+      JSON.stringify(r.data).slice(0,200);
+    throw new Error('[' + r.status + '] ' + motivo);
+  }
+  return r.data;
+}
+// ════════════════════════════════════════════════════════════════════════════
+// ÁREA DE TESTE — Multa e Juros em boleto avulso (FIM)
+// ════════════════════════════════════════════════════════════════════════════
 
 // Cancela um boleto/cobrança no Inter pelo código de solicitação.
 async function interCancelarBoleto(codigoSolicitacao) {
@@ -3075,6 +3147,60 @@ async function processar(msg) {
 
   // Ignorar mensagens antigas (>60s)
   if ((Math.floor(Date.now()/1000) - (msg.date||0)) > 60) return;
+
+  // ════════════════════════════════════════════════════════════════════════
+  // ÁREA DE TESTE — comando "testar boleto multa [nome] [valor]" (INÍCIO)
+  // Isolado de propósito: para remover, apagar este bloco inteiro até o FIM.
+  // Não interfere em nenhum outro comando ou fluxo do bot.
+  // ════════════════════════════════════════════════════════════════════════
+  if (texto.toLowerCase().startsWith('testar boleto multa')) {
+    await tgSend(chatId, '🧪 Testando emissão de boleto com multa (2%) e juros (1%)...');
+    try {
+      const dadosAtuais = await getDados();
+      const restoTxt = texto.slice('testar boleto multa'.length).trim();
+      const valorMatch = restoTxt.match(/(\d+([.,]\d+)?)/);
+      const valorTeste = valorMatch ? parseFloat(valorMatch[1].replace(',','.')) : 10;
+      const nomeTxt = restoTxt.replace(/(\d+([.,]\d+)?)/, '').trim();
+      const alunoTeste = nomeTxt ? encontrarAluno(dadosAtuais, { aluno_nome: nomeTxt }) : null;
+
+      if (nomeTxt && (!alunoTeste || Array.isArray(alunoTeste))) {
+        return tgSend(chatId, '❌ Aluno "' + nomeTxt + '" não encontrado ou ambíguo. Use: "testar boleto multa NomeCompleto 10"');
+      }
+      const dadosPagador = alunoTeste ? {
+        nomePagador: alunoTeste.nome, cpfCnpj: (alunoTeste.cpf||'').replace(/\D/g,''),
+        email: alunoTeste.email, endereco: alunoTeste.logradouro || alunoTeste.endereco,
+        cidade: alunoTeste.cidade, uf: 'RJ', cep: alunoTeste.cep,
+        numero: alunoTeste.numero, complemento: alunoTeste.complemento, bairro: alunoTeste.bairro
+      } : {
+        nomePagador: 'Teste Multa Juros', cpfCnpj: '00000000000',
+        endereco: 'Rua Teste', cidade: 'Rio de Janeiro', uf: 'RJ', cep: '22220000', numero: '1'
+      };
+      if (!dadosPagador.cpfCnpj || dadosPagador.cpfCnpj.length < 11) {
+        return tgSend(chatId, '❌ Aluno de teste sem CPF válido cadastrado.');
+      }
+      const amanha = new Date(Date.now() + 86400000);
+      const vencTeste = amanha.toISOString().slice(0,10);
+
+      const resultado = await interEmitirBoletoTESTE_MultaJuros({
+        ...dadosPagador, valor: valorTeste, vencimento: vencTeste,
+        descricao: 'TESTE multa e juros', seuNumero: 'LCATST' + Date.now().toString().slice(-9)
+      });
+      await tgSend(chatId,
+        '✅ *Boleto de teste emitido com sucesso!*\n' +
+        '💰 ' + brl(valorTeste) + ' | vence ' + vencTeste.split('-').reverse().join('/') + '\n' +
+        '👤 ' + dadosPagador.nomePagador + '\n' +
+        'Código: ' + (resultado?.codigoSolicitacao||'?') + '\n\n' +
+        '🔎 Confira no portal do Inter se a multa (2%) e juros (1%) aparecem no boleto gerado.\n' +
+        (resultado?.linkVisualizacaoBoleto ? '[Ver boleto](' + resultado.linkVisualizacaoBoleto + ')' : '')
+      );
+    } catch(eTeste) {
+      await tgSend(chatId, '❌ *Teste falhou.* O Inter rejeitou:\n' + eTeste.message.slice(0,300) + '\n\nVeja os logs do Render para o payload completo enviado.');
+    }
+    return;
+  }
+  // ════════════════════════════════════════════════════════════════════════
+  // ÁREA DE TESTE — comando "testar boleto multa" (FIM)
+  // ════════════════════════════════════════════════════════════════════════
 
   // Confirmação de rescisão pendente
   if (pendente[chatId]) {
