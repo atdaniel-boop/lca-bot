@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.10 - SCHEMA CONFIRMADO por boleto real: multa {codigo:PERCENTUAL,taxa:2.0} correto (2%25 no boleto), mora {codigo:TAXAMENSAL,taxa:0.01} gerou 0,01%25 (100x menor) — corrigido para taxa:1.0
+// Versão 12.13 - fix crítico: rotina de detecção de Pix (rotina-pix) não cancelava o boleto correspondente no Inter, deixando-o atrasado mesmo apos o aluno pagar via Pix
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.12'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.13'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3799,11 +3799,32 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
         if (tinhaPend) patch.pagamentos_pendentes = pend;
         await sbPatch('alunos', 'id=eq.' + aluno.id, patch);
         await logOp('pix_detectado', aluno.nome + ' - ' + mesAtualStr, aluno.id, valor, mesAtualStr);
+        // Cancelar boleto real no Inter, se ainda estiver aberto para este mês
+        // (evita boleto ficar aberto/atrasado no Inter quando o aluno já pagou via Pix)
+        let boletoCancelMsg = '';
+        try {
+          const rBolPix = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&mes=eq.' + mesAtualStr + '&status=eq.aberto&select=id,codigo_solicitacao');
+          const bolsPix = Array.isArray(rBolPix) ? rBolPix : (rBolPix?.data || []);
+          for (const b of bolsPix) {
+            if (!b.codigo_solicitacao) continue;
+            try {
+              await interCancelarBoleto(b.codigo_solicitacao);
+            } catch(eCancPix) {
+              const msgErro = (eCancPix.message||'').toLowerCase();
+              if (!msgErro.includes('cancelad') && !msgErro.includes('já está') && !msgErro.includes('baixad')) throw eCancPix;
+            }
+            await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+          }
+          if (bolsPix.length) boletoCancelMsg = '\n🏦 Boleto correspondente cancelado no Inter automaticamente.';
+        } catch(eBolPix) {
+          console.error('[rotina-pix] erro ao cancelar boleto:', aluno.nome, eBolPix.message);
+          boletoCancelMsg = '\n⚠️ Não consegui cancelar o boleto no Inter automaticamente — verifique manualmente.';
+        }
         await tgSend(TELEGRAM_CHAT_ID,
           '💸 *Pix detectado e lançado!*\n\n' +
           '👤 ' + aluno.nome + '\n' +
           '💰 ' + brl(valor) + '\n' +
-          '📅 ' + mesAtualStr + ' — Pix recebido hoje no Inter.\n\n' +
+          '📅 ' + mesAtualStr + ' — Pix recebido hoje no Inter.' + boletoCancelMsg + '\n\n' +
           '_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mesAtualStr + '"_');
         console.log('[rotina-pix] lançado:', aluno.nome, valor);
         lancados++;
