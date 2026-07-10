@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.14 - fix: 'sumario inter' era interpretado pelo Gemini como pedido de resumo financeiro geral, nao inter_sumario; adicionada deteccao direta pre-Gemini igual ao comando 'saldo'
+// Versão 12.15 - fix: interSumarioCobrancas agora checa status HTTP real e loga erro do Inter (antes retornava [] silenciosamente mesmo com erro, sem informar a causa)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.14'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.15'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -836,7 +836,12 @@ async function interSumarioCobrancas() {
   try {
     const token = await interGetToken('boleto-cobranca.read');
     const r = await interReq('/cobranca/v3/cobrancas/sumario', 'GET', null, token);
-    return Array.isArray(r) ? r : (r?.data || []);
+    if (r && r.status && (r.status < 200 || r.status >= 300)) {
+      console.error('[interSumarioCobrancas] Inter recusou. Status:', r.status, '| Resposta:', JSON.stringify(r.data||{}));
+      return [];
+    }
+    const corpo = r?.data !== undefined ? r.data : r;
+    return Array.isArray(corpo) ? corpo : [];
   } catch(e) {
     console.error('[interSumarioCobrancas] erro:', e.message);
     return [];
@@ -1671,7 +1676,7 @@ async function executar(intencao, p, dados, chatId) {
   if (intencao === 'inter_sumario') {
     try {
       const sumario = await interSumarioCobrancas();
-      if (!sumario.length) return '⚠️ Não consegui obter o sumário de cobranças do Inter.';
+      if (!sumario.length) return '⚠️ Não consegui obter o sumário de cobranças do Inter.\n\n_Verifique os logs do Render para o erro exato — pode ser escopo da API não habilitado, ou endpoint /sumario ainda indisponível na sua conta._';
       const labels = {
         RECEBIDO: '✅ Recebido', A_RECEBER: '📥 A receber', ATRASADO: '🔴 Atrasado',
         MARCADO_RECEBIDO: '☑️ Marcado recebido', FALHA_EMISSAO: '❌ Falha na emissão',
