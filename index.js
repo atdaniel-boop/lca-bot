@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.16 - fix: endpoint /sumario exige dataInicial/dataFinal como query params — adicionados com default de ultimos 12 meses ate hoje
+// Versão 12.17 - fix: janela de datas do sumario cortava fora vencimentos futuros (so 1 boleto a receber); ampliada para 18 meses atras + 12 a frente, com fallback para 6+6 se recusada
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.16'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.17'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -835,14 +835,23 @@ function calcVencimentoPlanoBot(a) {
 async function interSumarioCobrancas(dataInicial, dataFinal) {
   try {
     const token = await interGetToken('boleto-cobranca.read');
-    // Endpoint exige dataInicial/dataFinal como query params — default: últimos 12 meses até hoje
+    // Endpoint filtra por data de vencimento — precisa cobrir passado (recebidos/atrasados)
+    // E futuro (a receber). Default: 18 meses atrás até 12 meses à frente.
     const hoje = new Date();
-    const ini = dataInicial || new Date(hoje.getFullYear(), hoje.getMonth()-12, hoje.getDate()).toISOString().slice(0,10);
-    const fim = dataFinal || hoje.toISOString().slice(0,10);
-    const qs = 'dataInicial=' + ini + '&dataFinal=' + fim;
-    const r = await interReq('/cobranca/v3/cobrancas/sumario?' + qs, 'GET', null, token);
+    let ini = dataInicial || new Date(hoje.getFullYear(), hoje.getMonth()-18, hoje.getDate()).toISOString().slice(0,10);
+    let fim = dataFinal || new Date(hoje.getFullYear(), hoje.getMonth()+12, hoje.getDate()).toISOString().slice(0,10);
+    let r = await interReq('/cobranca/v3/cobrancas/sumario?dataInicial=' + ini + '&dataFinal=' + fim, 'GET', null, token);
+
+    // Se a janela grande for recusada (limite de intervalo da API), tentar janela menor: 6+6 meses
     if (r && r.status && (r.status < 200 || r.status >= 300)) {
-      console.error('[interSumarioCobrancas] Inter recusou. Status:', r.status, '| Resposta:', JSON.stringify(r.data||{}));
+      console.error('[interSumarioCobrancas] janela 18+12 recusada. Status:', r.status, '| Resposta:', JSON.stringify(r.data||{}));
+      ini = new Date(hoje.getFullYear(), hoje.getMonth()-6, hoje.getDate()).toISOString().slice(0,10);
+      fim = new Date(hoje.getFullYear(), hoje.getMonth()+6, hoje.getDate()).toISOString().slice(0,10);
+      r = await interReq('/cobranca/v3/cobrancas/sumario?dataInicial=' + ini + '&dataFinal=' + fim, 'GET', null, token);
+    }
+
+    if (r && r.status && (r.status < 200 || r.status >= 300)) {
+      console.error('[interSumarioCobrancas] Inter recusou definitivamente. Status:', r.status, '| Resposta:', JSON.stringify(r.data||{}));
       return [];
     }
     const corpo = r?.data !== undefined ? r.data : r;
