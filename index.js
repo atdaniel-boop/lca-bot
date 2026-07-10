@@ -4,7 +4,7 @@
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.11'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.12'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -829,6 +829,20 @@ function calcVencimentoPlanoBot(a) {
   return new Date(anoVenc, mesVenc-1, diaV);
 }
 
+// Sumário rápido de cobranças por status (endpoint dedicado da API v3 — muito mais
+// leve que buscar e somar todas as cobranças manualmente via interCobrancasRobusto).
+// Retorna: [{ situacao, quantidade, valor }, ...] para RECEBIDO, A_RECEBER, ATRASADO, etc.
+async function interSumarioCobrancas() {
+  try {
+    const token = await interGetToken('boleto-cobranca.read');
+    const r = await interReq('/cobranca/v3/cobrancas/sumario', 'GET', null, token);
+    return Array.isArray(r) ? r : (r?.data || []);
+  } catch(e) {
+    console.error('[interSumarioCobrancas] erro:', e.message);
+    return [];
+  }
+}
+
 async function getDados() {
   const [ra, rc, rk] = await Promise.all([
     sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo,nfse_ativo,nfse_cpf,nfse_dias,nfse_desc,pref_envio,contato_emerg,grau_emerg,tel_emerg,historico,aulas_monica'),
@@ -1322,7 +1336,7 @@ function detectarAlunoNoTexto(dados, tL) {
     '{\n' +
     '  "tipo": "consulta" ou "acao",\n' +
     '  "resposta": "resposta em Markdown se consulta, null se acao",\n' +
-    '  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos/confirmar_cheque/alterar_plano,\n' +
+    '  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_sumario/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos/confirmar_cheque/alterar_plano,\n' +
     '  "params": {\n' +
     '    "aluno_nome": string ou null,\n' +
     '    "valor": numero — PRIORIDADE ABSOLUTA: se o usuario digitou um numero no texto, use EXATAMENTE esse numero, mesmo que diferente do historico. Apenas se NENHUM numero foi digitado, use o ultimo pagamento do aluno. Ou null,\n' +
@@ -1648,6 +1662,21 @@ async function executar(intencao, p, dados, chatId) {
       }
       return '⚠️ Resposta inesperada do Inter: ' + JSON.stringify(s) + '\n\n_Se o erro for "requested scope is not registered", acesse o Portal Inter → sua aplicação → habilite o escopo "Banking" (extrato e saldo)._';
     } catch(e) { return '❌ Erro Inter: ' + e.message; }
+  }
+
+  if (intencao === 'inter_sumario') {
+    try {
+      const sumario = await interSumarioCobrancas();
+      if (!sumario.length) return '⚠️ Não consegui obter o sumário de cobranças do Inter.';
+      const labels = {
+        RECEBIDO: '✅ Recebido', A_RECEBER: '📥 A receber', ATRASADO: '🔴 Atrasado',
+        MARCADO_RECEBIDO: '☑️ Marcado recebido', FALHA_EMISSAO: '❌ Falha na emissão',
+        EM_PROCESSAMENTO: '⏳ Em processamento', PROTESTO: '⚖️ Em protesto'
+      };
+      const linhas = sumario.map(s => (labels[s.situacao] || s.situacao) + ': ' + s.quantidade + ' boleto(s) — ' + brl(s.valor));
+      return '📊 *Sumário de Cobranças — Banco Inter*\n\n' + linhas.join('\n') +
+        '\n\n_Consulta rápida via endpoint dedicado (mais leve que o extrato completo)._';
+    } catch(e) { return '❌ Erro ao buscar sumário: ' + e.message; }
   }
 
   if (intencao === 'inter_extrato_debug') {
@@ -3571,6 +3600,15 @@ async function processarFilaBoletos() {
             const token = await interGetToken('boleto-cobranca.read');
             const det = await interReq('/cobranca/v3/cobrancas/' + pedido.codigo_solicitacao, 'GET', null, token);
             const cob = det?.cobranca || det?.data?.cobranca || det?.data || det;
+            const situacaoAtual = cob?.situacao || det?.situacao || '';
+            // FALHA_EMISSAO: o Inter aceitou o pedido mas falhou ao processar de fato (assíncrono).
+            // Sem essa checagem, o boleto ficaria "fantasma" no nosso sistema sem ninguém saber.
+            if (situacaoAtual === 'FALHA_EMISSAO') {
+              await sbPatch('boletos', 'codigo_solicitacao=eq.' + pedido.codigo_solicitacao, { status: 'erro' });
+              await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'FALHA_EMISSAO no Inter' });
+              await tgSend(pedido.chat_id || TELEGRAM_CHAT_ID, '❌ *Falha na emissão!* O boleto de *' + (pedido.aluno_nome||'') + '* (' + (pedido.mes||'') + ') foi recusado pelo Inter após aceitar o pedido inicial (situação: FALHA_EMISSAO). Emita novamente: "emitir boleto ' + (pedido.aluno_nome||'').split(' ')[0] + ' ' + (pedido.mes||'') + '"');
+              continue;
+            }
             const link = cob?.linkVisualizacaoBoleto || cob?.link || det?.linkVisualizacaoBoleto || det?.link || '';
             if (link) {
               const mesNomeR = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt((pedido.mes||'').slice(5,7))-1] || pedido.mes;
