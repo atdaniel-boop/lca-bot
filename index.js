@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.9 - TESTE multa/juros: testando mora com taxa fracionária 0.01 (em vez de 1.0) — TAXAMENSAL pode ter semântica diferente de PERCENTUAL, exigindo fração
+// Versão 12.10 - SCHEMA CONFIRMADO por boleto real: multa {codigo:PERCENTUAL,taxa:2.0} correto (2%25 no boleto), mora {codigo:TAXAMENSAL,taxa:0.01} gerou 0,01%25 (100x menor) — corrigido para taxa:1.0
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.9'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.10'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -504,18 +504,17 @@ async function interEmitirBoletoTESTE_MultaJuros(dados) {
       linha1: (dados.descricao || 'TESTE multa e juros').slice(0,78),
       linha2: ('Ref: ' + new Date().toLocaleDateString('pt-BR')).slice(0,78)
     },
-    // ─── Campos de teste: multa e mora ───
-    // CONFIRMADO via changelog oficial da API v3 (developers.inter.co):
-    // Schema V3: campo é "codigo" (confirmado — multa passou com PERCENTUAL).
-    // Mora rejeitou "PERCENTUAL" (erro mudou de multa→mora, ou seja multa passou).
-    // Testando TAXAMENSAL para mora, padrão tradicional para juros de mora (não é % único como multa).
+    // ─── Campos de teste: multa e mora ─── SCHEMA CONFIRMADO! ───
+    // Boleto real emitido mostrou: "MULTA DE 2%" correto, mas "MORA DE 0,01%" (100x menor).
+    // Conclusão: mora usa taxa como percentual direto igual multa, não fração.
+    // codigo=PERCENTUAL (multa) e codigo=TAXAMENSAL (mora) ambos confirmados corretos.
     multa: {
       codigo: 'PERCENTUAL',
       taxa: 2.0
     },
     mora: {
       codigo: 'TAXAMENSAL',
-      taxa: 0.01
+      taxa: 1.0
     }
   };
 
