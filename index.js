@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.13 - fix crítico: rotina de detecção de Pix (rotina-pix) não cancelava o boleto correspondente no Inter, deixando-o atrasado mesmo apos o aluno pagar via Pix
+// Versão 12.14 - fix: 'sumario inter' era interpretado pelo Gemini como pedido de resumo financeiro geral, nao inter_sumario; adicionada deteccao direta pre-Gemini igual ao comando 'saldo'
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.13'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.14'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1194,6 +1194,10 @@ async function processarComIA(texto, dados, mes) {
 
   if (temInter && (tL.includes('saldo') || tL.includes('quanto tem'))) {
     return { tipo: 'acao', intencao: 'inter_saldo', params: {} };
+  }
+
+  if (temInter && (tL.includes('sumario') || tL.includes('sumário'))) {
+    return { tipo: 'acao', intencao: 'inter_sumario', params: {} };
   }
 
   // Confirmar compensação de cheque
