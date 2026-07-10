@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.5 - TESTE multa/juros: CONFIRMADO pelo suporte Inter — taxa deve ser fração decimal (0.02 = 2%25), não percentual inteiro (2). Corrigido para 0.02 e 0.01
+// Versão 12.7 - TESTE multa/juros: SCHEMA CORRETO encontrado no changelog oficial developers.inter.co — campo e 'codigo' (nao codigoMulta/codigoMora), taxa decimal direto (2.0=2%25), mora usa codigo PERCENTUAL (nao TAXAMENSAL, que era da V2)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.5'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.7'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -505,17 +505,17 @@ async function interEmitirBoletoTESTE_MultaJuros(dados) {
       linha2: ('Ref: ' + new Date().toLocaleDateString('pt-BR')).slice(0,78)
     },
     // ─── Campos de teste: multa e mora ───
-    // CONFIRMADO pelo suporte Inter: taxa deve ser fração decimal, não percentual inteiro.
-    // 2% → 0.02 | 1% → 0.01 (não 2 e 1)
+    // CONFIRMADO via changelog oficial da API v3 (developers.inter.co):
+    // Schema V3 simplificado — campo é "codigo" (não codigoMulta/codigoMora),
+    // taxa como decimal representando o percentual direto (2.0 = 2%, não 0.02),
+    // e mora usa codigo "PERCENTUAL" (não TAXAMENSAL — isso era da V2).
     multa: {
-      codigoMulta: 'PERCENTUAL',
-      data: dataMultaMora,
-      taxa: 0.02
+      codigo: 'PERCENTUAL',
+      taxa: 2.0
     },
     mora: {
-      codigoMora: 'TAXAMENSAL',
-      data: dataMultaMora,
-      taxa: 0.01
+      codigo: 'PERCENTUAL',
+      taxa: 1.0
     }
   };
 
