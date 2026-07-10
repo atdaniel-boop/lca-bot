@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.15 - fix: interSumarioCobrancas agora checa status HTTP real e loga erro do Inter (antes retornava [] silenciosamente mesmo com erro, sem informar a causa)
+// Versão 12.16 - fix: endpoint /sumario exige dataInicial/dataFinal como query params — adicionados com default de ultimos 12 meses ate hoje
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.15'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.16'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -832,10 +832,15 @@ function calcVencimentoPlanoBot(a) {
 // Sumário rápido de cobranças por status (endpoint dedicado da API v3 — muito mais
 // leve que buscar e somar todas as cobranças manualmente via interCobrancasRobusto).
 // Retorna: [{ situacao, quantidade, valor }, ...] para RECEBIDO, A_RECEBER, ATRASADO, etc.
-async function interSumarioCobrancas() {
+async function interSumarioCobrancas(dataInicial, dataFinal) {
   try {
     const token = await interGetToken('boleto-cobranca.read');
-    const r = await interReq('/cobranca/v3/cobrancas/sumario', 'GET', null, token);
+    // Endpoint exige dataInicial/dataFinal como query params — default: últimos 12 meses até hoje
+    const hoje = new Date();
+    const ini = dataInicial || new Date(hoje.getFullYear(), hoje.getMonth()-12, hoje.getDate()).toISOString().slice(0,10);
+    const fim = dataFinal || hoje.toISOString().slice(0,10);
+    const qs = 'dataInicial=' + ini + '&dataFinal=' + fim;
+    const r = await interReq('/cobranca/v3/cobrancas/sumario?' + qs, 'GET', null, token);
     if (r && r.status && (r.status < 200 || r.status >= 300)) {
       console.error('[interSumarioCobrancas] Inter recusou. Status:', r.status, '| Resposta:', JSON.stringify(r.data||{}));
       return [];
