@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.18 - debug: adicionado logging detalhado em inter_boletos_vencidos para diagnosticar por que 'sumario inter' mostra 3 atrasados mas o comando de atrasados retorna vazio; corrigida mensagem enganosa de '90 dias' (busca real cobre 18 meses)
+// Versão 12.20 - sumario inter: janela padrão ajustada para 12 meses atrás + 12 à frente (era 18+12)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.18'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.20'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -836,15 +836,15 @@ async function interSumarioCobrancas(dataInicial, dataFinal) {
   try {
     const token = await interGetToken('boleto-cobranca.read');
     // Endpoint filtra por data de vencimento — precisa cobrir passado (recebidos/atrasados)
-    // E futuro (a receber). Default: 18 meses atrás até 12 meses à frente.
+    // E futuro (a receber). Default: 12 meses atrás até 12 meses à frente.
     const hoje = new Date();
-    let ini = dataInicial || new Date(hoje.getFullYear(), hoje.getMonth()-18, hoje.getDate()).toISOString().slice(0,10);
+    let ini = dataInicial || new Date(hoje.getFullYear(), hoje.getMonth()-12, hoje.getDate()).toISOString().slice(0,10);
     let fim = dataFinal || new Date(hoje.getFullYear(), hoje.getMonth()+12, hoje.getDate()).toISOString().slice(0,10);
     let r = await interReq('/cobranca/v3/cobrancas/sumario?dataInicial=' + ini + '&dataFinal=' + fim, 'GET', null, token);
 
     // Se a janela grande for recusada (limite de intervalo da API), tentar janela menor: 6+6 meses
     if (r && r.status && (r.status < 200 || r.status >= 300)) {
-      console.error('[interSumarioCobrancas] janela 18+12 recusada. Status:', r.status, '| Resposta:', JSON.stringify(r.data||{}));
+      console.error('[interSumarioCobrancas] janela 12+12 recusada. Status:', r.status, '| Resposta:', JSON.stringify(r.data||{}));
       ini = new Date(hoje.getFullYear(), hoje.getMonth()-6, hoje.getDate()).toISOString().slice(0,10);
       fim = new Date(hoje.getFullYear(), hoje.getMonth()+6, hoje.getDate()).toISOString().slice(0,10);
       r = await interReq('/cobranca/v3/cobrancas/sumario?dataInicial=' + ini + '&dataFinal=' + fim, 'GET', null, token);
@@ -1972,7 +1972,6 @@ async function executar(intencao, p, dados, chatId) {
       });
 
       console.log('[inter_boletos_vencidos] atrasados:', atrasados.length, '| emAberto:', emAberto.length);
-      if (atrasados.length) console.log('[inter_boletos_vencidos] atrasados RAW:', JSON.stringify(atrasados.slice(0,5)));
 
       // Unificar e deduplicar pelo código (sem EXPIRADO — boletos pagos por Pix ficam nesse status)
       const vistosId = new Set();
@@ -1992,12 +1991,8 @@ async function executar(intencao, p, dados, chatId) {
         const al = dados.alunos.find(a => a.id === psn.alunoId);
         if (!al) return true;
         const pagsB = typeof al.pagamentos==='string'?JSON.parse(al.pagamentos||'{}'):(al.pagamentos||{});
-        const jaPago = (pagsB[mesB]||0) > 0;
-        if (jaPago) console.log('[inter_boletos_vencidos] removido (já pago no site):', al.nome, mesB);
-        return !jaPago;
+        return !((pagsB[mesB]||0) > 0);
       }).sort((a,b) => (((a.cobranca||a).dataVencimento)||'').localeCompare(((b.cobranca||b).dataVencimento)||''));
-
-      console.log('[inter_boletos_vencidos] lista final:', lista.length);
 
       if (!lista.length) return '✅ *Boletos vencidos e não pagos*\n\n_Nenhum boleto atrasado encontrado no Inter (verificado nos últimos 18 meses)._';
 
