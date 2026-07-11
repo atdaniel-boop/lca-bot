@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.17 - fix: janela de datas do sumario cortava fora vencimentos futuros (so 1 boleto a receber); ampliada para 18 meses atras + 12 a frente, com fallback para 6+6 se recusada
+// Versão 12.18 - debug: adicionado logging detalhado em inter_boletos_vencidos para diagnosticar por que 'sumario inter' mostra 3 atrasados mas o comando de atrasados retorna vazio; corrigida mensagem enganosa de '90 dias' (busca real cobre 18 meses)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.17'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.18'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1972,6 +1972,7 @@ async function executar(intencao, p, dados, chatId) {
       });
 
       console.log('[inter_boletos_vencidos] atrasados:', atrasados.length, '| emAberto:', emAberto.length);
+      if (atrasados.length) console.log('[inter_boletos_vencidos] atrasados RAW:', JSON.stringify(atrasados.slice(0,5)));
 
       // Unificar e deduplicar pelo código (sem EXPIRADO — boletos pagos por Pix ficam nesse status)
       const vistosId = new Set();
@@ -1991,10 +1992,14 @@ async function executar(intencao, p, dados, chatId) {
         const al = dados.alunos.find(a => a.id === psn.alunoId);
         if (!al) return true;
         const pagsB = typeof al.pagamentos==='string'?JSON.parse(al.pagamentos||'{}'):(al.pagamentos||{});
-        return !((pagsB[mesB]||0) > 0); // se pago no site, remove dos vencidos
+        const jaPago = (pagsB[mesB]||0) > 0;
+        if (jaPago) console.log('[inter_boletos_vencidos] removido (já pago no site):', al.nome, mesB);
+        return !jaPago;
       }).sort((a,b) => (((a.cobranca||a).dataVencimento)||'').localeCompare(((b.cobranca||b).dataVencimento)||''));
 
-      if (!lista.length) return '✅ *Boletos vencidos e não pagos*\n\n_Nenhum boleto atrasado encontrado nos últimos 90 dias._';
+      console.log('[inter_boletos_vencidos] lista final:', lista.length);
+
+      if (!lista.length) return '✅ *Boletos vencidos e não pagos*\n\n_Nenhum boleto atrasado encontrado no Inter (verificado nos últimos 18 meses)._';
 
       // Estrutura real da API Inter v3: campos dentro de "cobranca", valor como string
       const linhas = lista.map(item => {
