@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.20 - sumario inter: janela padrão ajustada para 12 meses atrás + 12 à frente (era 18+12)
+// Versão 12.21 - backup semanal agora busca planos_historico e changelog das tabelas próprias no Supabase (migração v12.3/v12.6 do site), não mais do JSON changes desatualizado
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.20'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.21'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4298,9 +4298,20 @@ async function rotinaBackupSemanal() {
       agenda: changes.agenda || {},
       checkins: changes.checkins || {},
       planos: changes.planos || {},
-      planos_historico: changes.planos_historico || [],
       rescisao_seq: changes.rescisao_seq || 0
     };
+
+    // planos_historico migrado para tabela própria (site v12.3) — buscar de lá, não mais de changes
+    try {
+      const rPH = await sbGet('planos_historico', 'select=*&order=id.asc');
+      backup.planos_historico = Array.isArray(rPH) ? rPH : (rPH?.data || []);
+    } catch(ePH) { backup.planos_historico = changes.planos_historico || []; console.warn('[backup] planos_historico tabela indisponível, usando fallback changes:', ePH.message); }
+
+    // Incluir changelog migrado para tabela própria (site v12.6)
+    try {
+      const rChLog = await sbGet('changelog', 'select=*&order=id.asc');
+      backup.changelog = Array.isArray(rChLog) ? rChLog : (rChLog?.data || []);
+    } catch(eChLog) { backup.changelog = []; console.warn('[backup] changelog tabela indisponível:', eChLog.message); }
 
     // Incluir boletos da tabela boletos
     try {
