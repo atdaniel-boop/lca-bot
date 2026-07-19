@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.21 - backup semanal agora busca planos_historico e changelog das tabelas próprias no Supabase (migração v12.3/v12.6 do site), não mais do JSON changes desatualizado
+// Versão 12.22 - fix crítico: rotina automática de confirmação de pagamento usava valorNominal (valor original do boleto) em vez de valorTotalRecebido (inclui multa/juros quando pago em atraso) — subregistrava pagamentos com acréscimo
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.21'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.22'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3920,7 +3920,9 @@ async function verificarBoletosPagosInter() {
       const alunoId = psn.alunoId;
       const mes = psn.mes || (bc.dataVencimento || '').slice(0,7);
       if (!mes) continue;
-      const valor = parseFloat(bc.valorNominal || 0);
+      // Priorizar valorTotalRecebido (inclui multa/juros se pago em atraso) sobre valorNominal
+      // (valor original do boleto, sem acréscimos) — evita subregistrar pagamentos com atraso.
+      const valor = parseFloat(bc.valorTotalRecebido || bc.valorNominal || 0);
       if (!valor) continue;
 
       const aluno = dados.alunos.find(a => a.id === alunoId);
@@ -4452,7 +4454,7 @@ async function main() {
               try {
                 const token = await interGetToken('boleto-cobranca.read');
                 const det = await interReq('/cobranca/v3/cobrancas/' + seuNum, 'GET', null, token);
-                valorFinal = parseFloat(det?.cobranca?.valorNominal || det?.valorNominal || 0);
+                valorFinal = parseFloat(det?.cobranca?.valorTotalRecebido || det?.valorTotalRecebido || det?.cobranca?.valorNominal || det?.valorNominal || 0);
                 console.log('[WEBHOOK-INTER] Valor buscado na API:', valorFinal);
               } catch(e) { console.log('[WEBHOOK] erro ao buscar valor:', e.message); }
             }
