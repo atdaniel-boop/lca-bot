@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.25 - 3 fixes críticos: (1) itens da fila travados em 'processando' por crash/deploy agora são detectados e reenfileirados automaticamente com aviso; (2) cálculo de mesBase na renovação via bot não considerava se o dia de vencimento já tinha passado na data da renovação (agora replica exatamente a lógica do site); (3) schema do Gemini não tinha o campo 'vencimento' — boleto avulso com vencimento customizado sempre ignorava o que o usuário digitou e usava a data padrão calculada automaticamente
+// Versão 12.26 - 3 bugs de consistência de boleto: (1) confirmar_pagamento só cancelava boleto se forma_pagamento fosse 'boleto' (alunos pix/dinheiro com boleto avulso ficavam com boleto aberto); (2) compensação de cheque nunca cancelava boleto; (3) rotina-inter confirmava pagamento mas não atualizava status na tabela boletos, mantendo como 'a receber' no dashboard
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.25'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.26'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1473,13 +1473,13 @@ async function executar(intencao, p, dados, chatId) {
     if (tinhaPend) patchData.pagamentos_pendentes = pend;
     await sbPatch('alunos', 'id=eq.' + aluno.id, patchData);
     await logOp('pagamento_confirmado', aluno.nome + ' - ' + mes, aluno.id, p.valor, mes);
-    // Cancelar boleto Inter apenas se aluno usa boleto
-    const usaBoleto = aluno.forma_pagamento === 'boleto';
+    // Cancelar boleto Inter se existir um aberto para este mês — independente da
+    // forma_pagamento cadastrada, pois o aluno pode ter boleto emitido mesmo estando
+    // cadastrado como pix/dinheiro (ex: boleto avulso, cobrança excepcional).
     let msgCancelamento = '';
-    if (usaBoleto) {
-      const nCancelados = await cancelarBoletoPorMes(aluno.id, mes);
-      if (nCancelados > 0) msgCancelamento = '\n_Boleto Inter cancelado automaticamente._';
-    }
+    const nCancelados = await cancelarBoletoPorMes(aluno.id, mes);
+    if (nCancelados > 0) msgCancelamento = '\n_Boleto Inter cancelado automaticamente._';
+    const usaBoleto = aluno.forma_pagamento === 'boleto';
     // Mensagem de pendente só se era realmente boleto/pendência financeira
     const msgPend = tinhaPend && usaBoleto ? '\n_(boleto que estava aguardando foi baixado)_' : '';
     const formaLabel = aluno.forma_pagamento ? ' (' + aluno.forma_pagamento + ')' : '';
@@ -2646,7 +2646,14 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const histNovo = [...hist, { data: new Date().toLocaleDateString('pt-BR'), tipo: 'cheque_compensado', desc: 'Cheque compensado - ' + mes + ' - ' + brl(val) }];
     await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: histNovo });
     await logOp('cheque_compensado', aluno.nome + ' - ' + mes, aluno.id, val, mes);
-    return '✅ *Cheque compensado!*\n\n👤 ' + aluno.nome.split(' ')[0] + '\n💰 ' + brl(val) + '\n📅 ' + mes + '\n\n_Pagamento confirmado no sistema._';
+    // Cancelar boleto Inter se existir aberto para este mês (aluno pode ter boleto
+    // emitido e ter pago com cheque — sem isso o boleto fica aberto indefinidamente)
+    let msgCancCheque = '';
+    try {
+      const nCancCheque = await cancelarBoletoPorMes(aluno.id, mes);
+      if (nCancCheque > 0) msgCancCheque = '\n_Boleto Inter cancelado automaticamente._';
+    } catch(eCancCh) { console.error('[cheque] erro ao cancelar boleto:', eCancCh.message); }
+    return '✅ *Cheque compensado!*\n\n👤 ' + aluno.nome.split(' ')[0] + '\n💰 ' + brl(val) + '\n📅 ' + mes + msgCancCheque + '\n\n_Pagamento confirmado no sistema._';
   }
 
   if (intencao === 'inter_reenviar_boletos') {
@@ -3993,6 +4000,12 @@ async function verificarBoletosPagosInter() {
         if (tinhaPend) patch.pagamentos_pendentes = pend;
         await sbPatch('alunos', 'id=eq.' + alunoId, patch);
         await logOp('boleto_pago_rotina', aluno.nome + ' - ' + mes, alunoId, valor, mes);
+        // Atualizar status na tabela boletos — sem isso o boleto continua 'aberto' no
+        // nosso banco mesmo já pago no Inter, e o dashboard segue contando como "a receber".
+        try {
+          await sbPatch('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto',
+            { status: 'pago', cancelado_em: new Date().toISOString() });
+        } catch(eStB) { console.error('[rotina-inter] erro ao atualizar status do boleto:', eStB.message); }
         await tgSend(TELEGRAM_CHAT_ID,
           '🏦 *Pagamento confirmado automaticamente!*\n\n' +
           '👤 ' + aluno.nome + '\n' +
