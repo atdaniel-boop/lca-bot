@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.22 - fix crítico: rotina automática de confirmação de pagamento usava valorNominal (valor original do boleto) em vez de valorTotalRecebido (inclui multa/juros quando pago em atraso) — subregistrava pagamentos com acréscimo
+// Versão 12.25 - 3 fixes críticos: (1) itens da fila travados em 'processando' por crash/deploy agora são detectados e reenfileirados automaticamente com aviso; (2) cálculo de mesBase na renovação via bot não considerava se o dia de vencimento já tinha passado na data da renovação (agora replica exatamente a lógica do site); (3) schema do Gemini não tinha o campo 'vencimento' — boleto avulso com vencimento customizado sempre ignorava o que o usuário digitou e usava a data padrão calculada automaticamente
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.22'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.25'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1370,6 +1370,7 @@ function detectarAlunoNoTexto(dados, tL) {
     '    "horas": numero ou null,\n' +
     '    "meses_utilizados": numero ou null,\n' +
     '    "data": "YYYY-MM-DD" ou null (hoje ' + new Date().toISOString().slice(0,10) + '),\n' +
+    '    "vencimento": "YYYY-MM-DD" ou null — data de vencimento de um boleto avulso/excepcional, se o usuario mencionar explicitamente (ex: "vencimento 2/10/2026" ou "vence dia 10/10"). Converta SEMPRE para o formato YYYY-MM-DD, independente de como o usuario escreveu (DD/MM/YYYY, DD/MM, etc). Se o usuario nao mencionar vencimento, retorne null,\n' +
     '    "hora": "HH:MM" ou null,\n' +
     '    "status_checkin": presente ou falta ou repos ou null,\n' +
     '    "custo_id": numero ou null\n' +
@@ -2169,7 +2170,14 @@ async function executar(intencao, p, dados, chatId) {
     const hoje = new Date(); hoje.setHours(0,0,0,0);
     let vencDate = new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10);
     if (vencDate < hoje) vencDate = new Date(hoje.getFullYear(), hoje.getMonth()+1, aluno.dia_vencimento||10);
-    const venc = p?.vencimento || vencDate.toISOString().slice(0,10);
+    // Normalizar vencimento: aceitar tanto YYYY-MM-DD quanto DD/MM/YYYY (o Gemini pode
+    // retornar em qualquer um dos dois formatos dependendo de como o usuário escreveu).
+    let vencInformado = p?.vencimento || '';
+    if (vencInformado.includes('/')) {
+      const vp = vencInformado.split('/');
+      if (vp.length === 3) vencInformado = vp[2] + '-' + vp[1].padStart(2,'0') + '-' + vp[0].padStart(2,'0');
+    }
+    const venc = vencInformado || vencDate.toISOString().slice(0,10);
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
     if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir o boleto.';
     // Calcular valor automaticamente
@@ -2262,7 +2270,12 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Necessário para emitir boleto.';
     const valor = parseFloat(p?.valor) || 0;
     if (!valor || valor <= 0) return '⚠️ Valor inválido para cobrança excepcional.';
-    const vencimento = p?.vencimento;
+    // Normalizar vencimento: aceitar tanto YYYY-MM-DD quanto DD/MM/YYYY
+    let vencimento = p?.vencimento;
+    if (vencimento && vencimento.includes('/')) {
+      const vp = vencimento.split('/');
+      if (vp.length === 3) vencimento = vp[2] + '-' + vp[1].padStart(2,'0') + '-' + vp[0].padStart(2,'0');
+    }
     if (!vencimento) return '⚠️ Vencimento não informado para a cobrança excepcional.';
     const descricao = (p?.descricao || 'Cobranca excepcional').slice(0,120);
 
@@ -2383,9 +2396,18 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       const pm = p.mes.split('-');
       anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
     } else if (renovacaoExistente) {
-      // Usar o mês da renovação já registrada como início do ciclo
+      // Usar o mês da renovação como base do ciclo — mas só considerar o MESMO mês se
+      // o dia de vencimento ainda não tivesse passado na data em que a renovação foi feita.
+      // Ex: renovou dia 28/07 com vencimento dia 2 → dia 2 já passou em julho → ciclo começa em agosto.
       const dp = renovacaoExistente.data.split('/');
-      anoBase = parseInt(dp[2]); mesBase = parseInt(dp[1]) - 1;
+      const diaRenov = parseInt(dp[0]), mesRenov = parseInt(dp[1]), anoRenov = parseInt(dp[2]);
+      const diaVencAluno = aluno.dia_vencimento || 10;
+      if (diaVencAluno >= diaRenov) {
+        anoBase = anoRenov; mesBase = mesRenov - 1;
+      } else {
+        anoBase = anoRenov; mesBase = mesRenov; // mês seguinte (0-based = mesRenov já é +1)
+        if (mesBase > 11) { mesBase = 0; anoBase++; }
+      }
     } else if (aluno.data_matricula && /^\d{4}-\d{2}-\d{2}$/.test(aluno.data_matricula)) {
       // Usar o mês da data de matrícula como base (ex: matrícula 10/07 → 1º boleto em julho).
       const pm = aluno.data_matricula.split('-');
@@ -3591,6 +3613,20 @@ async function enviarAniversariantesHoje() {
 // ── Fila de emissão automática de boletos ─────────────────────────────────────
 async function processarFilaBoletos() {
   try {
+    // Detectar itens travados: status 'processando' há mais de 10 minutos indica que o
+    // processo anterior morreu no meio (deploy, crash, timeout) sem completar nem dar erro.
+    // Sem isso, o item fica invisível para sempre (nunca mais bate em status=eq.pendente).
+    const dezMinAtras = new Date(Date.now() - 10*60*1000).toISOString();
+    const rTravados = await sbGet('fila_boletos', 'status=eq.processando&criado_em=lt.' + dezMinAtras + '&select=*');
+    const travados = Array.isArray(rTravados) ? rTravados : (rTravados?.data || []);
+    if (travados.length) {
+      console.warn('[fila_boletos] ' + travados.length + ' item(ns) travado(s) em "processando" há mais de 10min — reenfileirando');
+      for (const t of travados) {
+        await sbPatch('fila_boletos', 'id=eq.' + t.id, { status: 'pendente' });
+      }
+      await tgSend(TELEGRAM_CHAT_ID, '⚠️ ' + travados.length + ' pedido(s) na fila estavam travados (processo interrompido antes de terminar) — reenfileirados automaticamente: ' + travados.map(t => t.aluno_nome||'?').join(', '));
+    }
+
     // Buscar pedidos pendentes
     const r = await sbGet('fila_boletos', 'status=eq.pendente&select=*&order=criado_em.asc&limit=5');
     const fila = Array.isArray(r) ? r : (r?.data || []);
@@ -3830,13 +3866,22 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
           const bolsPix = Array.isArray(rBolPix) ? rBolPix : (rBolPix?.data || []);
           for (const b of bolsPix) {
             if (!b.codigo_solicitacao) continue;
+            let cancelouNoInter = true;
             try {
               await interCancelarBoleto(b.codigo_solicitacao);
             } catch(eCancPix) {
               const msgErro = (eCancPix.message||'').toLowerCase();
-              if (!msgErro.includes('cancelad') && !msgErro.includes('já está') && !msgErro.includes('baixad')) throw eCancPix;
+              if (!msgErro.includes('cancelad') && !msgErro.includes('já está') && !msgErro.includes('baixad')) {
+                cancelouNoInter = false;
+                console.error('[rotina-pix] falha ao cancelar no Inter, marcando status mesmo assim:', b.codigo_solicitacao, eCancPix.message);
+              }
             }
-            await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+            // Sempre atualizar o status local — mesmo se o cancelamento no Inter falhar,
+            // o dashboard não deve continuar contando como "a receber" um mês já pago.
+            await sbPatch('boletos', 'id=eq.' + b.id, {
+              status: cancelouNoInter ? 'cancelado' : 'pago_outro_meio_erro_cancelamento',
+              cancelado_em: new Date().toISOString()
+            });
           }
           if (bolsPix.length) boletoCancelMsg = '\n🏦 Boleto correspondente cancelado no Inter automaticamente.';
         } catch(eBolPix) {
