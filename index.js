@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.26 - 3 bugs de consistência de boleto: (1) confirmar_pagamento só cancelava boleto se forma_pagamento fosse 'boleto' (alunos pix/dinheiro com boleto avulso ficavam com boleto aberto); (2) compensação de cheque nunca cancelava boleto; (3) rotina-inter confirmava pagamento mas não atualizava status na tabela boletos, mantendo como 'a receber' no dashboard
+// Versão 12.27 - 3 bugs de erro silencioso: (1) req() nunca rejeita por status HTTP, então TODA gravação no Supabase que falhasse (ex: política RLS incorreta) passava despercebida — agora sbGet/sbPost/sbPatch detectam e lançam erro; (2) interSaldo retornava objeto de erro como se fosse saldo válido; (3) paginação de cobranças silenciava falha da API como 'nenhuma cobrança encontrada'
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.26'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.27'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -298,6 +298,12 @@ async function interSaldo() {
     '/banking/v2/saldo',
     'GET', null, token
   );
+  // interReq sempre resolve, mesmo em erro HTTP — checar status para não devolver
+  // um objeto de erro como se fosse saldo válido.
+  if (r && r.status && (r.status < 200 || r.status >= 300)) {
+    const motivo = r.data?.detail || r.data?.title || r.data?.message || JSON.stringify(r.data||{}).slice(0,150);
+    throw new Error('[' + r.status + '] ' + motivo);
+  }
   return r.data;
 }
 
@@ -338,6 +344,13 @@ async function interCobranças(situacao, dataInicio, dataFim) {
       ...(situacao ? { situacao } : {})
     });
     const r = await interReq('/cobranca/v3/cobrancas?' + params.toString(), 'GET', null, token);
+    // Se a API falhar, NÃO silenciar como "nenhuma cobrança" — isso faria consultas de
+    // boletos vencidos/em aberto responderem "nenhum encontrado" quando na verdade houve erro.
+    if (r && r.status && (r.status < 200 || r.status >= 300)) {
+      const motivo = r.data?.detail || r.data?.title || JSON.stringify(r.data||{}).slice(0,150);
+      console.error('[interCobrancas] Inter recusou. Status:', r.status, '| Resposta:', motivo);
+      throw new Error('Inter recusou a consulta de cobranças [' + r.status + ']: ' + motivo);
+    }
     const d = r.data || {};
     const lote = d.cobrancas || [];
     todas = todas.concat(lote);
@@ -666,9 +679,21 @@ function sbHeaders() {
   return { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY,
     'Content-Type': 'application/json', Prefer: 'return=representation' };
 }
-const sbGet   = (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+(q||''), 'GET', sbHeaders(), null);
-const sbPost  = (t, b) => req(SUPABASE_URL+'/rest/v1/'+t, 'POST', sbHeaders(), b);
-const sbPatch = (t, q, b) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'PATCH', sbHeaders(), b);
+// Wrappers Supabase. IMPORTANTE: req() resolve mesmo em erro HTTP (400/401/403/500),
+// então checamos a resposta aqui — o Supabase retorna {code, message, details} em erro.
+// Sem isso, uma gravação bloqueada (ex: política RLS incorreta) passaria despercebida
+// e o código seguiria como se tivesse salvo com sucesso.
+function _sbCheck(op, tabela, r) {
+  if (r && typeof r === 'object' && !Array.isArray(r) && (r.code || r.message) && !r.id) {
+    const msg = '[Supabase ' + op + ' ' + tabela + '] ' + (r.message || r.code) + (r.details ? ' — ' + r.details : '');
+    console.error(msg);
+    throw new Error(msg);
+  }
+  return r;
+}
+const sbGet   = async (t, q) => _sbCheck('GET', t, await req(SUPABASE_URL+'/rest/v1/'+t+'?'+(q||''), 'GET', sbHeaders(), null));
+const sbPost  = async (t, b) => _sbCheck('POST', t, await req(SUPABASE_URL+'/rest/v1/'+t, 'POST', sbHeaders(), b));
+const sbPatch = async (t, q, b) => _sbCheck('PATCH', t, await req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'PATCH', sbHeaders(), b));
 const sbDelete= (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'DELETE', sbHeaders(), null);
 
 // ── Log de operações ────────────────────────────────────────────────────────────
