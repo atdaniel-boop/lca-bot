@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.27 - 3 bugs de erro silencioso: (1) req() nunca rejeita por status HTTP, então TODA gravação no Supabase que falhasse (ex: política RLS incorreta) passava despercebida — agora sbGet/sbPost/sbPatch detectam e lançam erro; (2) interSaldo retornava objeto de erro como se fosse saldo válido; (3) paginação de cobranças silenciava falha da API como 'nenhuma cobrança encontrada'
+// Versão 12.28 - Corrigido bug de erro silencioso no reenvio de PDF: o insert em fila_boletos (ação reenviar_pdf) não incluía o campo status, então se a coluna não tivesse default no banco o insert era rejeitado silenciosamente — o boleto ficava emitido no Inter mas o PDF nunca era reenviado nem havia qualquer aviso. Agora inclui status:'pendente' e notifica falha via Telegram.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.27'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.28'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -2604,9 +2604,17 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
               aluno_id: aluno.id, aluno_nome: aluno.nome,
               acao: 'reenviar_pdf', codigo_solicitacao: cod, mes: mesStr,
               chat_id: chatId,
-              criado_em: new Date().toISOString()
+              criado_em: new Date().toISOString(),
+              status: 'pendente' // BUG CORRIGIDO v12.28: faltava esse campo — se a coluna não
+              // tiver default no banco, o insert era rejeitado e o reenvio nunca era agendado,
+              // sem NENHUM aviso (boleto ficava emitido no Inter mas o PDF nunca chegava)
             });
-          } catch(eFilaR) { console.error('[PDF plano ' + numBoleto + '] erro ao agendar reenvio:', eFilaR.message); }
+          } catch(eFilaR) {
+            console.error('[PDF plano ' + numBoleto + '] erro ao agendar reenvio:', eFilaR.message);
+            try {
+              await tgSend(chatId, '⚠️ Boleto ' + numBoleto + '/' + dur + ' (' + mesNome + ' ' + anoVenc + ') de *' + aluno.nome + '* foi emitido no Inter, mas FALHOU ao agendar o reenvio automático do PDF.\nMotivo: ' + eFilaR.message + '\n\nPeça manualmente: "reenviar boletos ' + aluno.nome.split(' ')[0] + '"');
+            } catch(eTgFalha) { console.error('[PDF plano ' + numBoleto + '] falha ao notificar erro de reenvio:', eTgFalha.message); }
+          }
         }
       } catch(e) {
         resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - ❌ ' + e.message.slice(0,60));
