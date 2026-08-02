@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.28 - Corrigido bug de erro silencioso no reenvio de PDF: o insert em fila_boletos (ação reenviar_pdf) não incluía o campo status, então se a coluna não tivesse default no banco o insert era rejeitado silenciosamente — o boleto ficava emitido no Inter mas o PDF nunca era reenviado nem havia qualquer aviso. Agora inclui status:'pendente' e notifica falha via Telegram.
+// Versão 12.29 - O retry automático de PDF (fila_boletos ação reenviar_pdf) só tentava obter o linkVisualizacaoBoleto dos detalhes da cobrança, que demora/nunca aparece pra boletos recém-emitidos — por isso sempre esgotava as 5 tentativas e falhava, mesmo com o boleto certinho no Inter. O comando manual 'reenviar boletos' já funcionava porque também baixava o PDF em base64 direto do endpoint /pdf. Agora o retry automático usa a mesma lógica de 2 tentativas do manual.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.28'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.29'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3708,12 +3708,32 @@ async function processarFilaBoletos() {
               await tgSend(pedido.chat_id || TELEGRAM_CHAT_ID, '❌ *Falha na emissão!* O boleto de *' + (pedido.aluno_nome||'') + '* (' + (pedido.mes||'') + ') foi recusado pelo Inter após aceitar o pedido inicial (situação: FALHA_EMISSAO). Emita novamente: "emitir boleto ' + (pedido.aluno_nome||'').split(' ')[0] + ' ' + (pedido.mes||'') + '"');
               continue;
             }
-            const link = cob?.linkVisualizacaoBoleto || cob?.link || det?.linkVisualizacaoBoleto || det?.link || '';
-            if (link) {
+            const link0 = cob?.linkVisualizacaoBoleto || cob?.link || det?.linkVisualizacaoBoleto || det?.link || '';
+            let link = link0;
+            let pdfBufferR = null;
+            // BUG CORRIGIDO v12.29: o retry automático só tentava linkVisualizacaoBoleto
+            // (que demora/nunca aparece pra boletos recém-emitidos), diferente do comando
+            // manual "reenviar boletos" que também tenta baixar o PDF em base64 direto do
+            // endpoint /pdf — e é essa 2ª forma que sempre funcionava. Agora o automático
+            // tenta as mesmas duas formas antes de desistir.
+            if (!link) {
+              try {
+                const pdfResp = await interReq('/cobranca/v3/cobrancas/' + pedido.codigo_solicitacao + '/pdf', 'GET', null, token);
+                const pdfBase64 = pdfResp?.data?.pdf || pdfResp?.pdf ||
+                  (typeof pdfResp?.data === 'string' && pdfResp.data.length > 500 ? pdfResp.data : null) ||
+                  (typeof pdfResp === 'string' && pdfResp.length > 500 ? pdfResp : null);
+                if (pdfBase64) pdfBufferR = Buffer.from(pdfBase64, 'base64');
+              } catch (ePdfDireto) { console.warn('[fila_boletos] PDF direto ainda não disponível:', ePdfDireto.message); }
+            }
+            if (link || pdfBufferR) {
               const mesNomeR = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt((pedido.mes||'').slice(5,7))-1] || pedido.mes;
               const nomeArqR = 'Boleto - ' + mesNomeR + ' - ' + (pedido.aluno_nome||'').split(' ')[0] + '.pdf';
-              await tgSendPDF(pedido.chat_id || TELEGRAM_CHAT_ID, link, nomeArqR,
-                '📄 Boleto ' + mesNomeR + ' - ' + (pedido.aluno_nome||'') + ' (reenvio automático)');
+              const captionR = '📄 Boleto ' + mesNomeR + ' - ' + (pedido.aluno_nome||'') + ' (reenvio automático)';
+              if (pdfBufferR) {
+                await tgSendPDFBuffer(pedido.chat_id || TELEGRAM_CHAT_ID, pdfBufferR, nomeArqR, captionR);
+              } else {
+                await tgSendPDF(pedido.chat_id || TELEGRAM_CHAT_ID, link, nomeArqR, captionR);
+              }
               await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: 'PDF reenviado' });
               console.log('[fila_boletos] PDF reenviado com sucesso:', pedido.codigo_solicitacao);
             } else {
