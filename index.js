@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.29 - O retry automático de PDF (fila_boletos ação reenviar_pdf) só tentava obter o linkVisualizacaoBoleto dos detalhes da cobrança, que demora/nunca aparece pra boletos recém-emitidos — por isso sempre esgotava as 5 tentativas e falhava, mesmo com o boleto certinho no Inter. O comando manual 'reenviar boletos' já funcionava porque também baixava o PDF em base64 direto do endpoint /pdf. Agora o retry automático usa a mesma lógica de 2 tentativas do manual.
+// Versão 12.30 - Todo PDF de boleto emitido (plano, avulso, excepcional, reenvio manual e automático) agora é guardado no Supabase Storage (bucket boletos-pdfs) até ser pago ou cancelado, quando é removido automaticamente (webhook, rotina periódica e cancelamento). Permite ao site reenviar boletos por WhatsApp direto do Storage.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.29'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.30'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -584,7 +584,9 @@ async function tgSend(chatId, text) {
 }
 
 // Envia um Buffer PDF como documento no Telegram via multipart/form-data.
-async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption) {
+// meta opcional {alunoId, mes} guarda uma cópia no Storage até o boleto ser pago/cancelado.
+async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption, meta) {
+  if (meta && meta.alunoId && meta.mes) sbStorageUpload(meta.alunoId, meta.mes, pdfBuffer);
   const boundary = '----TGBoundary' + Date.now();
   const safeFilename = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
   const parts = [
@@ -608,7 +610,8 @@ async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption) {
 }
 
 // Lê um arquivo PDF do disco e envia no Telegram (wrapper de tgSendPDFBuffer).
-async function tgSendPDF(chatId, pdfUrl, filename, caption) {
+// meta opcional {alunoId, mes} guarda uma cópia no Storage até o boleto ser pago/cancelado.
+async function tgSendPDF(chatId, pdfUrl, filename, caption, meta) {
   // Baixar o PDF do Inter
   const pdfBuffer = await new Promise((resolve, reject) => {
     const u = new URL(pdfUrl);
@@ -634,6 +637,7 @@ async function tgSendPDF(chatId, pdfUrl, filename, caption) {
       res.on('end', () => resolve(Buffer.concat(chunks)));
     }).on('error', reject).on('timeout', () => reject(new Error('timeout baixando PDF')));
   });
+  if (meta && meta.alunoId && meta.mes) sbStorageUpload(meta.alunoId, meta.mes, pdfBuffer);
 
   // Enviar via multipart/form-data para o Telegram
   const boundary = '----TGBoundary' + Date.now();
@@ -695,6 +699,51 @@ const sbGet   = async (t, q) => _sbCheck('GET', t, await req(SUPABASE_URL+'/rest
 const sbPost  = async (t, b) => _sbCheck('POST', t, await req(SUPABASE_URL+'/rest/v1/'+t, 'POST', sbHeaders(), b));
 const sbPatch = async (t, q, b) => _sbCheck('PATCH', t, await req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'PATCH', sbHeaders(), b));
 const sbDelete= (t, q) => req(SUPABASE_URL+'/rest/v1/'+t+'?'+q, 'DELETE', sbHeaders(), null);
+
+// ── Supabase Storage: PDFs de boletos ficam guardados até serem pagos/cancelados ──
+const BOLETOS_BUCKET = 'boletos-pdfs';
+function sbStorageUpload(alunoId, mes, buffer) {
+  return new Promise((resolve) => {
+    try {
+      const path = alunoId + '/' + mes + '.pdf';
+      const u = new URL(SUPABASE_URL + '/storage/v1/object/' + BOLETOS_BUCKET + '/' + path);
+      const r = https.request({
+        hostname: u.hostname, port: 443, path: u.pathname,
+        method: 'POST',
+        headers: {
+          apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY,
+          'Content-Type': 'application/pdf', 'x-upsert': 'true',
+          'Content-Length': buffer.length
+        },
+        timeout: 15000
+      }, res => {
+        let d = ''; res.on('data', c => d += c);
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            console.log('[storage] PDF guardado:', path);
+            resolve(true);
+          } else {
+            console.warn('[storage] falha ao guardar PDF (' + res.statusCode + '):', d.slice(0,200));
+            resolve(false);
+          }
+        });
+      });
+      r.on('error', e => { console.warn('[storage] erro ao guardar PDF:', e.message); resolve(false); });
+      r.on('timeout', () => { r.destroy(); console.warn('[storage] timeout ao guardar PDF'); resolve(false); });
+      r.write(buffer); r.end();
+    } catch(e) { console.warn('[storage] erro ao guardar PDF:', e.message); resolve(false); }
+  });
+}
+// Remove o PDF quando o boleto é pago ou cancelado — não precisa mais ficar guardado.
+async function sbStorageDelete(alunoId, mes) {
+  try {
+    const path = alunoId + '/' + mes + '.pdf';
+    await req(SUPABASE_URL + '/storage/v1/object/' + BOLETOS_BUCKET, 'DELETE',
+      { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json' },
+      { prefixes: [path] });
+    console.log('[storage] PDF removido:', path);
+  } catch(e) { console.warn('[storage] erro ao remover PDF:', e.message); }
+}
 
 // ── Log de operações ────────────────────────────────────────────────────────────
 // Retorna datetime atual em BRT (UTC-3) no formato ISO
@@ -2252,7 +2301,7 @@ async function executar(intencao, p, dados, chatId) {
         const caption = '✅ *Boleto emitido!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorBoleto) + '\n📅 Vencimento: ' + venc.split('-').reverse().join('/') + '\n🔑 Código: ' + cod;
         if (link) {
           try {
-            await tgSendPDF(chatId, link, nomeArq, caption);
+            await tgSendPDF(chatId, link, nomeArq, caption, {alunoId: aluno.id, mes: chaveAvulso});
             return null; // já enviou o arquivo
           } catch(ePdf) {
             console.error('[PDF avulso]', ePdf.message);
@@ -2336,7 +2385,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
                     '📝 ' + descricao + '\n💰 ' + brl(valor) + ' | vence ' + fmtData2(vencimento);
       if (link) {
         try {
-          await tgSendPDF(chatId, link, 'Cobranca - ' + aluno.nome.split(' ')[0] + '.pdf', cabec);
+          await tgSendPDF(chatId, link, 'Cobranca - ' + aluno.nome.split(' ')[0] + '.pdf', cabec, {alunoId: aluno.id, mes: chaveExc});
           return null;
         } catch(ePdf) {
           return cabec + '\n[ver boleto](' + link + ')';
@@ -2590,7 +2639,8 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         if (link) {
           try {
             await tgSendPDF(chatId,link, nomeArq,
-              '📄 Boleto ' + numBoleto + '/' + dur + ' - ' + mesNome + ' ' + anoVenc + ' | vence ' + fmtData(dtVenc) + ' | ' + brl(valor));
+              '📄 Boleto ' + numBoleto + '/' + dur + ' - ' + mesNome + ' ' + anoVenc + ' | vence ' + fmtData(dtVenc) + ' | ' + brl(valor),
+              {alunoId: aluno.id, mes: mesStr});
             resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ✅ PDF enviado acima');
           } catch(ePdf) {
             console.error('[PDF plano ' + numBoleto + ']', ePdf.message);
@@ -2779,9 +2829,9 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           if (link) {
             if (link.startsWith('data:application/pdf;base64,')) {
               const pdfBuffer = Buffer.from(link.replace('data:application/pdf;base64,', ''), 'base64');
-              await tgSendPDFBuffer(chatId, pdfBuffer, nomeArq, caption);
+              await tgSendPDFBuffer(chatId, pdfBuffer, nomeArq, caption, {alunoId: aluno.id, mes: b.mes});
             } else {
-              await tgSendPDF(chatId, link, nomeArq, caption);
+              await tgSendPDF(chatId, link, nomeArq, caption, {alunoId: aluno.id, mes: b.mes});
             }
             enviados++;
           } else {
@@ -3730,9 +3780,9 @@ async function processarFilaBoletos() {
               const nomeArqR = 'Boleto - ' + mesNomeR + ' - ' + (pedido.aluno_nome||'').split(' ')[0] + '.pdf';
               const captionR = '📄 Boleto ' + mesNomeR + ' - ' + (pedido.aluno_nome||'') + ' (reenvio automático)';
               if (pdfBufferR) {
-                await tgSendPDFBuffer(pedido.chat_id || TELEGRAM_CHAT_ID, pdfBufferR, nomeArqR, captionR);
+                await tgSendPDFBuffer(pedido.chat_id || TELEGRAM_CHAT_ID, pdfBufferR, nomeArqR, captionR, {alunoId: pedido.aluno_id, mes: pedido.mes});
               } else {
-                await tgSendPDF(pedido.chat_id || TELEGRAM_CHAT_ID, link, nomeArqR, captionR);
+                await tgSendPDF(pedido.chat_id || TELEGRAM_CHAT_ID, link, nomeArqR, captionR, {alunoId: pedido.aluno_id, mes: pedido.mes});
               }
               await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: 'PDF reenviado' });
               console.log('[fila_boletos] PDF reenviado com sucesso:', pedido.codigo_solicitacao);
@@ -3768,6 +3818,7 @@ async function processarFilaBoletos() {
             }
           }
           await sbPatch('boletos', 'codigo_solicitacao=eq.' + pedido.codigo_solicitacao, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+          if (pedido.aluno_id && pedido.mes) sbStorageDelete(pedido.aluno_id, pedido.mes);
           // Limpar pagamentos_pendentes do aluno para refletir no site
           if (pedido.aluno_id && pedido.mes) {
             try {
@@ -4059,6 +4110,7 @@ async function verificarBoletosPagosInter() {
           await sbPatch('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto',
             { status: 'pago', cancelado_em: new Date().toISOString() });
         } catch(eStB) { console.error('[rotina-inter] erro ao atualizar status do boleto:', eStB.message); }
+        sbStorageDelete(alunoId, mes);
         await tgSend(TELEGRAM_CHAT_ID,
           '🏦 *Pagamento confirmado automaticamente!*\n\n' +
           '👤 ' + aluno.nome + '\n' +
@@ -4596,6 +4648,7 @@ async function main() {
                     await sbPatch('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto',
                       { status: 'pago', pago_em: new Date().toISOString() });
                   } catch(e) { console.error('[webhook] erro ao marcar boleto pago:', e.message); }
+                  sbStorageDelete(alunoId, mes);
                   const chatId = TELEGRAM_CHAT_ID;
                   if (chatId) {
                     await logOp('boleto_pago_webhook', aluno.nome + ' - ' + mes, alunoId, valorFinal, mes, {dataPagamento: dataPag});
