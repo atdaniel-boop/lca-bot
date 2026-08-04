@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.30 - Todo PDF de boleto emitido (plano, avulso, excepcional, reenvio manual e automático) agora é guardado no Supabase Storage (bucket boletos-pdfs) até ser pago ou cancelado, quando é removido automaticamente (webhook, rotina periódica e cancelamento). Permite ao site reenviar boletos por WhatsApp direto do Storage.
+// Versão 12.31 - Corrigido bug grave: a checagem que evita duplicar emissão de boletos (meses já cobertos) tratava silenciosamente uma resposta inesperada do Supabase como "nenhum boleto existe" e seguia emitindo — causou emissão DUPLICADA de verdade no Inter (Katia Gonçalves teve 5 meses cobrados em dobro, com códigos de solicitação diferentes e reais). Agora a emissão é abortada com erro claro se essa checagem de segurança não puder ser confirmada.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.30'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.31'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -2537,8 +2537,16 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     // 1. Meses efetivamente PAGOS (pagamentos[YYYY-MM] > 0)
     // 2. Meses com boleto JÁ EMITIDO no Inter (tabela boletos com status=aberto)
     // NÃO usar pagamentos_pendentes — pode ter resquícios de cadastros anteriores sem boleto real
+    // BUG CORRIGIDO v12.31: se essa consulta retornasse algo fora do esperado (não-array —
+    // ex: instabilidade do Supabase, schema cache, etc.), o código tratava silenciosamente
+    // como "nenhum boleto existe" e seguia emitindo — causou emissão DUPLICADA de verdade no
+    // Inter para a Katia Gonçalves (5 meses cobrados em dobro). Agora, se a checagem de
+    // segurança não puder ser confirmada, a emissão é ABORTADA em vez de arriscar duplicar.
     const rBoletosExist = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.aberto&select=mes');
-    const boletosExist = Array.isArray(rBoletosExist) ? rBoletosExist : (rBoletosExist?.data || []);
+    if (!Array.isArray(rBoletosExist)) {
+      throw new Error('Não foi possível confirmar quais boletos já estão emitidos para ' + aluno.nome + ' (resposta inesperada do Supabase ao consultar a tabela boletos) — abortando emissão por segurança, para não arriscar duplicar cobrança. Tente novamente em instantes.');
+    }
+    const boletosExist = rBoletosExist;
     const mesesComBoleto = new Set(boletosExist.map(b => (b.mes||'').slice(0,7)).filter(m => /^\d{4}-\d{2}$/.test(m)));
     const mesesJaCobertos = new Set([
       ...Object.keys(pags).filter(k => /^\d{4}-\d{2}$/.test(k) && (pags[k]||0) > 0),
