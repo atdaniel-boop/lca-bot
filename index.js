@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.33 - Cancelamento de boleto (ação 'cancelar' na fila_boletos) não enviava nenhuma notificação no Telegram quando concluído com sucesso — só registrava no log interno, invisível pro Daniel. Agora envia confirmação normal, igual as outras ações.
+// Versão 12.35 - Mensagem de cancelamento de boleto agora também inclui a data de vencimento.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.33'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.35'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3842,10 +3842,15 @@ async function processarFilaBoletos() {
             } catch(ePendF) { console.error('[fila_boletos] erro ao limpar pendentes:', ePendF.message); }
           }
           await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: jaEstavaCancelado ? 'já estava cancelado no Inter' : 'cancelado' });
+          var vencBr = '';
+          if (pedido.vencimento) {
+            var pV = String(pedido.vencimento).slice(0,10).split('-');
+            if (pV.length === 3) vencBr = pV[2] + '/' + pV[1] + '/' + pV[0];
+          }
           if (jaEstavaCancelado) {
-            await tgSend(TELEGRAM_CHAT_ID, 'ℹ️ Boleto de *' + (aluno.nome||pedido.aluno_nome||'?') + '* (' + (pedido.mes||'') + ') já estava cancelado no Inter — apenas sincronizei o sistema.');
+            await tgSend(TELEGRAM_CHAT_ID, 'ℹ️ Boleto de *' + (aluno.nome||pedido.aluno_nome||'?') + '* (' + (pedido.mes||'') + ') já estava cancelado no Inter — apenas sincronizei o sistema.' + (pedido.motivo ? '\n📝 Motivo: ' + pedido.motivo : ''));
           } else {
-            await tgSend(TELEGRAM_CHAT_ID, '✅ Boleto cancelado no Banco Inter.\n\n👤 ' + (aluno.nome||pedido.aluno_nome||'?') + '\n📅 ' + (pedido.mes||'') + (pedido.valor ? '\n💰 ' + brl(pedido.valor) : ''));
+            await tgSend(TELEGRAM_CHAT_ID, '✅ Boleto cancelado no Banco Inter.\n\n👤 ' + (aluno.nome||pedido.aluno_nome||'?') + '\n📅 ' + (pedido.mes||'') + (vencBr ? ' (venc. ' + vencBr + ')' : '') + (pedido.valor ? '\n💰 ' + brl(pedido.valor) : '') + (pedido.motivo ? '\n📝 Motivo: ' + pedido.motivo : ''));
             console.log('[fila_boletos] Boleto cancelado:', pedido.codigo_solicitacao, 'aluno_id:', pedido.aluno_id);
           }
           continue;
