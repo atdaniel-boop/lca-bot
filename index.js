@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.32 - Corrigido bug grave: qualquer pedido na fila_boletos sem ação reconhecida era tratado, por padrão, como "emitir plano completo" — a ação de maior consequência (dinheiro real). Um insert de teste malformado (sem 'acao') causou emissão real e indevida de um plano semestral inteiro para uma aluna. Agora exige acao:'emitir_plano' explícita; sem isso, marca erro e avisa Daniel em vez de emitir.
+// Versão 12.33 - Cancelamento de boleto (ação 'cancelar' na fila_boletos) não enviava nenhuma notificação no Telegram quando concluído com sucesso — só registrava no log interno, invisível pro Daniel. Agora envia confirmação normal, igual as outras ações.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.32'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.33'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3845,6 +3845,7 @@ async function processarFilaBoletos() {
           if (jaEstavaCancelado) {
             await tgSend(TELEGRAM_CHAT_ID, 'ℹ️ Boleto de *' + (pedido.aluno_nome||'?') + '* (' + (pedido.mes||'') + ') já estava cancelado no Inter — apenas sincronizei o sistema.');
           } else {
+            await tgSend(TELEGRAM_CHAT_ID, '✅ Boleto cancelado no Banco Inter.\n\n👤 ' + (pedido.aluno_nome||'?') + '\n📅 ' + (pedido.mes||'') + (pedido.valor ? '\n💰 ' + brl(pedido.valor) : ''));
             console.log('[fila_boletos] Boleto cancelado:', pedido.codigo_solicitacao, 'aluno_id:', pedido.aluno_id);
           }
           continue;
