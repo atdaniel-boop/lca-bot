@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.31 - Corrigido bug grave: a checagem que evita duplicar emissão de boletos (meses já cobertos) tratava silenciosamente uma resposta inesperada do Supabase como "nenhum boleto existe" e seguia emitindo — causou emissão DUPLICADA de verdade no Inter (Katia Gonçalves teve 5 meses cobrados em dobro, com códigos de solicitação diferentes e reais). Agora a emissão é abortada com erro claro se essa checagem de segurança não puder ser confirmada.
+// Versão 12.32 - Corrigido bug grave: qualquer pedido na fila_boletos sem ação reconhecida era tratado, por padrão, como "emitir plano completo" — a ação de maior consequência (dinheiro real). Um insert de teste malformado (sem 'acao') causou emissão real e indevida de um plano semestral inteiro para uma aluna. Agora exige acao:'emitir_plano' explícita; sem isso, marca erro e avisa Daniel em vez de emitir.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.31'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '12.32'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3881,7 +3881,7 @@ async function processarFilaBoletos() {
             dados, TELEGRAM_CHAT_ID
           );
           if (resultado) await tgSend(TELEGRAM_CHAT_ID, resultado);
-        } else {
+        } else if (pedido.acao === 'emitir_plano') {
           // Pedido normal: emitir plano completo
           resultado = await executar(
             'inter_emitir_plano',
@@ -3891,6 +3891,17 @@ async function processarFilaBoletos() {
             new Date().toISOString().slice(0,7)
           );
           if (resultado) await tgSend(TELEGRAM_CHAT_ID, resultado);
+        } else {
+          // BUG CORRIGIDO v12.32: antes, QUALQUER pedido sem ação reconhecida caía aqui e era
+          // tratado como "emitir plano completo" por padrão — a ação de maior consequência
+          // que existe (dinheiro real, boleto real no Inter, cliente real cobrado). Um insert
+          // de teste malformado na fila_boletos (aluno_id certo, sem 'acao') gerou emissão real
+          // e indevida de um plano semestral inteiro para uma aluna. Agora, sem uma ação
+          // explícita e reconhecida, NADA é emitido — o pedido fica marcado como erro e o
+          // Daniel é avisado, para revisão manual antes de qualquer cobrança real acontecer.
+          await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'ação não reconhecida — não processado por segurança (evita emissão indevida)' });
+          await tgSend(TELEGRAM_CHAT_ID, '⚠️ Pedido na fila_boletos para *' + (aluno.nome||'?') + '* (id ' + pedido.id + ') não tem uma ação reconhecida (acao/obs) — NÃO foi processado, por segurança. Se for um pedido legítimo de emissão, revise manualmente ou peça: "emitir plano ' + aluno.nome.split(' ')[0] + '"');
+          continue;
         }
 
         await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: (pedido.obs||'') + ' [processado]' });
