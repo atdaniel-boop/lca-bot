@@ -3843,9 +3843,9 @@ async function processarFilaBoletos() {
           }
           await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: jaEstavaCancelado ? 'já estava cancelado no Inter' : 'cancelado' });
           if (jaEstavaCancelado) {
-            await tgSend(TELEGRAM_CHAT_ID, 'ℹ️ Boleto de *' + (pedido.aluno_nome||'?') + '* (' + (pedido.mes||'') + ') já estava cancelado no Inter — apenas sincronizei o sistema.');
+            await tgSend(TELEGRAM_CHAT_ID, 'ℹ️ Boleto de *' + (aluno.nome||pedido.aluno_nome||'?') + '* (' + (pedido.mes||'') + ') já estava cancelado no Inter — apenas sincronizei o sistema.');
           } else {
-            await tgSend(TELEGRAM_CHAT_ID, '✅ Boleto cancelado no Banco Inter.\n\n👤 ' + (pedido.aluno_nome||'?') + '\n📅 ' + (pedido.mes||'') + (pedido.valor ? '\n💰 ' + brl(pedido.valor) : ''));
+            await tgSend(TELEGRAM_CHAT_ID, '✅ Boleto cancelado no Banco Inter.\n\n👤 ' + (aluno.nome||pedido.aluno_nome||'?') + '\n📅 ' + (pedido.mes||'') + (pedido.valor ? '\n💰 ' + brl(pedido.valor) : ''));
             console.log('[fila_boletos] Boleto cancelado:', pedido.codigo_solicitacao, 'aluno_id:', pedido.aluno_id);
           }
           continue;
