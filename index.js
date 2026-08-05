@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 13.5 - Corrigido bug grave: um único Pix podia ser contabilizado DUAS VEZES quando pago via o Pix copia-e-cola de um boleto de mês diferente do atual. A rotina de detecção genérica de Pix (rotinaDetectarPixAlunos) sempre assumia 'mês atual' sem checar se o pagamento já tinha sido creditado com precisão pela rotina de verificação de boletos — causando double-crédito e cancelamento indevido do boleto do mês certo (caso Cleiton, pagamento de janeiro/2027 também creditado como agosto/2026).
+// Versão 13.6 - Corrigido bug grave: verificarBoletosPagosInter só checava se o MÊS estava pendente, nunca se aquele boleto ESPECÍFICO (por codigo_solicitacao) já tinha sido processado antes — um boleto antigo pago (ex: pago no mês errado) reaparecia como RECEBIDO no Inter a cada 5 min e era recreditado toda vez que uma nova pendência era aberta pro mesmo mês, criando um loop sem fim. Agora todo boleto com codigo_solicitacao já marcado pago/cancelado no nosso banco é ignorado permanentemente.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '13.5'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '13.6'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4130,6 +4130,21 @@ async function verificarBoletosPagosInter() {
       if (!aluno) continue;
       // (1) Só aluno ativo
       if (aluno.ativo !== 'SIM') continue;
+      // BUG CORRIGIDO v13.6: esta rotina só verificava se o MÊS estava "esperando pagamento"
+      // (pagamentos_pendentes), sem checar se ESSE boleto específico já tinha sido processado
+      // antes. Se um boleto antigo (ex: pago por engano num mês, depois "reatribuído" pra outro
+      // mês no nosso banco) continuar aparecendo como RECEBIDO no Inter, e o mês original dele
+      // (via vencimento) tiver uma nova pendência aberta depois, ele é creditado DE NOVO —
+      // criando um loop que volta a cada 5 minutos. Agora, todo boleto com codigo_solicitacao
+      // já registrado como 'pago' ou 'cancelado' no nosso banco é ignorado permanentemente,
+      // não importa o que aconteça com pagamentos_pendentes depois.
+      if (bc.codigoSolicitacao) {
+        try {
+          const rJaReg = await sbGet('boletos', 'codigo_solicitacao=eq.' + bc.codigoSolicitacao + '&select=id,status');
+          const jaReg = Array.isArray(rJaReg) ? rJaReg : (rJaReg?.data || []);
+          if (jaReg.some(b => b.status === 'pago' || b.status === 'cancelado')) continue;
+        } catch(eChk) { console.warn('[rotina-inter] erro ao checar duplicidade por codigo_solicitacao:', eChk.message); }
+      }
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
       if ((pags[mes]||0) > 0) continue; // já confirmado
       // (2) Só se o mês está em pagamentos_pendentes (boleto que o sistema espera receber)
