@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 12.35 - Mensagem de cancelamento de boleto agora também inclui a data de vencimento.
+// Versão 13.5 - Corrigido bug grave: um único Pix podia ser contabilizado DUAS VEZES quando pago via o Pix copia-e-cola de um boleto de mês diferente do atual. A rotina de detecção genérica de Pix (rotinaDetectarPixAlunos) sempre assumia 'mês atual' sem checar se o pagamento já tinha sido creditado com precisão pela rotina de verificação de boletos — causando double-crédito e cancelamento indevido do boleto do mês certo (caso Cleiton, pagamento de janeiro/2027 também creditado como agosto/2026).
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '12.35'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '13.5'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3979,6 +3979,26 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       // Já pagou o mês? pular (evita duplicar com rotina de boletos e lançamentos manuais)
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
       if ((pags[mesAtualStr]||0) > 0) { _pixProcessados.add(chave); jaPagos++; continue; }
+
+      // BUG CORRIGIDO v13.5: esta rotina varre Pix genéricos no extrato e SEMPRE assumia que
+      // eram para o mês atual — mas se o Pix na verdade liquidou um boleto de OUTRO mês (ex:
+      // aluno usou o Pix copia-e-cola de um boleto futuro por engano), a rotina de verificação
+      // de boletos (verificarBoletosPagosInter) já credita o mês CORRETO de forma precisa via
+      // o próprio boleto pago no Inter — e essa rotina genérica lançava o MESMO pagamento de
+      // novo no mês atual, contabilizando em dobro e cancelando um boleto que não foi pago.
+      // Agora, antes de assumir "mês atual", confere se ALGUM boleto deste aluno com o mesmo
+      // valor já foi marcado como pago HOJE (por qualquer outra rotina) — se sim, pula.
+      try {
+        const hojeInicio = hojeStr + 'T00:00:00';
+        const rBolHoje = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.pago&valor=eq.' + valor + '&pago_em=gte.' + hojeInicio + '&select=id,mes');
+        const bolsHoje = Array.isArray(rBolHoje) ? rBolHoje : (rBolHoje?.data || []);
+        if (bolsHoje.length) {
+          _pixProcessados.add(chave);
+          console.log('[rotina-pix] Pix de ' + aluno.nome + ' já creditado hoje via boleto (' + bolsHoje.map(b=>b.mes).join(',') + ') — evitando duplicidade.');
+          jaPagos++;
+          continue;
+        }
+      } catch(eDup) { console.warn('[rotina-pix] erro ao checar duplicidade:', eDup.message); }
 
       // Lançar pagamento automaticamente
       _pixProcessados.add(chave);
