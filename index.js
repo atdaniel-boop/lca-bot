@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 13.6 - Corrigido bug grave: verificarBoletosPagosInter só checava se o MÊS estava pendente, nunca se aquele boleto ESPECÍFICO (por codigo_solicitacao) já tinha sido processado antes — um boleto antigo pago (ex: pago no mês errado) reaparecia como RECEBIDO no Inter a cada 5 min e era recreditado toda vez que uma nova pendência era aberta pro mesmo mês, criando um loop sem fim. Agora todo boleto com codigo_solicitacao já marcado pago/cancelado no nosso banco é ignorado permanentemente.
+// Versão 13.7 - Mesma proteção da v13.6 (dedup por codigo_solicitacao) aplicada também ao webhook do Inter — bancos podem reenviar notificações de pagamento, e sem essa checagem um boleto NOVO e diferente podia ser marcado pago por engano no lugar do boleto antigo que realmente gerou o evento reenviado (caso Cleiton, 2a ocorrência).
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '13.6'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '13.7'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4662,6 +4662,7 @@ async function main() {
           const vencWebhook = payload?.dataVencimento || payload?.cobranca?.dataVencimento || '';
           const mesInferido = psn.mes || vencWebhook.slice(0,7) || dataPag.slice(0,7);
           const eventoValido = !evento || evento.includes('PAGO') || evento.includes('LIQUIDADO') || evento.includes('RECEBIDO');
+          const codSolicWebhook = payload?.codigoSolicitacao || payload?.cobranca?.codigoSolicitacao || '';
 
           if (!psn.alunoId || !mesInferido) {
             console.log('[WEBHOOK-INTER] seuNum não reconhecido:', seuNum, '| nossoNum:', nossoNum);
@@ -4670,6 +4671,25 @@ async function main() {
           } else {
             const alunoId = psn.alunoId;
             const mes = mesInferido;
+
+            // BUG CORRIGIDO v13.7: bancos podem reenviar (retry) a mesma notificação de
+            // pagamento. Sem checar o boleto ESPECÍFICO, o webhook só filtrava por
+            // "aluno + mês + status aberto" — se um boleto antigo já pago tivesse seu evento
+            // reenviado, e um boleto NOVO (diferente) estivesse aberto pro mesmo mês nesse
+            // momento, o webhook marcava o boleto NOVO como pago por engano (caso Cleiton).
+            // Agora, todo boleto já registrado como pago/cancelado pelo mesmo codigo_solicitacao
+            // é ignorado permanentemente, e nunca usamos "mes" sozinho pra decidir qual boleto
+            // baixar quando sabemos exatamente qual codigo_solicitacao foi pago.
+            if (codSolicWebhook) {
+              try {
+                const rJaProc = await sbGet('boletos', 'codigo_solicitacao=eq.' + codSolicWebhook + '&select=id,status');
+                const jaProc = Array.isArray(rJaProc) ? rJaProc : (rJaProc?.data || []);
+                if (jaProc.some(b => b.status === 'pago' || b.status === 'cancelado')) {
+                  console.log('[WEBHOOK-INTER] Boleto ' + codSolicWebhook + ' já processado antes — ignorado.');
+                  res.writeHead(200, {'Content-Type':'text/plain'}); res.end('ok'); return;
+                }
+              } catch(eChkW) { console.warn('[WEBHOOK-INTER] erro ao checar duplicidade:', eChkW.message); }
+            }
 
             // Se valor não veio no webhook, buscar na API Inter
             let valorFinal = valorPago;
