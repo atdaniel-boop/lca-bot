@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 13.7 - Mesma proteção da v13.6 (dedup por codigo_solicitacao) aplicada também ao webhook do Inter — bancos podem reenviar notificações de pagamento, e sem essa checagem um boleto NOVO e diferente podia ser marcado pago por engano no lugar do boleto antigo que realmente gerou o evento reenviado (caso Cleiton, 2a ocorrência).
+// Versão 13.8 - Cobrança excepcional (boleto avulso) nunca agendava reenvio automático de PDF quando ele não ficava pronto na hora da emissão — diferente da emissão normal de plano. O boleto era emitido de verdade no Inter mas o PDF nunca chegava nem era guardado no Storage. Agora agenda reenvio automático, igual ao fluxo normal.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '13.7'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '13.8'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -2391,7 +2391,25 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           return cabec + '\n[ver boleto](' + link + ')';
         }
       }
-      return cabec + (res?.codigoSolicitacao ? '\n✓ Boleto emitido.' : '\n⚠️ Boleto pode não ter sido gerado.');
+      // BUG CORRIGIDO v13.8: diferente da emissão normal de plano, a cobrança excepcional
+      // nunca agendava reenvio automático quando o PDF não ficava pronto na hora — o boleto
+      // era emitido de verdade no Inter, mas o PDF nunca chegava e nunca era guardado no
+      // Storage (caso do boleto avulso de janeiro do Cleiton). Agora agenda reenvio, igual
+      // ao fluxo normal.
+      if (res?.codigoSolicitacao) {
+        try {
+          await sbPost('fila_boletos', {
+            aluno_id: aluno.id, aluno_nome: aluno.nome,
+            acao: 'reenviar_pdf', codigo_solicitacao: res.codigoSolicitacao, mes: chaveExc,
+            chat_id: chatId, criado_em: new Date().toISOString(), status: 'pendente'
+          });
+          return cabec + '\n✓ Boleto emitido. ⏳ PDF ainda gerando, reenvio automático agendado.';
+        } catch(eFilaExc) {
+          console.error('[cobranca_excepcional] erro ao agendar reenvio:', eFilaExc.message);
+          return cabec + '\n✓ Boleto emitido, mas houve erro ao agendar reenvio automático do PDF. Peça: "reenviar boletos ' + aluno.nome.split(' ')[0] + '"';
+        }
+      }
+      return cabec + '\n⚠️ Boleto pode não ter sido gerado.';
     } catch(e) {
       console.error('[cobranca_excepcional] erro:', e.message);
       return '❌ Erro ao emitir cobrança excepcional de *' + aluno.nome.split(' ')[0] + '*: ' + e.message.slice(0,120);
