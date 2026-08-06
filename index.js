@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 13.8 - Cobrança excepcional (boleto avulso) nunca agendava reenvio automático de PDF quando ele não ficava pronto na hora da emissão — diferente da emissão normal de plano. O boleto era emitido de verdade no Inter mas o PDF nunca chegava nem era guardado no Storage. Agora agenda reenvio automático, igual ao fluxo normal.
+// Versão 13.9 - Corrigido cálculo de 'Validade' na mensagem de WhatsApp do comando 'reenviar boletos': a busca no histórico de renovações procurava um campo de texto que as renovações normais nunca têm, então sempre caía num modo reserva que usava só a data do primeiro boleto sendo reenviado — se o mês mais antigo já estivesse pago (fora da lista de reenvio), a validade mostrada começava do mês errado (caso Cleiton: mostrou setembro em vez de agosto). Agora busca o período real na tabela de boletos do aluno.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '13.8'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '13.9'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -2946,16 +2946,38 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
             if (melhorHist) {
               periodoR = melhorHist.ini + ' a ' + melhorHist.fim;
             } else {
-              // Fallback: calcular a partir de data_inicio do aluno se existir, senão usar vencimento do boleto
-              const DURACAO = {mensal:1,trimestral:3,semestral:6};
-              const durR = DURACAO[aluno.tipo_plano]||1;
-              const diaVenc = aluno.dia_vencimento||10;
-              const vencStr = boletos[0]?.vencimento || '';
-              const dtIniR = vencStr
-                ? new Date(vencStr.slice(0,4), parseInt(vencStr.slice(5,7))-1, diaVenc)
-                : new Date();
-              const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR-1, diaVenc-1);
-              periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
+              // BUG CORRIGIDO v13.9: o campo 'desc' com texto "dd/mm/aaaa a dd/mm/aaaa" que
+              // esse bloco procura no histórico NUNCA existe nas renovações normais (elas
+              // guardam plano_novo/valor/dia_venc, não uma string de período) — então essa
+              // busca sempre falhava e caía no modo reserva antigo, que usava só a data do
+              // PRIMEIRO boleto sendo reenviado. Se o mês mais antigo já estava pago (fora da
+              // lista de reenvio, como agosto do Cleiton), a "Validade" mostrada começava do
+              // mês seguinte por engano. Agora busca o período real na própria tabela de
+              // boletos do aluno (menor e maior mês entre os que não foram cancelados/duplicados).
+              try {
+                const rTodosBol = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=neq.cancelado&select=mes&order=mes.asc');
+                const todosBol = Array.isArray(rTodosBol) ? rTodosBol : (rTodosBol?.data || []);
+                const mesesValidos = todosBol.map(b => b.mes).filter(m => /^\d{4}-\d{2}/.test(m||''));
+                if (mesesValidos.length) {
+                  const menorMes = mesesValidos[0], maiorMes = mesesValidos[mesesValidos.length-1];
+                  const diaVenc2 = aluno.dia_vencimento||10;
+                  const dtIni2 = new Date(parseInt(menorMes.slice(0,4)), parseInt(menorMes.slice(5,7))-1, diaVenc2);
+                  const dtFim2 = new Date(parseInt(maiorMes.slice(0,4)), parseInt(maiorMes.slice(5,7)), diaVenc2-1);
+                  periodoR = fmtR(dtIni2) + ' a ' + fmtR(dtFim2);
+                }
+              } catch(eBolR) { console.warn('[reenvio] erro ao buscar período via boletos:', eBolR.message); }
+              if (!periodoR) {
+                // Último fallback: calcular a partir da duração do plano e vencimento do boleto
+                const DURACAO = {mensal:1,trimestral:3,semestral:6};
+                const durR = DURACAO[aluno.tipo_plano]||1;
+                const diaVenc = aluno.dia_vencimento||10;
+                const vencStr = boletos[0]?.vencimento || '';
+                const dtIniR = vencStr
+                  ? new Date(vencStr.slice(0,4), parseInt(vencStr.slice(5,7))-1, diaVenc)
+                  : new Date();
+                const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR-1, diaVenc-1);
+                periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
+              }
             }
           } catch(eHR) {
             console.error('[reenvio] erro ao buscar histórico:', eHR.message);
