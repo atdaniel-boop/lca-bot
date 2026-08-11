@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 13.9 - Corrigido cálculo de 'Validade' na mensagem de WhatsApp do comando 'reenviar boletos': a busca no histórico de renovações procurava um campo de texto que as renovações normais nunca têm, então sempre caía num modo reserva que usava só a data do primeiro boleto sendo reenviado — se o mês mais antigo já estivesse pago (fora da lista de reenvio), a validade mostrada começava do mês errado (caso Cleiton: mostrou setembro em vez de agosto). Agora busca o período real na tabela de boletos do aluno.
+// Versão 14.1 - Mensagens de WhatsApp (saudação de boletos) cortavam nomes compostos comuns (ex: 'Maria José' virava só 'Maria', 'João Pedro' virava só 'João'). Nova função primeiroNomeCompleto() reconhece os prefixos mais comuns no Brasil e usa nome+sobrenome nesses casos.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '13.9'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.1'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -498,6 +498,17 @@ async function interCancelarBoleto(codigoSolicitacao) {
 }
 
 // Grava registro de boleto emitido na tabela 'boletos' do Supabase (controle local de cobranças).
+// BUG CORRIGIDO v14.1: mensagens usavam sempre nome.split(' ')[0], cortando fora a segunda
+// parte de primeiros nomes compostos (ex: "Maria José" virava só "Maria", "João Pedro" virava
+// só "João"). Trata os prefixos mais comuns no Brasil que costumam formar nome composto.
+const PREFIXOS_NOME_COMPOSTO = ['maria','jose','joao','ana','luiz','luis','carlos','paulo','francisco','jorge','pedro','antonio','marcos','rosa'];
+function primeiroNomeCompleto(nomeCompleto) {
+  const partes = String(nomeCompleto||'').trim().split(/\s+/);
+  if (partes.length < 2) return partes[0] || '';
+  const semAcentoP = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+  if (PREFIXOS_NOME_COMPOSTO.includes(semAcentoP(partes[0]))) return partes[0] + ' ' + partes[1];
+  return partes[0];
+}
 async function gravarBoleto(alunoId, mes, codigoSolicitacao, seuNumero, valor, vencimento) {
   try {
     await sbPost('boletos', {
@@ -2316,7 +2327,7 @@ async function executar(intencao, p, dados, chatId) {
 
 // ── Mensagens WhatsApp ──────────────────────────────────────────────────────────
 function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
-  const primeiroNome = aluno.nome.split(' ')[0];
+  const primeiroNome = primeiroNomeCompleto(aluno.nome);
   const vezes = aluno.vezes_semana || 2;
   // Formatar telefone: dígitos → (DDD) XXXXX-XXXX
   const telDigitos = String(aluno.telefone||'').replace(/\D/g,'');
@@ -2877,7 +2888,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         if (isAvulso) {
           // Boleto avulso/excepcional: mensagem simplificada sem período de plano
           const vencFmtR = (boletos[0]?.vencimento||'').split('-').reverse().join('/');
-          const primeiroNome = aluno.nome.split(' ')[0];
+          const primeiroNome = primeiroNomeCompleto(aluno.nome);
           const telDigitos = String(aluno.telefone||'').replace(/\D/g,'');
           let telFmt = '';
           if (telDigitos.length === 11) telFmt = '(' + telDigitos.slice(0,2) + ') ' + telDigitos.slice(2,7) + '-' + telDigitos.slice(7);
@@ -4005,9 +4016,20 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       const chave = hojeStr + '|' + valor + '|' + nomePagador;
       if (_pixProcessados.has(chave)) continue;
 
-      // Match: primeiro E segundo nome do aluno presentes no nome do pagador
-      const candidatos = dados.alunos.filter(a => {
-        if (a.ativo !== 'SIM') return false;
+      // BUG CORRIGIDO v14.0: quando duas alunas ativas compartilham os 2 primeiros nomes
+      // (ex: "Maria José Fernandes Mendonça" e "Maria José Duarte Calazans"), a comparação
+      // só pelos 2 primeiros nomes gerava ambiguidade e o Pix era descartado em silêncio,
+      // mesmo o nome completo do pagador batendo com exatidão em só uma delas. Agora tenta
+      // primeiro o NOME COMPLETO (todas as partes do nome cadastrado presentes no nome do
+      // pagador) — muito mais preciso — e só cai no modo "2 primeiros nomes" se isso não
+      // encontrar ninguém (ex: nome do pagador no extrato veio truncado).
+      const alunosAtivos = dados.alunos.filter(a => a.ativo === 'SIM');
+      const candidatosCompleto = alunosAtivos.filter(a => {
+        const partesAluno = semAcento(a.nome).split(/\s+/).filter(p => !preposicoes.includes(p));
+        if (partesAluno.length < 2) return false;
+        return partesAluno.every(p => partesPag.includes(p));
+      });
+      const candidatos = candidatosCompleto.length === 1 ? candidatosCompleto : alunosAtivos.filter(a => {
         const partesAluno = semAcento(a.nome).split(/\s+/).filter(p => !preposicoes.includes(p));
         if (partesAluno.length < 2) return false;
         return partesPag.includes(partesAluno[0]) && partesPag.includes(partesAluno[1]);
