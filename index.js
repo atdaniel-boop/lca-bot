@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.10 - PROVADO via consulta ao banco + 'boletos debug': a detecção automática de Pix só procurava o boleto a cancelar na NOSSA tabela local — para alunos legados sem nenhum registro lá (caso real: Jorge Luis Correa Bastos), o cancelamento nunca era nem tentado, sem nenhum aviso disso. O Pix era creditado no sistema mas o boleto real ficava aberto/atrasado no Inter pra sempre. Agora busca também direto no Inter quando não acha localmente, e avisa explicitamente se não encontrar boleto correspondente em lugar nenhum.
+// Versão 14.11 - Corrigido bug grave no 'cancelar boleto': "cancelar boleto NOME" (sem especificar mês/valor) cancelava TODOS os boletos em aberto do aluno automaticamente, mesmo contradizendo o próprio comentário do código — caso real: cancelar o boleto atrasado do Jorge também cancelou, por engano, o boleto de setembro (que estava certo). Agora só cancela tudo quando pedido explicitamente com 'todos'; senão, pede confirmação listando os boletos.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.10'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.11'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3221,7 +3221,12 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       // Se mais de 1 boleto e sem filtro específico:
       // "cancelar todos boletos X" ou "cancelar boletos X" → cancela tudo
       // "cancelar boleto X" → pede confirmação listando os boletos
-      const cancelarTodos = p?.todos === true || (p?.aluno_nome && !p?.mes && !filtroValor);
+      // BUG CORRIGIDO v14.11: a condição abaixo tratava QUALQUER "cancelar boleto NOME" (sem
+      // mês/valor) como "cancelar todos" automaticamente — contradizendo o comentário acima e
+      // cancelando boletos que não deveriam ser tocados (caso real: "cancelar boleto Jorge"
+      // cancelou também o boleto de setembro, que estava certo e não devia ser mexido). Agora só
+      // cancela tudo quando o pedido for EXPLICITAMENTE "todos" (p?.todos === true).
+      const cancelarTodos = p?.todos === true;
       if (boletosFiltrados.length > 1 && !filtroValor && !p?.mes && !cancelarTodos) {
         return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + boletosFiltrados.length + ' boletos em aberto:\n' +
           boletosFiltrados.map(b => '• ' + (b.mes||'?') + ' R$' + b.valor + ' vence ' + (b.vencimento||'?').split('-').reverse().join('/')).join('\n') +
