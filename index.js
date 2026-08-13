@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.11 - Corrigido bug grave no 'cancelar boleto': "cancelar boleto NOME" (sem especificar mês/valor) cancelava TODOS os boletos em aberto do aluno automaticamente, mesmo contradizendo o próprio comentário do código — caso real: cancelar o boleto atrasado do Jorge também cancelou, por engano, o boleto de setembro (que estava certo). Agora só cancela tudo quando pedido explicitamente com 'todos'; senão, pede confirmação listando os boletos.
+// Versão 14.12 - Corrigida regressão introduzida por mim na v14.2: a instrução de 'responder direto perguntas pontuais' ficou ambígua o suficiente pra fazer a IA às vezes tratar frases de AÇÃO (ex: 'Kelly deu 4 aulas') como consulta — respondendo um texto parecido com confirmação, mas sem executar/salvar nada. Agora o prompt deixa explícito que frases descrevendo algo que precisa ser registrado são SEMPRE ação, e que as instruções de estilo de resposta só valem pra quando é consulta de verdade.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.11'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.12'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1442,10 +1442,11 @@ function detectarAlunoNoTexto(dados, tL) {
     '- "extrato", "movimentação da conta", "transações" → inter_extrato\n' +
     '- "resumo financeiro", "resultado do mes", "receita do estudio" → consulta\n' +
     '- "saldo" sem mencao a banco/conta/Inter → consulta sobre o estudio\n' +
-    '- "boleto(s) aberto(s)/pendente(s)", "quem falta pagar", "alguem devendo" → consulta objetiva, use só os dados de "A receber neste mes" acima\n\n' +
+    '- "boleto(s) aberto(s)/pendente(s)", "quem falta pagar", "alguem devendo" → consulta objetiva, use só os dados de "A receber neste mes" acima\n' +
+    '- REGRA CRÍTICA (não quebrar): qualquer frase que DESCREVE algo que aconteceu e precisa ser REGISTRADO — professora deu aula ("kelly deu 4 aulas"), aluno pagou ("joão pagou 300"), custo foi lançado ("paguei 200 de luz") — é SEMPRE tipo:"acao" com a intencao correspondente (lancar_aula/confirmar_pagamento/lancar_custo/etc), NUNCA tipo:"consulta", mesmo sendo uma frase curta e direta. As instruções de ESTILO DA RESPOSTA abaixo dizem respeito SÓ ao texto do campo "resposta" quando tipo="consulta" — elas não mudam se algo é ação ou consulta.\n\n' +
     'MENSAGEM: "' + texto + '"\n\n' +
-    'ESTILO DA RESPOSTA:\n' +
-    '- BUG CORRIGIDO v14.2: perguntas pontuais e específicas (ex: "algum boleto aberto?", "quantos alunos ativos?", "quem falta pagar?") estavam recebendo sempre o resumo financeiro completo de qualquer forma — responda SÓ o que foi perguntado, de forma direta e curta (1-3 linhas). Só use o template completo de resumo (abaixo) quando a pessoa pedir explicitamente "resumo", "resumo financeiro", "como está o mes" ou algo equivalente e amplo.\n' +
+    'ESTILO DA RESPOSTA (aplica-se somente quando tipo="consulta", nunca influencia se algo é "acao"):\n' +
+    '- Perguntas pontuais e específicas (ex: "algum boleto aberto?", "quantos alunos ativos?", "quem falta pagar?") → responda SÓ o que foi perguntado, de forma direta e curta (1-3 linhas). Só use o template completo de resumo (abaixo) quando a pessoa pedir explicitamente "resumo", "resumo financeiro", "como está o mes" ou algo equivalente e amplo.\n' +
     '- No template completo de resumo: use Markdown e emojis pra deixar visual e fácil de ler no Telegram.\n' +
     '- Sugestão de emojis por seção: 📊 título/resumo, 👥 ativos, 🔴 inadimplentes, 💰 receita, 👩‍🏫 professoras, 💸 custos, ✅ ou 📈 resultado positivo / 📉 se negativo, 📥 a receber/boletos pendentes, 📅 planos vencendo, 🧾 custos lançados, ⚠️ faltas frequentes.\n' +
     '- Use *negrito* nos rótulos e valores em R$. Não exagere: 1 emoji por linha/seção, sem poluir.\n' +
