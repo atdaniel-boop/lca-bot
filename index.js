@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.6 - Corrigido 'cancelar boleto' e o fallback de 'reenviar boletos': buscavam só situacao A_RECEBER no Inter, nunca ATRASADO — então um boleto vencido (como o da Claudia Marcia, 8 dias em atraso) nunca era encontrado por esses dois comandos, mesmo aparecendo certinho em outras consultas que já buscavam as duas situações.
+// Versão 14.7 - Efeito colateral da v14.6: boletos encontrados só no Inter (sem registro local ainda) não têm 'id', e o cancelamento tentava UPDATE 'id=eq.undefined', quebrando com erro de sintaxe no Postgres. Agora cria o registro já cancelado nesses casos, em vez de tentar atualizar uma linha inexistente.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.6'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.7'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3238,7 +3238,20 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
             throw eCanc;
           }
         }
-        await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+        // BUG CORRIGIDO v14.7: boletos vindos só do Inter (sem registro local ainda, ex: um
+        // boleto vencido que nunca foi sincronizado) não têm 'id' — tentar fazer UPDATE por
+        // 'id=eq.undefined' quebrava com erro de sintaxe no Postgres. Agora, se não tem id
+        // local, cria o registro já como cancelado, em vez de tentar atualizar uma linha
+        // que não existe.
+        if (b._interOnly || !b.id) {
+          await sbPost('boletos', {
+            aluno_id: aluno.id, mes: b.mes||null, valor: b.valor||0,
+            codigo_solicitacao: b.codigo_solicitacao, vencimento: b.vencimento||null,
+            status: 'cancelado', cancelado_em: new Date().toISOString(), criado_em: new Date().toISOString()
+          });
+        } else {
+          await sbPatch('boletos', 'id=eq.' + b.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+        }
         // Limpar pagamentos_pendentes do aluno para refletir no site (senão fica "aguardando" para sempre)
         try {
           const rAlC = await sbGet('alunos', 'select=pagamentos_pendentes&id=eq.' + aluno.id);
