@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.8 - A tentativa da v14.6 de filtrar por situacao='ATRASADO' na API do Inter não funcionava (provavelmente não é um valor de filtro aceito, só aparece como campo de resultado). Corrigido pra buscar sem filtro de situação nenhum — igual o comando 'boletos NOME' já fazia com sucesso — e filtrar client-side pelas situações ainda canceláveis.
+// Versão 14.9 - PROVADO via 'boletos debug': o filtro situacao='ATRASADO' na busca ao Inter retorna boletos JÁ CANCELADOS também (caso real: boleto da Claudia Marcia, cancelado pela rescisão, ainda aparecia em 'boletos vencidos'). Corrigido 'boletos vencidos' pra buscar sem filtro e checar o campo situacao real no resultado — mesma estratégia já usada em 'boletos NOME' e 'cancelar boleto'.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.8'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.9'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -2051,16 +2051,17 @@ async function executar(intencao, p, dados, chatId) {
       const dataFim = hoje.toISOString().slice(0,10);
 
       console.log('[inter_boletos_vencidos] buscando...');
-      // Busca robusta (-18 a +12 meses de emissão) para não perder atrasados de planos longos
-      const [rAtr, rAberto] = await Promise.all([
-        interCobrancasRobusto({ situacao: 'ATRASADO' }).catch(e => { console.error('rAtr:', e.message); return null; }),
-        interCobrancasRobusto({ situacao: 'A_RECEBER' }).catch(e => { console.error('rAberto:', e.message); return null; })
-      ]);
-
-      // rAtr.cobrancas: apenas ATRASADO (já filtrado pela API)
-      const atrasados = rAtr?.cobrancas || [];
+      // BUG CORRIGIDO v14.9: usava situacao='ATRASADO' como FILTRO de busca na API do Inter —
+      // provado (via "boletos debug") que esse filtro retorna boletos pela data de vencimento
+      // ter passado, SEM refletir o status real atual — incluindo boletos JÁ CANCELADOS (caso
+      // Claudia Marcia: boleto cancelado de verdade por causa da rescisão, mas ainda aparecia
+      // como "vencido e não pago"). O campo 'situacao' dentro de cada resultado, quando buscado
+      // SEM filtro, é confiável — mesma estratégia já usada no "boletos NOME" e no "cancelar boleto".
+      const rTudo = await interCobrancasRobusto({}).catch(e => { console.error('rTudo:', e.message); return null; });
+      const todasCobrancas = rTudo?.cobrancas || [];
+      const atrasados = todasCobrancas.filter(b => ((b.cobranca||b).situacao) === 'ATRASADO');
       // emAberto: A_RECEBER que já venceram E ainda não foram pagos/cancelados
-      const emAberto = (rAberto?.cobrancas || []).filter(b => {
+      const emAberto = todasCobrancas.filter(b => {
         const bc = b.cobranca || b;
         const sit = bc.situacao || '';
         const dv = bc.dataVencimento || '';
