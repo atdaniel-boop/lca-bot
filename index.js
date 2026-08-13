@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.1 - Mensagens de WhatsApp (saudação de boletos) cortavam nomes compostos comuns (ex: 'Maria José' virava só 'Maria', 'João Pedro' virava só 'João'). Nova função primeiroNomeCompleto() reconhece os prefixos mais comuns no Brasil e usa nome+sobrenome nesses casos.
+// Versão 14.5 - Ampliando a auditoria de dados críticos além de vencimento: (1) alteração de plano emitia boleto real no Inter com CPF FALSO ('00000000000') quando o aluno não tinha CPF cadastrado — agora bloqueia e avisa, igual a emissão normal já fazia; (2) emissão de plano assumia 'mensal' em silêncio quando faltava tipo_plano, o que mudava quantos meses eram cobrados de uma vez — agora bloqueia e avisa.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.1'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.5'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1037,7 +1037,12 @@ function buildContexto(dados, mes) {
   const receitaEsperada = receitaMes + aReceberMes;          // se todos os pendentes pagarem
   const resultadoEsperado = receitaEsperada; // resultado calculado abaixo após custos/prof
   // Inadimplentes = ativos que não pagaram E cujo dia de vencimento já passou neste mês
-  const hojeBot = new Date();
+  // BUG CORRIGIDO v14.3: o servidor roda em UTC (3h à frente do horário de Brasília). Sem
+  // corrigir isso, mensagens enviadas à noite (ex: depois das 21h em Brasília) já contavam
+  // como o DIA SEGUINTE no servidor — fazendo um aluno com vencimento amanhã (no calendário
+  // do Brasil) aparecer como vencendo HOJE, e por consequência ser marcado inadimplente cedo
+  // demais. Resto do bot já corrige isso manualmente (Date.now() - 3h); este ponto não corrigia.
+  const hojeBot = new Date(Date.now() - 3*60*60*1000);
   const diaHoje = hojeBot.getDate();
   const mesAtualBot = hojeBot.getFullYear() + '-' + String(hojeBot.getMonth()+1).padStart(2,'0');
   // Aluno trimestral/semestral cujo ciclo terminou e não renovou NÃO é inadimplente (está "a renovar")
@@ -1052,9 +1057,12 @@ function buildContexto(dados, mes) {
     const pag = pagMes.find(p => p.id === a.id);
     if (pag && pag.pagou) return false; // Já pagou
     if (cicloVencidoBot(a)) return false; // Plano encerrado sem renovação → não é inadimplência
-    // Só considera inadimplente se o dia de vencimento já passou
+    // BUG CORRIGIDO v14.2: usava >= (maior OU IGUAL), então no próprio dia do vencimento o
+    // aluno já era considerado inadimplente — deveria só virar inadimplente no dia SEGUINTE
+    // ao vencimento (dando o dia inteiro pra pagar). Outra rotina do bot (resumo semanal) já
+    // fazia essa comparação certa (diaV < hoje.getDate()); esta ficou desalinhada.
     const diaVenc = parseInt(a.dia_vencimento || 10);
-    return diaHoje >= diaVenc;
+    return diaHoje > diaVenc;
   });
 
   // Custos do mês
@@ -1433,10 +1441,12 @@ function detectarAlunoNoTexto(dados, tL) {
     '- "saldo da conta/inter/banco", "quanto tem no banco" → inter_saldo\n' +
     '- "extrato", "movimentação da conta", "transações" → inter_extrato\n' +
     '- "resumo financeiro", "resultado do mes", "receita do estudio" → consulta\n' +
-    '- "saldo" sem mencao a banco/conta/Inter → consulta sobre o estudio\n\n' +
+    '- "saldo" sem mencao a banco/conta/Inter → consulta sobre o estudio\n' +
+    '- "boleto(s) aberto(s)/pendente(s)", "quem falta pagar", "alguem devendo" → consulta objetiva, use só os dados de "A receber neste mes" acima\n\n' +
     'MENSAGEM: "' + texto + '"\n\n' +
-    'ESTILO DA RESPOSTA (quando for consulta, especialmente resumo financeiro):\n' +
-    '- Use Markdown e emojis para deixar visual e fácil de ler no Telegram.\n' +
+    'ESTILO DA RESPOSTA:\n' +
+    '- BUG CORRIGIDO v14.2: perguntas pontuais e específicas (ex: "algum boleto aberto?", "quantos alunos ativos?", "quem falta pagar?") estavam recebendo sempre o resumo financeiro completo de qualquer forma — responda SÓ o que foi perguntado, de forma direta e curta (1-3 linhas). Só use o template completo de resumo (abaixo) quando a pessoa pedir explicitamente "resumo", "resumo financeiro", "como está o mes" ou algo equivalente e amplo.\n' +
+    '- No template completo de resumo: use Markdown e emojis pra deixar visual e fácil de ler no Telegram.\n' +
     '- Sugestão de emojis por seção: 📊 título/resumo, 👥 ativos, 🔴 inadimplentes, 💰 receita, 👩‍🏫 professoras, 💸 custos, ✅ ou 📈 resultado positivo / 📉 se negativo, 📥 a receber/boletos pendentes, 📅 planos vencendo, 🧾 custos lançados, ⚠️ faltas frequentes.\n' +
     '- Use *negrito* nos rótulos e valores em R$. Não exagere: 1 emoji por linha/seção, sem poluir.\n' +
     '- Mantenha os números exatamente como nos DADOS, sem inventar.\n\n' +
@@ -2441,10 +2451,21 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const cpf = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
     if (!cpf) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de emitir boletos.';
     if (!cpfValido(cpf)) return '⚠️ O CPF de *' + aluno.nome + '* (' + aluno.cpf + ') parece inválido. O banco recusa CPF com dígito verificador errado. Confira o cadastro.';
+    if (!aluno.dia_vencimento || isNaN(parseInt(aluno.dia_vencimento))) {
+      _emissaoEmAndamento.delete(aluno.id);
+      return '⚠️ *' + aluno.nome + '* não tem dia de vencimento cadastrado. Corrija na ficha antes de emitir boletos — sem isso, o sistema teria que adivinhar a data.';
+    }
 
     const DURACAO = { mensal:1, trimestral:3, semestral:6 };
-    const plano = aluno.tipo_plano || 'mensal';
-    const dur = DURACAO[plano] || 1;
+    // BUG CORRIGIDO v14.5: sem tipo_plano cadastrado, assumia 'mensal' em silêncio — isso
+    // muda quantos meses de boleto são emitidos de uma vez (1 vs 3 vs 6), afetando
+    // diretamente quanto o aluno é cobrado.
+    if (!aluno.tipo_plano || !DURACAO[aluno.tipo_plano]) {
+      _emissaoEmAndamento.delete(aluno.id);
+      return '⚠️ *' + aluno.nome + '* está sem tipo de plano cadastrado (ou com um valor não reconhecido: "' + (aluno.tipo_plano||'vazio') + '"). Corrija na ficha antes de emitir — sem isso, o sistema não sabe se é mensal, trimestral ou semestral.';
+    }
+    const plano = aluno.tipo_plano;
+    const dur = DURACAO[plano];
 
     // Calcular valor automaticamente: último pagamento pendente > último pago > valor_referencia
     const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
@@ -3011,6 +3032,15 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     // Parâmetros: aluno_id/aluno_nome, plano_novo, freq_nova, valor, meses_cancelar (array CSV), meses_emitir (array CSV), pro_rata
     const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Aluno não encontrado.';
+    if (!aluno.dia_vencimento || isNaN(parseInt(aluno.dia_vencimento))) {
+      return '⚠️ *' + aluno.nome + '* não tem dia de vencimento cadastrado. Corrija na ficha antes de alterar o plano — sem isso, o sistema teria que adivinhar a data dos novos boletos.';
+    }
+    // BUG CORRIGIDO v14.5: se faltasse boletos (novos ou pró-rata) EMITIDOS DE VERDADE
+    // no Inter usando um CPF FALSO ('00000000000') como placeholder, em vez de bloquear
+    // — igual já acontecia na emissão normal de plano (que exige CPF válido antes de emitir).
+    const cpfAlt = aluno.cpf ? aluno.cpf.replace(/\D/g,'') : '';
+    if (!cpfAlt) return '⚠️ *' + aluno.nome + '* não tem CPF cadastrado. Cadastre na ficha antes de alterar o plano.';
+    if (!cpfValido(cpfAlt)) return '⚠️ O CPF de *' + aluno.nome + '* (' + aluno.cpf + ') parece inválido. Confira o cadastro antes de alterar o plano.';
 
     const novoPlano  = p?.plano_novo || aluno.tipo_plano;
     const novoFreq   = parseInt(p?.freq_nova) || aluno.vezes_semana || 2;
@@ -3054,7 +3084,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         await interEmitirBoleto({
           seuNumero: seuNum, valor: proRata,
           vencimento: dtVenc.toISOString().slice(0,10),
-          nomePagador: aluno.nome, cpfCnpj: (aluno.cpf||'00000000000').replace(/\D/g,''),
+          nomePagador: aluno.nome, cpfCnpj: cpfAlt,
           email: aluno.email||'', descricao: descPR,
           logradouro: aluno.logradouro||'Nao informado', numero: aluno.numero||'S/N',
           complemento: aluno.complemento||'', bairro: aluno.bairro||'',
@@ -3078,7 +3108,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         await interEmitirBoleto({
           seuNumero: seuNum, valor: novoValor,
           vencimento: dtVenc.toISOString().slice(0,10),
-          nomePagador: aluno.nome, cpfCnpj: (aluno.cpf||'00000000000').replace(/\D/g,''),
+          nomePagador: aluno.nome, cpfCnpj: cpfAlt,
           email: aluno.email||'', descricao: desc,
           logradouro: aluno.logradouro||'Nao informado', numero: aluno.numero||'S/N',
           complemento: aluno.complemento||'', bairro: aluno.bairro||'',
@@ -3324,7 +3354,7 @@ async function processar(msg) {
         const aluno = Array.isArray(ra) && ra[0];
         if (!aluno) return tgSend(chatId, '❌ Aluno não encontrado no banco.');
 
-        const hoje = new Date();
+        const hoje = new Date(Date.now() - 3*60*60*1000); // horário de Brasília, não UTC do servidor
         const hojeStr = hoje.toISOString().slice(0,10);
         const dataFmt = hojeStr.split('-').reverse().join('/');
         const rescMes = hojeStr.slice(0,7);
@@ -4284,6 +4314,17 @@ async function rotinaAlertaInadimplencia() {
     const mesAtualStr = hoje.toISOString().slice(0,7);
     const dados = await getDados();
 
+    // Alerta separado: alunos ativos sem dia de vencimento cadastrado — sem isso, o sistema
+    // não consegue calcular inadimplência/cobrança certa pra eles (ficam invisíveis pra essa
+    // checagem, ao invés de assumir um valor padrão errado em silêncio).
+    const semVenc = dados.alunos.filter(a => a.ativo === 'SIM' && (!a.dia_vencimento || isNaN(parseInt(a.dia_vencimento))));
+    if (semVenc.length) {
+      await tgSend(TELEGRAM_CHAT_ID,
+        '⚠️ *' + semVenc.length + ' aluno(s) ativo(s) sem dia de vencimento cadastrado:*\n' +
+        semVenc.map(a => '- ' + a.nome).join('\n') +
+        '\n\nCorrija o cadastro pelo site — sem isso, o sistema não consegue calcular inadimplência/cobrança certa pra eles.');
+    }
+
     // Alunos ativos cujo dia de vencimento foi ontem e não pagaram o mês atual
     const vencidosOntem = dados.alunos.filter(a => {
       if (a.ativo !== 'SIM') return false;
@@ -4460,6 +4501,7 @@ async function rotinaResumoSemanal() {
 }
 
 // ── 4. Fechamento mensal (dia 1º às 09:00 BRT) ──────────────────────────────
+// LCA Studio Bot - Parte 5/5 (continuação de bot_parte4.js: rotinas finais + main())
 async function rotinaFechamentoMensal() {
   try {
     const hoje = new Date(Date.now() - 3*60*60*1000);
