@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.7 - Efeito colateral da v14.6: boletos encontrados só no Inter (sem registro local ainda) não têm 'id', e o cancelamento tentava UPDATE 'id=eq.undefined', quebrando com erro de sintaxe no Postgres. Agora cria o registro já cancelado nesses casos, em vez de tentar atualizar uma linha inexistente.
+// Versão 14.8 - A tentativa da v14.6 de filtrar por situacao='ATRASADO' na API do Inter não funcionava (provavelmente não é um valor de filtro aceito, só aparece como campo de resultado). Corrigido pra buscar sem filtro de situação nenhum — igual o comando 'boletos NOME' já fazia com sucesso — e filtrar client-side pelas situações ainda canceláveis.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.7'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.8'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -2816,13 +2816,13 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         if (total > 0) return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + total + ' boleto(s) na tabela mas nenhum com status "aberto".\nStatus encontrados: ' + [...new Set(rArr.map(b=>b.status))].join(', ');
         // Sem nenhum registro - buscar na API Inter
         await tgSend(chatId, '🔍 Buscando boletos na API Inter para *' + aluno.nome.split(' ')[0] + '*...');
-        // BUG CORRIGIDO v14.6: buscava só A_RECEBER — boleto vencido (ATRASADO no Inter)
-        // nunca era encontrado por esse fallback.
-        const [rInterAR2, rInterAtr2] = await Promise.all([
-          interCobrancasRobusto({ situacao: 'A_RECEBER' }).catch(() => ({ cobrancas: [] })),
-          interCobrancasRobusto({ situacao: 'ATRASADO' }).catch(() => ({ cobrancas: [] }))
-        ]);
-        const cobrancas = [...(rInterAR2?.cobrancas||[]), ...(rInterAtr2?.cobrancas||[])];
+        // BUG CORRIGIDO v14.8: mesmo problema do cancelar boleto — 'ATRASADO' provavelmente
+        // não é um valor de filtro aceito pela API do Inter. Busca sem filtro, igual "boletos NOME".
+        const rInterTudo2 = await interCobrancasRobusto({}).catch(() => ({ cobrancas: [] }));
+        const cobrancas = (rInterTudo2?.cobrancas || []).filter(item => {
+          const bc = item.cobranca || item;
+          return ['A_RECEBER', 'ATRASADO', 'EM_PROCESSAMENTO'].includes(bc.situacao);
+        });
         // Filtrar pelo seuNumero que começa com LCA-{id}- (campos dentro de .cobranca)
         const prefixo = 'LCA-' + aluno.id + '-';
         boletos = cobrancas
@@ -3172,15 +3172,17 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       // Se não encontrou no Supabase OU flag todos=true, buscar também direto no Inter
       const preps2 = ['de','da','do','das','dos','e'];
       const partesA = aluno.nome.toLowerCase().split(/\s+/).filter(x => !preps2.includes(x));
-      // BUG CORRIGIDO v14.6: buscava só situacao A_RECEBER no Inter — um boleto que já venceu
-      // (atrasado) é reclassificado pelo Inter pra situacao ATRASADO, então "cancelar boleto"
-      // nunca encontrava boletos vencidos, mesmo eles aparecendo certinho em "boletos NOME"
-      // (que já buscava as duas situações). Agora busca as duas e junta, igual o outro fluxo já fazia.
-      const [rInterAR, rInterAtr] = await Promise.all([
-        interCobrancasRobusto({ situacao: 'A_RECEBER' }).catch(() => ({ cobrancas: [] })),
-        interCobrancasRobusto({ situacao: 'ATRASADO' }).catch(() => ({ cobrancas: [] }))
-      ]);
-      const rInterCombinado = [...(rInterAR?.cobrancas||[]), ...(rInterAtr?.cobrancas||[])];
+      // BUG CORRIGIDO v14.8: a v14.6 tentou corrigir buscando situacao 'A_RECEBER' E 'ATRASADO'
+      // separadamente — mas 'ATRASADO' provavelmente não é um valor de FILTRO aceito pela API
+      // do Inter (só aparece como campo classificatório no resultado), então essa busca voltava
+      // vazia mesmo assim. O comando "boletos NOME" (que sempre funcionou) nunca filtra por
+      // situacao na busca — traz tudo e classifica depois. Copiando essa mesma estratégia aqui.
+      const rInterTudo = await interCobrancasRobusto({}).catch(() => ({ cobrancas: [] }));
+      const SITUACOES_CANCELAVEIS = ['A_RECEBER', 'ATRASADO', 'EM_PROCESSAMENTO'];
+      const rInterCombinado = (rInterTudo?.cobrancas || []).filter(item => {
+        const bc = item.cobranca || item;
+        return SITUACOES_CANCELAVEIS.includes(bc.situacao);
+      });
       const boletoInter = rInterCombinado.filter(item => {
         const bc = item.cobranca || item;
         const psn = parseSeuNumero(bc.seuNumero);
