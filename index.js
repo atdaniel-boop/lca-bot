@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.5 - Ampliando a auditoria de dados críticos além de vencimento: (1) alteração de plano emitia boleto real no Inter com CPF FALSO ('00000000000') quando o aluno não tinha CPF cadastrado — agora bloqueia e avisa, igual a emissão normal já fazia; (2) emissão de plano assumia 'mensal' em silêncio quando faltava tipo_plano, o que mudava quantos meses eram cobrados de uma vez — agora bloqueia e avisa.
+// Versão 14.6 - Corrigido 'cancelar boleto' e o fallback de 'reenviar boletos': buscavam só situacao A_RECEBER no Inter, nunca ATRASADO — então um boleto vencido (como o da Claudia Marcia, 8 dias em atraso) nunca era encontrado por esses dois comandos, mesmo aparecendo certinho em outras consultas que já buscavam as duas situações.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.5'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.6'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -2816,8 +2816,13 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         if (total > 0) return 'ℹ️ *' + aluno.nome.split(' ')[0] + '* tem ' + total + ' boleto(s) na tabela mas nenhum com status "aberto".\nStatus encontrados: ' + [...new Set(rArr.map(b=>b.status))].join(', ');
         // Sem nenhum registro - buscar na API Inter
         await tgSend(chatId, '🔍 Buscando boletos na API Inter para *' + aluno.nome.split(' ')[0] + '*...');
-        const rInter = await interCobrancasRobusto({ situacao: 'A_RECEBER' });
-        const cobrancas = rInter?.cobrancas || [];
+        // BUG CORRIGIDO v14.6: buscava só A_RECEBER — boleto vencido (ATRASADO no Inter)
+        // nunca era encontrado por esse fallback.
+        const [rInterAR2, rInterAtr2] = await Promise.all([
+          interCobrancasRobusto({ situacao: 'A_RECEBER' }).catch(() => ({ cobrancas: [] })),
+          interCobrancasRobusto({ situacao: 'ATRASADO' }).catch(() => ({ cobrancas: [] }))
+        ]);
+        const cobrancas = [...(rInterAR2?.cobrancas||[]), ...(rInterAtr2?.cobrancas||[])];
         // Filtrar pelo seuNumero que começa com LCA-{id}- (campos dentro de .cobranca)
         const prefixo = 'LCA-' + aluno.id + '-';
         boletos = cobrancas
@@ -3167,8 +3172,16 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       // Se não encontrou no Supabase OU flag todos=true, buscar também direto no Inter
       const preps2 = ['de','da','do','das','dos','e'];
       const partesA = aluno.nome.toLowerCase().split(/\s+/).filter(x => !preps2.includes(x));
-      const rInter = await interCobrancasRobusto({ situacao: 'A_RECEBER' });
-      const boletoInter = (rInter?.cobrancas || []).filter(item => {
+      // BUG CORRIGIDO v14.6: buscava só situacao A_RECEBER no Inter — um boleto que já venceu
+      // (atrasado) é reclassificado pelo Inter pra situacao ATRASADO, então "cancelar boleto"
+      // nunca encontrava boletos vencidos, mesmo eles aparecendo certinho em "boletos NOME"
+      // (que já buscava as duas situações). Agora busca as duas e junta, igual o outro fluxo já fazia.
+      const [rInterAR, rInterAtr] = await Promise.all([
+        interCobrancasRobusto({ situacao: 'A_RECEBER' }).catch(() => ({ cobrancas: [] })),
+        interCobrancasRobusto({ situacao: 'ATRASADO' }).catch(() => ({ cobrancas: [] }))
+      ]);
+      const rInterCombinado = [...(rInterAR?.cobrancas||[]), ...(rInterAtr?.cobrancas||[])];
+      const boletoInter = rInterCombinado.filter(item => {
         const bc = item.cobranca || item;
         const psn = parseSeuNumero(bc.seuNumero);
         if (psn.alunoId === aluno.id) return true;
