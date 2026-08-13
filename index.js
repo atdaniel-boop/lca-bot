@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.9 - PROVADO via 'boletos debug': o filtro situacao='ATRASADO' na busca ao Inter retorna boletos JÁ CANCELADOS também (caso real: boleto da Claudia Marcia, cancelado pela rescisão, ainda aparecia em 'boletos vencidos'). Corrigido 'boletos vencidos' pra buscar sem filtro e checar o campo situacao real no resultado — mesma estratégia já usada em 'boletos NOME' e 'cancelar boleto'.
+// Versão 14.10 - PROVADO via consulta ao banco + 'boletos debug': a detecção automática de Pix só procurava o boleto a cancelar na NOSSA tabela local — para alunos legados sem nenhum registro lá (caso real: Jorge Luis Correa Bastos), o cancelamento nunca era nem tentado, sem nenhum aviso disso. O Pix era creditado no sistema mas o boleto real ficava aberto/atrasado no Inter pra sempre. Agora busca também direto no Inter quando não acha localmente, e avisa explicitamente se não encontrar boleto correspondente em lugar nenhum.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.9'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.10'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4140,8 +4140,36 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
         let boletoCancelMsg = '';
         try {
           const rBolPix = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&mes=eq.' + mesAtualStr + '&status=eq.aberto&select=id,codigo_solicitacao');
-          const bolsPix = Array.isArray(rBolPix) ? rBolPix : (rBolPix?.data || []);
-          for (const b of bolsPix) {
+          let bolsPix = Array.isArray(rBolPix) ? rBolPix : (rBolPix?.data || []);
+          // BUG CORRIGIDO v14.10: se o aluno não tem NENHUM registro na nossa tabela local de
+          // boletos (caso de alunos legados, cujos boletos nunca foram sincronizados pro banco —
+          // caso real do Jorge Luis Correa Bastos), essa busca sempre voltava vazia e o
+          // cancelamento nunca era nem tentado — o Pix era creditado no nosso sistema, mas o
+          // boleto real ficava aberto/atrasado no Inter pra sempre, sem nenhum aviso disso.
+          // Agora, se não achar localmente, busca direto no Inter (sem filtro de situação —
+          // filtro de busca já provou ser não confiável) antes de desistir.
+          let bolsInterPix = [];
+          if (!bolsPix.length) {
+            try {
+              const rTudoPix = await interCobrancasRobusto({});
+              const preposPix = ['de','da','do','das','dos','e'];
+              const partesAlunoPix = semAcento(aluno.nome).split(/\s+/).filter(x => !preposPix.includes(x));
+              bolsInterPix = (rTudoPix?.cobrancas || []).filter(item => {
+                const bc = item.cobranca || item;
+                if (!['A_RECEBER','ATRASADO'].includes(bc.situacao)) return false;
+                const psn = parseSeuNumero(bc.seuNumero);
+                if (psn.alunoId === aluno.id && (psn.mes === mesAtualStr || !psn.mes)) return true;
+                const nomePag = semAcento(bc.pagador?.nome || '').split(/\s+/).filter(x => !preposPix.includes(x));
+                return partesAlunoPix[0] && partesAlunoPix[1] && nomePag.includes(partesAlunoPix[0]) && nomePag.includes(partesAlunoPix[1])
+                  && (bc.dataVencimento||'').slice(0,7) === mesAtualStr;
+              }).map(item => {
+                const bc = item.cobranca || item;
+                return { id: null, codigo_solicitacao: bc.codigoSolicitacao, _interOnly: true };
+              });
+            } catch(eBuscaInter) { console.error('[rotina-pix] erro ao buscar boleto no Inter:', eBuscaInter.message); }
+          }
+          const todosBols = [...bolsPix, ...bolsInterPix];
+          for (const b of todosBols) {
             if (!b.codigo_solicitacao) continue;
             let cancelouNoInter = true;
             try {
@@ -4153,14 +4181,27 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
                 console.error('[rotina-pix] falha ao cancelar no Inter, marcando status mesmo assim:', b.codigo_solicitacao, eCancPix.message);
               }
             }
-            // Sempre atualizar o status local — mesmo se o cancelamento no Inter falhar,
-            // o dashboard não deve continuar contando como "a receber" um mês já pago.
-            await sbPatch('boletos', 'id=eq.' + b.id, {
-              status: cancelouNoInter ? 'cancelado' : 'pago_outro_meio_erro_cancelamento',
-              cancelado_em: new Date().toISOString()
-            });
+            // Sempre registrar o status — mesmo se o cancelamento no Inter falhar, o dashboard
+            // não deve continuar contando como "a receber" um mês já pago. Se o boleto só
+            // existia no Inter (sem id local), cria o registro em vez de tentar atualizar.
+            if (b._interOnly || !b.id) {
+              await sbPost('boletos', {
+                aluno_id: aluno.id, mes: mesAtualStr, valor: valor, codigo_solicitacao: b.codigo_solicitacao,
+                status: cancelouNoInter ? 'cancelado' : 'pago_outro_meio_erro_cancelamento',
+                cancelado_em: new Date().toISOString(), criado_em: new Date().toISOString()
+              });
+            } else {
+              await sbPatch('boletos', 'id=eq.' + b.id, {
+                status: cancelouNoInter ? 'cancelado' : 'pago_outro_meio_erro_cancelamento',
+                cancelado_em: new Date().toISOString()
+              });
+            }
           }
-          if (bolsPix.length) boletoCancelMsg = '\n🏦 Boleto correspondente cancelado no Inter automaticamente.';
+          if (todosBols.length) {
+            boletoCancelMsg = '\n🏦 Boleto correspondente cancelado no Inter automaticamente.';
+          } else {
+            boletoCancelMsg = '\n⚠️ Não encontrei nenhum boleto aberto/atrasado correspondente (nem local, nem no Inter) — confira manualmente se existe um boleto pra cancelar.';
+          }
         } catch(eBolPix) {
           console.error('[rotina-pix] erro ao cancelar boleto:', aluno.nome, eBolPix.message);
           boletoCancelMsg = '\n⚠️ Não consegui cancelar o boleto no Inter automaticamente — verifique manualmente.';
