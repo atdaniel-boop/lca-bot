@@ -4,7 +4,7 @@
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.13'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.14'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -581,9 +581,21 @@ function req(url, method, headers, body, timeoutMs) {
 
 // ── Telegram ────────────────────────────────────────────────────────────────────
 async function tgSend(chatId, text) {
-  const r = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
-    'POST', { 'Content-Type': 'application/json' },
-    { chat_id: chatId, text, parse_mode: 'Markdown' });
+  // v14.14: retry único em falha de rede (timeout etc). Sem isso, uma mensagem importante
+  // (ex: resultado de uma operação longa) podia se perder em silêncio num timeout
+  // transitório — visto nos logs do Render ("Loop error: Request timeout").
+  let r;
+  try {
+    r = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
+      'POST', { 'Content-Type': 'application/json' },
+      { chat_id: chatId, text, parse_mode: 'Markdown' });
+  } catch(eNet) {
+    console.warn('[tgSend] falha de rede (' + eNet.message + ') — tentando de novo em 3s');
+    await new Promise(res => setTimeout(res, 3000));
+    r = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
+      'POST', { 'Content-Type': 'application/json' },
+      { chat_id: chatId, text, parse_mode: 'Markdown' });
+  }
   // Telegram rejeita Markdown malformado (400 can't parse entities) — reenviar sem formatação
   if (r && r.ok === false) {
     console.log('[tgSend] Markdown rejeitado (' + (r.description||'').slice(0,60) + '), reenviando sem parse_mode');
@@ -4663,9 +4675,11 @@ async function sincronizarBoletosInter() {
     RECEBIDO: 'pago', MARCADO_RECEBIDO: 'pago', MARCADORECEBIDO: 'pago',
     CANCELADO: 'cancelado', EXPIRADO: 'cancelado' };
   try {
+    console.log('[sincronizar-boletos] iniciando busca no Inter...');
     const dados = await getDados();
     const rTudo = await interCobrancasRobusto({});
     const cobrancas = rTudo?.cobrancas || [];
+    console.log('[sincronizar-boletos] Inter retornou', cobrancas.length, 'cobranças; comparando com tabela local...');
     if (!cobrancas.length) return '⚠️ Nenhuma cobrança retornada pelo Inter — nada a sincronizar.';
 
     const rLocal = await sbGet('boletos', 'select=codigo_solicitacao');
@@ -4705,6 +4719,7 @@ async function sincronizarBoletosInter() {
       });
       if (okIns) inseridos++;
     }
+    console.log('[sincronizar-boletos] CONCLUÍDO: inseridos=' + inseridos + ' jaExistiam=' + jaExistiam + ' semAluno=' + semAluno + ' ignorados=' + ignorados);
     return '🔄 *Sincronização de boletos concluída!*\n\n' +
       '➕ Inseridos: *' + inseridos + '*\n' +
       '✔️ Já existiam: ' + jaExistiam + '\n' +
