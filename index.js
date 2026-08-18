@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.12 - Corrigida regressão introduzida por mim na v14.2: a instrução de 'responder direto perguntas pontuais' ficou ambígua o suficiente pra fazer a IA às vezes tratar frases de AÇÃO (ex: 'Kelly deu 4 aulas') como consulta — respondendo um texto parecido com confirmação, mas sem executar/salvar nada. Agora o prompt deixa explícito que frases descrevendo algo que precisa ser registrado são SEMPRE ação, e que as instruções de estilo de resposta só valem pra quando é consulta de verdade.
+// Versão 14.13 - Revisão geral com bateria de testes: corrigidos os 3 últimos pontos com data em UTC do servidor em vez de BRT (mês atual do processar(), ano do mês-por-nome, e fallback de mês-base da emissão de plano) — entre 21h e meia-noite de Brasília, lançamentos/emissões sem mês explícito podiam cair no mês seguinte. Mesma família do bug da Gildette (v14.3).
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.12'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.13'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1253,6 +1253,14 @@ async function processarComIA(texto, dados, mes) {
   if (tL === 'detectar boletos' || tL === 'verificar boletos' || tL === 'checar boletos' || tL === 'baixar boletos') {
     return { tipo: 'acao', intencao: 'verificar_boletos_pagos', params: {} };
   }
+  // Sincronizar boletos legados do Inter para a tabela local (elimina "aluno sem registro local")
+  if (tL === 'sincronizar boletos' || tL === 'sincronizar inter' || tL === 'sync boletos') {
+    return { tipo: 'acao', intencao: 'sincronizar_boletos', params: {} };
+  }
+  // Conciliação manual Inter × sistema (a mesma que roda todo dia 9h05)
+  if (tL === 'conciliar' || tL === 'conciliacao' || tL === 'conciliação' || tL === 'conferir inter') {
+    return { tipo: 'acao', intencao: 'conciliar_manual', params: {} };
+  }
   // Desfazer pagamento direto: "desfazer pagamento NOME MES" (evita a IA classificar como remover custo)
   if (tL.startsWith('desfazer pagamento ') || tL.startsWith('remover pagamento ') || tL.startsWith('apagar pagamento ')) {
     const resto = texto.replace(/^(desfazer|remover|apagar)\s+pagamento\s+/i, '').trim();
@@ -1511,6 +1519,16 @@ async function extrairParams(intencao, texto, dados) {
 // ── Executar ação ───────────────────────────────────────────────────────────────
 async function executar(intencao, p, dados, chatId) {
   const mes = p?.mes || new Date().toISOString().slice(0,7);
+
+  if (intencao === 'sincronizar_boletos') {
+    await tgSend(chatId, '🔄 Sincronizando boletos do Inter com a tabela local — pode levar ~1 min...');
+    return await sincronizarBoletosInter();
+  }
+  if (intencao === 'conciliar_manual') {
+    await tgSend(chatId, '🔍 Rodando conciliação Inter × sistema...');
+    await rotinaConciliacaoDiaria();
+    return '✅ Conciliação concluída. Se houve divergências, você recebeu o relatório acima; sem mensagem = tudo consistente.';
+  }
 
   if (intencao === 'lancar_custo') {
     if (!p?.valor || !p?.categoria) return '❌ Informe o valor e a categoria.';
@@ -2539,8 +2557,8 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       const pm = aluno.data_matricula.split('-');
       anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
     } else {
-      const hoje = new Date();
-      anoBase = hoje.getFullYear(); mesBase = hoje.getMonth();
+      const hoje = new Date(Date.now() - 3*60*60*1000); // BRT — virada 21h-00h no fim do mês emitia pro mês seguinte
+      anoBase = hoje.getUTCFullYear(); mesBase = hoje.getUTCMonth();
     }
 
     const diaVenc = aluno.dia_vencimento || 10;
@@ -3462,11 +3480,11 @@ async function processar(msg) {
   var _mesMatch = null;
   var _tL = msg.text ? msg.text.toLowerCase() : '';
   // Tentar nome do mês em português
-  for (var _mn in MESES_PT) { if (_tL.includes(_mn)) { var _d = new Date(); _mesMatch = _d.getFullYear() + '-' + MESES_PT[_mn]; break; } }
+  for (var _mn in MESES_PT) { if (_tL.includes(_mn)) { var _d = new Date(Date.now() - 3*60*60*1000); _mesMatch = _d.getUTCFullYear() + '-' + MESES_PT[_mn]; break; } }
   // Tentar formato MM/AAAA ou AAAA-MM
   if (!_mesMatch) { var _mm = _tL.match(/(\d{2})\/(\d{4})/); if (_mm) _mesMatch = _mm[2]+'-'+_mm[1]; }
   if (!_mesMatch) { var _mm2 = _tL.match(/(\d{4})-(\d{2})/); if (_mm2) _mesMatch = _mm2[0]; }
-  const mes = _mesMatch || new Date().toISOString().slice(0,7);
+  const mes = _mesMatch || new Date(Date.now() - 3*60*60*1000).toISOString().slice(0,7); // BRT, não UTC do servidor
   // Timeout geral - responde se demorar mais de 90s (emissão de plano com vários boletos pode levar tempo)
   let _timedOut = false;
   const _timer = setTimeout(() => {
@@ -4578,6 +4596,175 @@ async function rotinaResumoSemanal() {
 
 // ── 4. Fechamento mensal (dia 1º às 09:00 BRT) ──────────────────────────────
 // LCA Studio Bot - Parte 5/5 (continuação de bot_parte4.js: rotinas finais + main())
+
+// Requisição GET que preserva bytes (para arquivos binários como .docx do Storage)
+function reqBinario(url, headers) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const r = require('https').request({
+      hostname: u.hostname, port: 443, path: u.pathname + u.search,
+      method: 'GET', headers: headers || {}, timeout: 30000
+    }, res => {
+      if (res.statusCode >= 400) { reject(new Error('HTTP ' + res.statusCode)); res.resume(); return; }
+      const chunks = [];
+      res.on('data', ch => chunks.push(ch));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+    r.on('error', reject);
+    r.on('timeout', () => { r.destroy(); reject(new Error('timeout')); });
+    r.end();
+  });
+}
+
+// ── Gerador de PDF simples (texto, sem dependências) ────────────────────────────
+// Gera um PDF válido (1.4) com texto em Courier, paginado. Usado no relatório mensal.
+function gerarPDFTexto(titulo, linhas) {
+  const LINHAS_POR_PAG = 54;
+  const esc = s => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[^\x20-\x7e]/g,'?').replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)');
+  const paginas = [];
+  for (let i = 0; i < linhas.length; i += LINHAS_POR_PAG) paginas.push(linhas.slice(i, i + LINHAS_POR_PAG));
+  if (!paginas.length) paginas.push(['(vazio)']);
+
+  const objs = []; // strings dos objetos, índice+1 = número do objeto
+  const nPags = paginas.length;
+  // obj1 catálogo, obj2 pages, obj3 fonte, depois: para cada página, [page, content]
+  objs.push('<< /Type /Catalog /Pages 2 0 R >>');
+  const kids = paginas.map((_, i) => (4 + i*2) + ' 0 R').join(' ');
+  objs.push('<< /Type /Pages /Kids [' + kids + '] /Count ' + nPags + ' >>');
+  objs.push('<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>');
+  paginas.forEach((pag, pi) => {
+    const contNum = 5 + pi*2;
+    objs.push('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents ' + contNum + ' 0 R >>');
+    let stream = 'BT /F1 14 Tf 40 800 Td (' + esc(titulo) + (nPags > 1 ? ' - pag ' + (pi+1) + '/' + nPags : '') + ') Tj ET\n';
+    let y = 775;
+    stream += 'BT /F1 9 Tf\n';
+    pag.forEach(ln => { stream += '1 0 0 1 40 ' + y + ' Tm (' + esc(ln) + ') Tj\n'; y -= 13; });
+    stream += 'ET';
+    objs.push('<< /Length ' + Buffer.byteLength(stream) + ' >>\nstream\n' + stream + '\nendstream');
+  });
+
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  objs.forEach((o, i) => { offsets.push(Buffer.byteLength(pdf)); pdf += (i+1) + ' 0 obj\n' + o + '\nendobj\n'; });
+  const xrefPos = Buffer.byteLength(pdf);
+  pdf += 'xref\n0 ' + (objs.length+1) + '\n0000000000 65535 f \n';
+  for (let i = 1; i <= objs.length; i++) pdf += String(offsets[i]).padStart(10,'0') + ' 00000 n \n';
+  pdf += 'trailer\n<< /Size ' + (objs.length+1) + ' /Root 1 0 R >>\nstartxref\n' + xrefPos + '\n%%EOF';
+  return Buffer.from(pdf, 'latin1');
+}
+
+// ── Sincronização de boletos legados (Inter → tabela local) ────────────────────
+// Varre TODAS as cobranças do Inter e insere na tabela boletos as que não existem
+// localmente. Elimina a classe de bugs de "aluno legado sem registro local"
+// (casos Jorge e Claudia). Mapeia situação do Inter → status local.
+async function sincronizarBoletosInter() {
+  const MAPA_STATUS = { A_RECEBER: 'aberto', ATRASADO: 'aberto', EM_PROCESSAMENTO: 'aberto',
+    RECEBIDO: 'pago', MARCADO_RECEBIDO: 'pago', MARCADORECEBIDO: 'pago',
+    CANCELADO: 'cancelado', EXPIRADO: 'cancelado' };
+  try {
+    const dados = await getDados();
+    const rTudo = await interCobrancasRobusto({});
+    const cobrancas = rTudo?.cobrancas || [];
+    if (!cobrancas.length) return '⚠️ Nenhuma cobrança retornada pelo Inter — nada a sincronizar.';
+
+    const rLocal = await sbGet('boletos', 'select=codigo_solicitacao');
+    const locais = new Set((Array.isArray(rLocal) ? rLocal : (rLocal?.data || [])).map(b => b.codigo_solicitacao));
+
+    let inseridos = 0, semAluno = 0, jaExistiam = 0, ignorados = 0;
+    const detalhes = [];
+    for (const item of cobrancas) {
+      const bc = item.cobranca || item;
+      const cod = bc.codigoSolicitacao;
+      if (!cod) { ignorados++; continue; }
+      if (locais.has(cod)) { jaExistiam++; continue; }
+      const status = MAPA_STATUS[bc.situacao];
+      if (!status) { ignorados++; continue; }
+      // Identificar aluno: seuNumero (LCA-id-mes ou id legado) ou nome do pagador
+      const psn = parseSeuNumero(bc.seuNumero);
+      let alunoId = psn.alunoId;
+      if (!alunoId || !dados.alunos.some(a => a.id === alunoId)) {
+        alunoId = null; // id do seuNumero não existe no cadastro — só aceita se o nome identificar com exatidão
+        const preps = ['de','da','do','das','dos','e'];
+        const semAc = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+        const nomePag = semAc(bc.pagador?.nome).split(/\s+/).filter(x => !preps.includes(x));
+        const cands = dados.alunos.filter(a => {
+          const pa = semAc(a.nome).split(/\s+/).filter(x => !preps.includes(x));
+          return pa.length >= 2 && pa.every(p => nomePag.includes(p));
+        });
+        if (cands.length === 1) alunoId = cands[0].id;
+      }
+      if (!alunoId) { semAluno++; detalhes.push('sem aluno: ' + (bc.pagador?.nome||'?') + ' venc ' + (bc.dataVencimento||'?')); continue; }
+      const mes = psn.mes || (bc.dataVencimento||'').slice(0,7) || null;
+      const valNum = parseFloat(bc.valorNominal || bc.valorTotal || 0) || 0;
+      const okIns = await inserirComVerificacao('boletos', {
+        aluno_id: alunoId, mes, valor: valNum, codigo_solicitacao: cod,
+        vencimento: bc.dataVencimento || null, status,
+        criado_em: new Date().toISOString(),
+        ...(status === 'cancelado' ? { cancelado_em: new Date().toISOString() } : {})
+      });
+      if (okIns) inseridos++;
+    }
+    return '🔄 *Sincronização de boletos concluída!*\n\n' +
+      '➕ Inseridos: *' + inseridos + '*\n' +
+      '✔️ Já existiam: ' + jaExistiam + '\n' +
+      '❔ Sem aluno identificável: ' + semAluno + (semAluno && detalhes.length ? '\n_' + detalhes.slice(0,5).join('; ') + (detalhes.length>5?'...':'') + '_' : '') + '\n' +
+      '⏭️ Ignorados (situação não mapeada): ' + ignorados + '\n\n' +
+      '_Total no Inter: ' + cobrancas.length + ' cobranças._';
+  } catch(e) {
+    console.error('[sincronizar-boletos] erro:', e.message);
+    return '❌ Erro na sincronização: ' + e.message.slice(0,150);
+  }
+}
+
+// Helper: insert que confere .error de verdade (padrão da sessão — supabase não lança em RLS)
+async function inserirComVerificacao(tabela, body) {
+  try {
+    const r = await req(SUPABASE_URL + '/rest/v1/' + tabela, 'POST', sbHeaders(), body);
+    if (r && r.error) { console.error('[' + tabela + '] insert falhou:', JSON.stringify(r.error).slice(0,120)); return false; }
+    return true;
+  } catch(e) { console.error('[' + tabela + '] insert erro:', e.message); return false; }
+}
+
+// ── Conciliação diária Inter × banco local (report-only, não corrige nada) ──────
+async function rotinaConciliacaoDiaria() {
+  try {
+    const dados = await getDados();
+    const rTudo = await interCobrancasRobusto({});
+    const cobrancas = rTudo?.cobrancas || [];
+    if (!cobrancas.length) return; // sem dados do Inter, não conclui nada
+
+    const mesAtualStr = new Date(Date.now() - 3*3600*1000).toISOString().slice(0,7);
+    const divergencias = [];
+
+    for (const item of cobrancas) {
+      const bc = item.cobranca || item;
+      const psn = parseSeuNumero(bc.seuNumero);
+      if (!psn.alunoId) continue;
+      const aluno = dados.alunos.find(a => a.id === psn.alunoId);
+      if (!aluno || aluno.ativo !== 'SIM') continue;
+      const mes = psn.mes || (bc.dataVencimento||'').slice(0,7);
+      if (!mes || mes > mesAtualStr) continue; // só até o mês corrente
+      const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
+      const pagoLocal = (pags[mes]||0) > 0;
+      const sit = bc.situacao || '';
+      if ((sit === 'RECEBIDO' || sit === 'MARCADO_RECEBIDO' || sit === 'MARCADORECEBIDO') && !pagoLocal) {
+        divergencias.push('🔺 ' + aluno.nome.split(' ').slice(0,2).join(' ') + ' ' + mes + ': PAGO no Inter, mas NÃO creditado no sistema');
+      }
+      if ((sit === 'A_RECEBER' || sit === 'ATRASADO') && pagoLocal) {
+        divergencias.push('🔻 ' + aluno.nome.split(' ').slice(0,2).join(' ') + ' ' + mes + ': marcado pago no sistema, mas boleto ainda ABERTO no Inter (' + brl(parseFloat(bc.valorNominal||0)) + ')');
+      }
+    }
+    if (divergencias.length) {
+      await tgSend(TELEGRAM_CHAT_ID,
+        '🔍 *Conciliação diária Inter × Sistema*\n\n' +
+        divergencias.slice(0,15).join('\n') + (divergencias.length>15 ? '\n_... +' + (divergencias.length-15) + ' divergência(s)_' : '') +
+        '\n\n_Nada foi alterado automaticamente — confira cada caso. Boleto aberto p/ mês pago por outro meio: "cancelar boleto NOME MES"._');
+    }
+    console.log('[conciliacao] divergências:', divergencias.length);
+  } catch(e) { console.error('[conciliacao] erro:', e.message); }
+}
+
 async function rotinaFechamentoMensal() {
   try {
     const hoje = new Date(Date.now() - 3*60*60*1000);
@@ -4646,6 +4833,35 @@ async function rotinaFechamentoMensal() {
       (inadimplentes.length ? ' (' + inadimplentes.slice(0,10).map(nomeInad).join(', ') + (inadimplentes.length>10?'...':'') + ')' : '') +
       '\n\n_Use o Relatório Contábil no site para detalhes completos._');
     console.log('[fechamento-mensal] enviado:', mesNome);
+
+    // Relatório em PDF anexo (gerado internamente, sem dependências)
+    try {
+      const linhasPDF = [
+        'LCA STUDIO DE PILATES - Fechamento ' + mesNome,
+        'Gerado automaticamente em ' + new Date(Date.now()-3*3600*1000).toLocaleString('pt-BR'),
+        '',
+        'RESUMO',
+        '  Receita:        ' + brl(recFechado) + '  (' + varRecStr + ' vs mes anterior)',
+        '  Pagantes:       ' + nPagFechado,
+        '  Custos:         ' + brl(custosTotal),
+        '  Aulas Kelly:    ' + brl(kellyTotal),
+        '  Resultado:      ' + brl(resultado) + '  (' + varResStr + ' vs mes anterior)',
+        '',
+        'CUSTOS DO MES'
+      ];
+      (dados.custos||[]).filter(cu => (cu.mes||'') === mesFechadoStr).forEach(cu => {
+        linhasPDF.push('  ' + String(cu.desc||cu.categoria||'?').slice(0,40).padEnd(42) + brl(parseFloat(cu.valor||0)));
+      });
+      linhasPDF.push('', 'NAO PAGARAM (' + inadimplentes.length + ')');
+      inadimplentes.forEach(a => linhasPDF.push('  ' + a.nome));
+      linhasPDF.push('', 'PAGAMENTOS DO MES');
+      dados.alunos.forEach(a => {
+        const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
+        if (pags[mesFechadoStr] > 0) linhasPDF.push('  ' + a.nome.slice(0,40).padEnd(42) + brl(pags[mesFechadoStr]));
+      });
+      const pdfBuf = gerarPDFTexto('Fechamento ' + mesNome, linhasPDF);
+      await tgSendPDFBuffer(TELEGRAM_CHAT_ID, pdfBuf, 'Fechamento_' + mesFechadoStr + '.pdf', '📎 Relatório detalhado em PDF');
+    } catch(ePdf) { console.error('[fechamento-mensal] PDF falhou (mensagem de texto já enviada):', ePdf.message); }
   } catch(e) { console.error('[fechamento-mensal] erro:', e.message); }
 }
 
@@ -4731,6 +4947,20 @@ async function rotinaBackupSemanal() {
 
     await tgSendJSONBuffer(TELEGRAM_CHAT_ID, json, nome,
       '💾 Backup semanal automático — ' + dataStr + ' (' + dados.alunos.length + ' alunos, ' + tamanhoKB + ' KB)');
+
+    // Backup dos templates Word (contrato/aditivo) do Storage — se sobrescrever errado, tem cópia
+    for (const tpl of ['contrato_template.docx', 'aditivo_template.docx']) {
+      try {
+        const rTpl = await reqBinario(SUPABASE_URL + '/storage/v1/object/documentos/' + tpl,
+          { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY });
+        if (rTpl && Buffer.isBuffer(rTpl) && rTpl.length > 1000) {
+          await tgSendPDFBuffer(TELEGRAM_CHAT_ID, rTpl, tpl.replace('.docx', '_' + dataStr + '.docx'),
+            '📄 Backup do template: ' + tpl);
+        } else {
+          console.warn('[backup] template ' + tpl + ' vazio ou não binário — não anexado');
+        }
+      } catch(eTpl) { console.warn('[backup] template ' + tpl + ' indisponível:', eTpl.message); }
+    }
     console.log('[backup-semanal] enviado:', nome, tamanhoKB + 'KB');
   } catch(e) {
     console.error('[backup-semanal] erro:', e.message);
@@ -4750,6 +4980,10 @@ function agendarRotinasAutomaticas() {
     // 09:00 — alerta de inadimplência (diário)
     if (hora === 9 && min < 5 && !_jaExecutouHoje('inadimplencia')) {
       await rotinaAlertaInadimplencia();
+    }
+    // 09:05 — conciliação Inter × sistema (diário, report-only)
+    if (hora === 9 && min >= 5 && min < 10 && !_jaExecutouHoje('conciliacao')) {
+      await rotinaConciliacaoDiaria();
     }
     // 09:00 — planos vencendo (diário, alerta em 7/3/0 dias)
     if (hora === 9 && min < 5 && !_jaExecutouHoje('planosVencendo')) {
@@ -4773,7 +5007,7 @@ function agendarRotinasAutomaticas() {
     }
   }
   setInterval(checarRotinas, 4 * 60 * 1000); // a cada 4 min
-  console.log('Rotinas automáticas agendadas: inadimplência (9h), planos vencendo (9h), abandono (seg 9h), resumo semanal (sex 20h), fechamento (dia 1º 9h), backup (dom 20h)');
+  console.log('Rotinas automáticas agendadas: inadimplência (9h), conciliação Inter (9h05), planos vencendo (9h), abandono (seg 9h), resumo semanal (sex 20h), fechamento+PDF (dia 1º 9h), backup+templates (dom 20h)');
 }
 
 
