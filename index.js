@@ -4,7 +4,7 @@
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.14'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.15'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1273,6 +1273,10 @@ async function processarComIA(texto, dados, mes) {
   if (tL === 'conciliar' || tL === 'conciliacao' || tL === 'conciliação' || tL === 'conferir inter') {
     return { tipo: 'acao', intencao: 'conciliar_manual', params: {} };
   }
+  // Baixar PDFs de todos os boletos em aberto que ainda não estão guardados no Storage
+  if (tL === 'backup pdfs' || tL === 'baixar pdfs' || tL === 'baixar todos pdfs' || tL === 'backup boletos') {
+    return { tipo: 'acao', intencao: 'backup_pdfs', params: {} };
+  }
   // Desfazer pagamento direto: "desfazer pagamento NOME MES" (evita a IA classificar como remover custo)
   if (tL.startsWith('desfazer pagamento ') || tL.startsWith('remover pagamento ') || tL.startsWith('apagar pagamento ')) {
     const resto = texto.replace(/^(desfazer|remover|apagar)\s+pagamento\s+/i, '').trim();
@@ -1540,6 +1544,10 @@ async function executar(intencao, p, dados, chatId) {
     await tgSend(chatId, '🔍 Rodando conciliação Inter × sistema...');
     await rotinaConciliacaoDiaria();
     return '✅ Conciliação concluída. Se houve divergências, você recebeu o relatório acima; sem mensagem = tudo consistente.';
+  }
+  if (intencao === 'backup_pdfs') {
+    await tgSend(chatId, '📥 Baixando PDFs dos boletos em aberto que ainda não estão no Storage — pode levar alguns minutos...');
+    return await baixarPdfsBoletosAbertos();
   }
 
   if (intencao === 'lancar_custo') {
@@ -4780,6 +4788,106 @@ async function rotinaConciliacaoDiaria() {
   } catch(e) { console.error('[conciliacao] erro:', e.message); }
 }
 
+// ── Backup em massa: PDF de todo boleto ABERTO ainda não guardado no Storage ────
+async function baixarPdfsBoletosAbertos() {
+  try {
+    const rAbertos = await sbGet('boletos', 'status=eq.aberto&select=id,aluno_id,mes,codigo_solicitacao&order=mes.asc');
+    const abertos = Array.isArray(rAbertos) ? rAbertos : (rAbertos?.data || []);
+    if (!abertos.length) return '✅ Nenhum boleto em aberto no momento — nada para baixar.';
+
+    console.log('[backup-pdfs] ' + abertos.length + ' boleto(s) em aberto — verificando quais já têm PDF no Storage...');
+    let baixados = 0, jaTinham = 0, semLink = 0, erros = 0;
+    const falhas = [];
+    for (const b of abertos) {
+      if (!b.mes || !b.codigo_solicitacao) { erros++; continue; }
+      // Já existe no Storage? (evita baixar de novo à toa)
+      try {
+        const existe = await sbStorageExiste(b.aluno_id, b.mes);
+        if (existe) { jaTinham++; continue; }
+      } catch(eChk) { /* segue e tenta baixar mesmo assim */ }
+
+      try {
+        const token = await interGetToken('boleto-cobranca.read');
+        const rBol = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao, 'GET', null, token);
+        const link = rBol?.data?.linkVisualizacaoBoleto || rBol?.data?.link || '';
+        if (!link) { semLink++; continue; }
+        const pdfBuffer = await new Promise((resolve, reject) => {
+          const u = new URL(link);
+          const opts = { hostname: u.hostname, port: 443, path: u.pathname + u.search, method: 'GET', headers: { Accept: 'application/pdf' }, timeout: 20000 };
+          if (INTER_CERT && INTER_KEY && u.hostname.includes('inter')) {
+            opts.agent = new (require('https').Agent)({
+              cert: INTER_CERT.includes('-----') ? INTER_CERT : Buffer.from(INTER_CERT, 'base64').toString(),
+              key:  INTER_KEY.includes('-----')  ? INTER_KEY  : Buffer.from(INTER_KEY,  'base64').toString(),
+              rejectUnauthorized: false
+            });
+          }
+          const chunks = [];
+          require('https').get(opts, res => { res.on('data', c => chunks.push(c)); res.on('end', () => resolve(Buffer.concat(chunks))); })
+            .on('error', reject).on('timeout', () => reject(new Error('timeout')));
+        });
+        if (pdfBuffer.length < 500) { semLink++; continue; } // resposta vazia/erro disfarçado de PDF
+        await sbStorageUpload(b.aluno_id, b.mes, pdfBuffer);
+        baixados++;
+        await new Promise(r => setTimeout(r, 400)); // não martelar a API do Inter
+      } catch(ePdf) {
+        erros++;
+        falhas.push(b.aluno_id + '/' + b.mes + ': ' + ePdf.message.slice(0,60));
+        console.warn('[backup-pdfs] falha em', b.aluno_id, b.mes, ePdf.message);
+      }
+    }
+    console.log('[backup-pdfs] CONCLUÍDO: baixados=' + baixados + ' jaTinham=' + jaTinham + ' semLink=' + semLink + ' erros=' + erros);
+    return '📥 *Backup de PDFs concluído!*\n\n' +
+      '⬇️ Baixados agora: *' + baixados + '*\n' +
+      '✔️ Já estavam no Storage: ' + jaTinham + '\n' +
+      '⚠️ Sem link disponível no Inter: ' + semLink + '\n' +
+      '❌ Erros: ' + erros + (falhas.length ? '\n_' + falhas.slice(0,5).join('; ') + '_' : '') + '\n\n' +
+      '_Total de boletos em aberto: ' + abertos.length + '_';
+  } catch(e) {
+    console.error('[backup-pdfs] erro:', e.message);
+    return '❌ Erro no backup de PDFs: ' + e.message.slice(0,150);
+  }
+}
+function sbStorageExiste(alunoId, mes) {
+  return new Promise((resolve) => {
+    const path = alunoId + '/' + mes + '.pdf';
+    const u = new URL(SUPABASE_URL + '/storage/v1/object/info/' + BOLETOS_BUCKET + '/' + path);
+    https.request({ hostname: u.hostname, port: 443, path: u.pathname, method: 'GET',
+      headers: { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY }, timeout: 8000
+    }, res => { resolve(res.statusCode >= 200 && res.statusCode < 300); res.resume(); })
+      .on('error', () => resolve(false)).on('timeout', () => resolve(false)).end();
+  });
+}
+
+// ── Limpeza automática: exclui boletos pago/cancelado com mais de 3 meses ──────
+// Motivo: o histórico de pagamento em si (o que importa pra financeiro/PAR-Q/contrato)
+// já vive em alunos.pagamentos — a linha em 'boletos' é só o registro operacional do
+// ciclo de cobrança no Inter. Depois de resolvido (pago/cancelado) e maduro, não serve
+// mais pra nada além de ocupar espaço, então pode ser removida com segurança.
+async function rotinaLimpezaBoletosAntigos() {
+  try {
+    const limite = new Date(Date.now() - 3*3600*1000);
+    limite.setMonth(limite.getMonth() - 3);
+    const limiteISO = limite.toISOString();
+    const rAlvo = await sbGet('boletos', 'status=in.(pago,cancelado)&select=id,pago_em,cancelado_em');
+    const alvo = (Array.isArray(rAlvo) ? rAlvo : (rAlvo?.data || [])).filter(b => {
+      const data = b.pago_em || b.cancelado_em;
+      return data && data < limiteISO;
+    });
+    if (!alvo.length) { console.log('[limpeza-boletos] nada a excluir'); return; }
+    let excluidos = 0;
+    for (const b of alvo) {
+      try { await sbDelete('boletos', 'id=eq.' + b.id); excluidos++; }
+      catch(eDel) { console.warn('[limpeza-boletos] falha ao excluir id', b.id, eDel.message); }
+    }
+    console.log('[limpeza-boletos] excluídos:', excluidos, 'de', alvo.length, 'elegíveis');
+    if (excluidos > 0) {
+      await tgSend(TELEGRAM_CHAT_ID, '🧹 Limpeza automática: ' + excluidos + ' boleto(s) pago(s)/cancelado(s) há mais de 3 meses removido(s) da tabela local (o histórico de pagamento continua intacto na ficha do aluno).');
+    }
+  } catch(e) { console.error('[limpeza-boletos] erro:', e.message); }
+}
+
+
+
 async function rotinaFechamentoMensal() {
   try {
     const hoje = new Date(Date.now() - 3*60*60*1000);
@@ -5022,7 +5130,7 @@ function agendarRotinasAutomaticas() {
     }
   }
   setInterval(checarRotinas, 4 * 60 * 1000); // a cada 4 min
-  console.log('Rotinas automáticas agendadas: inadimplência (9h), conciliação Inter (9h05), planos vencendo (9h), abandono (seg 9h), resumo semanal (sex 20h), fechamento+PDF (dia 1º 9h), backup+templates (dom 20h)');
+  console.log('Rotinas automáticas agendadas: inadimplência (9h), conciliação Inter (9h05), planos vencendo (9h), abandono (seg 9h), resumo semanal (sex 20h), fechamento+PDF (dia 1º 9h), backup+templates+limpeza boletos 3m (dom 20h)');
 }
 
 
