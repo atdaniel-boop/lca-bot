@@ -4,7 +4,7 @@
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.16'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.18'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -502,6 +502,12 @@ async function interCancelarBoleto(codigoSolicitacao) {
 // parte de primeiros nomes compostos (ex: "Maria José" virava só "Maria", "João Pedro" virava
 // só "João"). Trata os prefixos mais comuns no Brasil que costumam formar nome composto.
 const PREFIXOS_NOME_COMPOSTO = ['maria','jose','joao','ana','luiz','luis','carlos','paulo','francisco','jorge','pedro','antonio','marcos','rosa'];
+function saudacaoHora() {
+  const h = new Date(Date.now() - 3*60*60*1000).getUTCHours(); // BRT
+  if (h < 12) return 'Bom dia';
+  if (h < 18) return 'Boa tarde';
+  return 'Boa noite';
+}
 function primeiroNomeCompleto(nomeCompleto) {
   const partes = String(nomeCompleto||'').trim().split(/\s+/);
   if (partes.length < 2) return partes[0] || '';
@@ -2386,7 +2392,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   else if (telDigitos.length === 10) telFmt = '(' + telDigitos.slice(0,2) + ') ' + telDigitos.slice(2,6) + '-' + telDigitos.slice(6);
   const linhaFone = telFmt ? '*WhatsApp:* +55' + telDigitos + ' | ' + telFmt + '\n' : '';
   return linhaFone +
-    'Olá, ' + primeiroNome + '! 😊\n\n' +
+    saudacaoHora() + ', ' + primeiroNome + '! Tudo bem? 😊\n\n' +
     'Seguem os boletos referentes ao seu plano ' + planoLabel.toLowerCase() + ' no LCA Studio de Pilates.\n\n' +
     '📋 *Plano ' + planoLabel + ' - ' + vezes + 'x por semana*\n' +
     '📅 *Validade: ' + periodoPlano + '*\n' +
@@ -2535,11 +2541,16 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         // Último mês efetivamente pago (chave YYYY-MM exata)
         const mesesPagos = Object.keys(pags).filter(k => /^\d{4}-\d{2}$/.test(k) && (pags[k]||0) > 0).sort();
         const ultimoPago = mesesPagos.length ? mesesPagos[mesesPagos.length-1] : null;
-        // Escolher a renovação mais ANTIGA cujo mês seja <= mês seguinte ao último pago
-        // (evita usar uma renovação duplicada/posterior criada por bug de execução anterior)
+        // BUG CORRIGIDO v14.4 (site): candidatas ordenadas da mais ANTIGA pra mais nova, e a
+        // primeira compatível era escolhida — como QUALQUER renovação de anos atrás também
+        // satisfaz a tolerância (ano menor), alunos com várias renovações legítimas ao longo
+        // do tempo (ex: Hannelore, cliente desde fev/2025) tinham a mensagem de validade
+        // montada com a PRIMEIRA renovação já feita, não a de agora (caso real: validade saiu
+        // "21/02/2025 a 20/02/2027" numa renovação feita hoje). Agora ordena da mais RECENTE
+        // pra mais antiga, escolhendo a primeira (mais nova) compatível — que é a de agora.
         const candidatas = renovacoes.slice().sort((a,b) => {
           const da = a.data.split('/'), db = b.data.split('/');
-          return new Date(parseInt(da[2]),parseInt(da[1])-1,parseInt(da[0])) - new Date(parseInt(db[2]),parseInt(db[1])-1,parseInt(db[0]));
+          return new Date(parseInt(db[2]),parseInt(db[1])-1,parseInt(db[0])) - new Date(parseInt(da[2]),parseInt(da[1])-1,parseInt(da[0]));
         });
         if (ultimoPago) {
           const [anoP, mesP] = ultimoPago.split('-').map(Number);
@@ -2963,7 +2974,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           await tgSend(chatId, '✂️ *Copie a mensagem abaixo e envie no WhatsApp da aluna:*');
           await tgSend(chatId,
             linhaFoneAv +
-            'Olá, ' + primeiroNome + '! 😊\n\n' +
+            saudacaoHora() + ', ' + primeiroNome + '! Tudo bem? 😊\n\n' +
             'Segue o boleto referente à cobrança avulsa no LCA Studio de Pilates.\n\n' +
             '💰 *' + brl(boletos[0]?.valor||0) + '* | vence ' + vencFmtR + '\n\n' +
             'Você também pode pagar via Pix utilizando o QR Code impresso no boleto.\n\n' +
@@ -2973,93 +2984,63 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           // Boleto de plano: buscar período real no historico_alteracoes
           const planoLabelR = (aluno.tipo_plano||'mensal').charAt(0).toUpperCase()+(aluno.tipo_plano||'mensal').slice(1);
           const fmtR = d => String(d.getDate()).padStart(2,'0')+'/'+String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();
+          const DURACAO_R = {mensal:1,trimestral:3,semestral:6};
           let periodoR = '';
           try {
+            // BUG CORRIGIDO v14.4: a versão anterior procurava um campo 'desc' com texto
+            // "dd/mm/aaaa a dd/mm/aaaa" que as renovações normais NUNCA têm (guardam
+            // plano_novo/valor/dia_venc, não uma string de período) — sempre caía num
+            // fallback que usava o menor/maior mês de TODOS os boletos não-cancelados do
+            // aluno, o que pega o início do primeiro ciclo já feito, não o da renovação
+            // atual, para quem já renovou antes (caso real: Hannelore, cliente desde
+            // fev/2025, mostrou validade desde 2025 numa renovação feita hoje). Agora usa
+            // a mesma lógica confiável do emitir_plano: pega a renovação mais RECENTE
+            // compatível com o último mês pago, direto do campo 'data' da própria entrada.
             const rAlR = await sbGet('alunos', 'select=historico_alteracoes&id=eq.' + aluno.id);
             const alR = (Array.isArray(rAlR) ? rAlR[0] : rAlR?.data?.[0]) || {};
             const histR = alR.historico_alteracoes || [];
             const pagsR = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
-            // Pegar a renovação mais recente relevante ao mês do boleto reenviado
-            const mesRefNum = mesRef.slice(0,7); // YYYY-MM
-            const entradas = histR.filter(h => h.tipo === 'renovacao' || h.tipo === 'alteracao');
-            // Coletar TODAS as entradas cujo período cobre o mês do boleto (pode haver duplicatas)
-            const candidatasHist = [];
-            for (const h of entradas) {
-              if (h.desc && h.desc.includes(' a ')) {
-                const m = h.desc.match(/(\d{2}\/\d{2}\/\d{4}) a (\d{2}\/\d{2}\/\d{4})/);
-                if (m) {
-                  const [, iniStr, fimStr] = m;
-                  const toISO = s => s.split('/').reverse().join('-');
-                  if (mesRefNum >= toISO(iniStr).slice(0,7) && mesRefNum <= toISO(fimStr).slice(0,7)) {
-                    candidatasHist.push({ ini: iniStr, fim: fimStr, data: h.data });
-                  }
-                }
-              }
-            }
-            // Se há mais de uma candidata (duplicata), escolher a mais ANTIGA cujo início
-            // seja <= mês seguinte ao último pagamento confirmado (evita duplicata posterior)
-            let melhorHist = null;
-            if (candidatasHist.length === 1) {
-              melhorHist = candidatasHist[0];
-            } else if (candidatasHist.length > 1) {
+            const renovacoesR = histR.filter(h => h.tipo === 'renovacao' && h.data);
+            let renovAtual = null;
+            if (renovacoesR.length) {
               const mesesPagosR = Object.keys(pagsR).filter(k => /^\d{4}-\d{2}$/.test(k) && (pagsR[k]||0) > 0).sort();
               const ultimoPagoR = mesesPagosR.length ? mesesPagosR[mesesPagosR.length-1] : null;
-              const ordenadas = candidatasHist.slice().sort((a,b) => {
-                const toISO = s => s.split('/').reverse().join('-');
-                return toISO(a.ini).localeCompare(toISO(b.ini));
+              const candidatasR = renovacoesR.slice().sort((a,b) => {
+                const da = a.data.split('/'), db = b.data.split('/');
+                return new Date(parseInt(db[2]),parseInt(db[1])-1,parseInt(db[0])) - new Date(parseInt(da[2]),parseInt(da[1])-1,parseInt(da[0]));
               });
               if (ultimoPagoR) {
                 const [anoP, mesP] = ultimoPagoR.split('-').map(Number);
-                melhorHist = ordenadas.find(c => {
-                  const toISO = s => s.split('/').reverse().join('-');
-                  const iniISO = toISO(c.ini);
-                  const anoH = parseInt(iniISO.slice(0,4)), mesH = parseInt(iniISO.slice(5,7));
+                renovAtual = candidatasR.find(h => {
+                  const dp = h.data.split('/');
+                  const anoH = parseInt(dp[2]), mesH = parseInt(dp[1]);
                   return (anoH < anoP) || (anoH === anoP && mesH <= mesP + 1);
-                }) || ordenadas[0];
+                }) || candidatasR[0];
               } else {
-                melhorHist = ordenadas[0];
+                renovAtual = candidatasR[0];
               }
             }
-            if (melhorHist) {
-              periodoR = melhorHist.ini + ' a ' + melhorHist.fim;
+            if (renovAtual) {
+              const dp = renovAtual.data.split('/');
+              const dtIniR = new Date(parseInt(dp[2]), parseInt(dp[1])-1, parseInt(dp[0]));
+              const durR = DURACAO_R[renovAtual.plano_novo] || DURACAO_R[aluno.tipo_plano] || 1;
+              const diaVencR = renovAtual.dia_venc || aluno.dia_vencimento || 10;
+              const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR, diaVencR-1);
+              periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
             } else {
-              // BUG CORRIGIDO v13.9: o campo 'desc' com texto "dd/mm/aaaa a dd/mm/aaaa" que
-              // esse bloco procura no histórico NUNCA existe nas renovações normais (elas
-              // guardam plano_novo/valor/dia_venc, não uma string de período) — então essa
-              // busca sempre falhava e caía no modo reserva antigo, que usava só a data do
-              // PRIMEIRO boleto sendo reenviado. Se o mês mais antigo já estava pago (fora da
-              // lista de reenvio, como agosto do Cleiton), a "Validade" mostrada começava do
-              // mês seguinte por engano. Agora busca o período real na própria tabela de
-              // boletos do aluno (menor e maior mês entre os que não foram cancelados/duplicados).
-              try {
-                const rTodosBol = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=neq.cancelado&select=mes&order=mes.asc');
-                const todosBol = Array.isArray(rTodosBol) ? rTodosBol : (rTodosBol?.data || []);
-                const mesesValidos = todosBol.map(b => b.mes).filter(m => /^\d{4}-\d{2}/.test(m||''));
-                if (mesesValidos.length) {
-                  const menorMes = mesesValidos[0], maiorMes = mesesValidos[mesesValidos.length-1];
-                  const diaVenc2 = aluno.dia_vencimento||10;
-                  const dtIni2 = new Date(parseInt(menorMes.slice(0,4)), parseInt(menorMes.slice(5,7))-1, diaVenc2);
-                  const dtFim2 = new Date(parseInt(maiorMes.slice(0,4)), parseInt(maiorMes.slice(5,7)), diaVenc2-1);
-                  periodoR = fmtR(dtIni2) + ' a ' + fmtR(dtFim2);
-                }
-              } catch(eBolR) { console.warn('[reenvio] erro ao buscar período via boletos:', eBolR.message); }
-              if (!periodoR) {
-                // Último fallback: calcular a partir da duração do plano e vencimento do boleto
-                const DURACAO = {mensal:1,trimestral:3,semestral:6};
-                const durR = DURACAO[aluno.tipo_plano]||1;
-                const diaVenc = aluno.dia_vencimento||10;
-                const vencStr = boletos[0]?.vencimento || '';
-                const dtIniR = vencStr
-                  ? new Date(vencStr.slice(0,4), parseInt(vencStr.slice(5,7))-1, diaVenc)
-                  : new Date();
-                const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR-1, diaVenc-1);
-                periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
-              }
+              // Sem histórico de renovação: usar duração do plano a partir do vencimento do 1º boleto
+              const durR = DURACAO_R[aluno.tipo_plano]||1;
+              const diaVenc = aluno.dia_vencimento||10;
+              const vencStr = boletos[0]?.vencimento || '';
+              const dtIniR = vencStr
+                ? new Date(vencStr.slice(0,4), parseInt(vencStr.slice(5,7))-1, diaVenc)
+                : new Date();
+              const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR-1, diaVenc-1);
+              periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
             }
           } catch(eHR) {
             console.error('[reenvio] erro ao buscar histórico:', eHR.message);
-            const DURACAO = {mensal:1,trimestral:3,semestral:6};
-            const durR = DURACAO[aluno.tipo_plano]||1;
+            const durR = DURACAO_R[aluno.tipo_plano]||1;
             const dtIniR = new Date();
             const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR-1, (aluno.dia_vencimento||10)-1);
             periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
