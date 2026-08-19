@@ -4,7 +4,7 @@
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.15'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.16'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4808,24 +4808,37 @@ async function baixarPdfsBoletosAbertos() {
 
       try {
         const token = await interGetToken('boleto-cobranca.read');
-        const rBol = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao, 'GET', null, token);
-        const link = rBol?.data?.linkVisualizacaoBoleto || rBol?.data?.link || '';
-        if (!link) { semLink++; continue; }
-        const pdfBuffer = await new Promise((resolve, reject) => {
-          const u = new URL(link);
-          const opts = { hostname: u.hostname, port: 443, path: u.pathname + u.search, method: 'GET', headers: { Accept: 'application/pdf' }, timeout: 20000 };
-          if (INTER_CERT && INTER_KEY && u.hostname.includes('inter')) {
-            opts.agent = new (require('https').Agent)({
-              cert: INTER_CERT.includes('-----') ? INTER_CERT : Buffer.from(INTER_CERT, 'base64').toString(),
-              key:  INTER_KEY.includes('-----')  ? INTER_KEY  : Buffer.from(INTER_KEY,  'base64').toString(),
-              rejectUnauthorized: false
-            });
-          }
-          const chunks = [];
-          require('https').get(opts, res => { res.on('data', c => chunks.push(c)); res.on('end', () => resolve(Buffer.concat(chunks))); })
-            .on('error', reject).on('timeout', () => reject(new Error('timeout')));
-        });
-        if (pdfBuffer.length < 500) { semLink++; continue; } // resposta vazia/erro disfarçado de PDF
+        // BUG CORRIGIDO v14.16: só tentava o campo linkVisualizacaoBoleto da consulta de
+        // metadados — que fica vazio pra boletos mais antigos (58 de 76 casos reais). O
+        // endpoint dedicado /pdf (já usado com sucesso no "reenviar boletos") funciona pra
+        // boletos de qualquer idade. Agora tenta ele primeiro, com o link como reserva.
+        let pdfBuffer = null;
+        const pdfResp = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao + '/pdf', 'GET', null, token);
+        const pdfBase64 = pdfResp?.data?.pdf || pdfResp?.pdf ||
+          (typeof pdfResp?.data === 'string' && pdfResp.data.length > 500 ? pdfResp.data : null) ||
+          (typeof pdfResp === 'string' && pdfResp.length > 500 ? pdfResp : null);
+        if (pdfBase64) {
+          pdfBuffer = Buffer.from(pdfBase64, 'base64');
+        } else {
+          const rBol = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao, 'GET', null, token);
+          const link = rBol?.data?.linkVisualizacaoBoleto || rBol?.data?.link || rBol?.linkVisualizacaoBoleto || '';
+          if (!link) { semLink++; continue; }
+          pdfBuffer = await new Promise((resolve, reject) => {
+            const u = new URL(link);
+            const opts = { hostname: u.hostname, port: 443, path: u.pathname + u.search, method: 'GET', headers: { Accept: 'application/pdf' }, timeout: 20000 };
+            if (INTER_CERT && INTER_KEY && u.hostname.includes('inter')) {
+              opts.agent = new (require('https').Agent)({
+                cert: INTER_CERT.includes('-----') ? INTER_CERT : Buffer.from(INTER_CERT, 'base64').toString(),
+                key:  INTER_KEY.includes('-----')  ? INTER_KEY  : Buffer.from(INTER_KEY,  'base64').toString(),
+                rejectUnauthorized: false
+              });
+            }
+            const chunks = [];
+            require('https').get(opts, res => { res.on('data', c => chunks.push(c)); res.on('end', () => resolve(Buffer.concat(chunks))); })
+              .on('error', reject).on('timeout', () => reject(new Error('timeout')));
+          });
+        }
+        if (!pdfBuffer || pdfBuffer.length < 500) { semLink++; continue; } // resposta vazia/erro disfarçado de PDF
         await sbStorageUpload(b.aluno_id, b.mes, pdfBuffer);
         baixados++;
         await new Promise(r => setTimeout(r, 400)); // não martelar a API do Inter
