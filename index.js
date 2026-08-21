@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.19 - Linha do tempo do aluno (alunoAtivoNaData/alunoAtivoNoMes) portada do site: aluno reativado com data futura não conta mais como ativo nem como inadimplente no mês corrente (caso Almerinda). Afeta contexto da IA, resumo semanal e fechamento mensal.
+// Versão 14.20 - Linha do tempo do aluno (alunoAtivoNaData/alunoAtivoNoMes) alinhada com o site: aluno reativado com data futura não conta como ativo/inadimplente no mês corrente (caso Almerinda), e aluno inativo sem histórico registrado não volta a ser contado como ativo.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.19'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.20'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1031,7 +1031,7 @@ function brl(v) { return 'R$ ' + Math.abs(Number(v)||0).toFixed(2).replace('.', 
 // (ex.: Almerinda, renovada em 21/08 com Data = 05/09) já entrava como ativo e como
 // inadimplente no mês corrente — inclusive no resumo semanal. Se mudar aqui, mudar no
 // site junto: as duas implementações precisam continuar idênticas.
-function alunoAtivoNaData(a, dateStr) {
+function alunoAtivoNaData(a, dateStr, fallbackSemHistorico) {
   const eventos = [];
   if (a.data_matricula) eventos.push({ data: a.data_matricula, ativa: true });
   const hist = typeof a.historico_alteracoes === 'string'
@@ -1043,7 +1043,7 @@ function alunoAtivoNaData(a, dateStr) {
     if (h.tipo === 'renovacao' || h.tipo === 'renovacao_antecipada' || h.tipo === 'reativacao') eventos.push({ data: iso, ativa: true });
     else if (h.tipo === 'inativacao' || h.tipo === 'rescisao') eventos.push({ data: iso, ativa: false });
   });
-  if (!eventos.length) return true; // sem histórico algum: não temos como saber, não bloqueia
+  if (!eventos.length) return fallbackSemHistorico === undefined ? true : fallbackSemHistorico;
   eventos.sort((x, y) => x.data.localeCompare(y.data));
   let estado = null;
   for (let i = 0; i < eventos.length; i++) {
@@ -1053,14 +1053,24 @@ function alunoAtivoNaData(a, dateStr) {
 }
 // Data de referência: hoje no mês corrente, último dia do mês em qualquer outro.
 // Usa o horário de Brasília (servidor roda em UTC, 3h à frente).
+// BUG CORRIGIDO (v14.20, junto com o site v14.14): sem o flag do cadastro, todo aluno
+// inativo sem histórico registrado voltava a contar como ativo (alunoAtivoNaData responde
+// "true" quando não conhece nenhum evento). No mês corrente o cadastro manda; em outros
+// meses vale a linha do tempo, caindo no cadastro quando não há histórico.
 function alunoAtivoNoMes(a, mes) {
-  if (!mes) return a.ativo === 'SIM';
+  const flag = a.ativo === 'SIM';
+  if (!mes) return flag;
   const p = mes.split('-'), ano = parseInt(p[0]), m = parseInt(p[1]);
   const hoje = new Date(Date.now() - 3*60*60*1000);
   const mesCorrente = hoje.getFullYear() + '-' + String(hoje.getMonth()+1).padStart(2,'0');
-  const ref = (mes === mesCorrente) ? hoje : new Date(ano, m, 0);
+  const isoHoje = hoje.getFullYear() + '-' + String(hoje.getMonth()+1).padStart(2,'0') + '-' + String(hoje.getDate()).padStart(2,'0');
+  if (mes === mesCorrente) {
+    if (!flag) return false;
+    return alunoAtivoNaData(a, isoHoje, true);
+  }
+  const ref = new Date(ano, m, 0);
   const refStr = ref.getFullYear() + '-' + String(ref.getMonth()+1).padStart(2,'0') + '-' + String(ref.getDate()).padStart(2,'0');
-  return alunoAtivoNaData(a, refStr);
+  return alunoAtivoNaData(a, refStr, flag);
 }
 // "Ativo de verdade agora": flag do cadastro + linha do tempo.
 function alunoAtivoAgora(a) {
