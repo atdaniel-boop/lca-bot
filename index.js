@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.13 - Revisão geral com bateria de testes: corrigidos os 3 últimos pontos com data em UTC do servidor em vez de BRT (mês atual do processar(), ano do mês-por-nome, e fallback de mês-base da emissão de plano) — entre 21h e meia-noite de Brasília, lançamentos/emissões sem mês explícito podiam cair no mês seguinte. Mesma família do bug da Gildette (v14.3).
+// Versão 14.19 - Linha do tempo do aluno (alunoAtivoNaData/alunoAtivoNoMes) portada do site: aluno reativado com data futura não conta mais como ativo nem como inadimplente no mês corrente (caso Almerinda). Afeta contexto da IA, resumo semanal e fechamento mensal.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.18'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.19'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1025,10 +1025,56 @@ async function saveChanges(ch) {
 // ── Utilitários ─────────────────────────────────────────────────────────────────
 function brl(v) { return 'R$ ' + Math.abs(Number(v)||0).toFixed(2).replace('.', ','); }
 
+// ── Linha do tempo do aluno ────────────────────────────────────────────────────
+// Portado do site (v14.12) para o bot ficar com a MESMA regra. Antes o bot só olhava o
+// flag ativo==='SIM', então um aluno reativado com o plano começando numa data futura
+// (ex.: Almerinda, renovada em 21/08 com Data = 05/09) já entrava como ativo e como
+// inadimplente no mês corrente — inclusive no resumo semanal. Se mudar aqui, mudar no
+// site junto: as duas implementações precisam continuar idênticas.
+function alunoAtivoNaData(a, dateStr) {
+  const eventos = [];
+  if (a.data_matricula) eventos.push({ data: a.data_matricula, ativa: true });
+  const hist = typeof a.historico_alteracoes === 'string'
+    ? (() => { try { return JSON.parse(a.historico_alteracoes || '[]'); } catch(e) { return []; } })()
+    : (a.historico_alteracoes || []);
+  hist.forEach(h => {
+    if (!h || !h.data) return;
+    const iso = h.data.indexOf('/') >= 0 ? h.data.split('/').reverse().join('-') : h.data;
+    if (h.tipo === 'renovacao' || h.tipo === 'renovacao_antecipada' || h.tipo === 'reativacao') eventos.push({ data: iso, ativa: true });
+    else if (h.tipo === 'inativacao' || h.tipo === 'rescisao') eventos.push({ data: iso, ativa: false });
+  });
+  if (!eventos.length) return true; // sem histórico algum: não temos como saber, não bloqueia
+  eventos.sort((x, y) => x.data.localeCompare(y.data));
+  let estado = null;
+  for (let i = 0; i < eventos.length; i++) {
+    if (eventos[i].data <= dateStr) estado = eventos[i].ativa; else break;
+  }
+  return estado === null ? false : estado; // antes do 1º evento conhecido: ainda não existia
+}
+// Data de referência: hoje no mês corrente, último dia do mês em qualquer outro.
+// Usa o horário de Brasília (servidor roda em UTC, 3h à frente).
+function alunoAtivoNoMes(a, mes) {
+  if (!mes) return a.ativo === 'SIM';
+  const p = mes.split('-'), ano = parseInt(p[0]), m = parseInt(p[1]);
+  const hoje = new Date(Date.now() - 3*60*60*1000);
+  const mesCorrente = hoje.getFullYear() + '-' + String(hoje.getMonth()+1).padStart(2,'0');
+  const ref = (mes === mesCorrente) ? hoje : new Date(ano, m, 0);
+  const refStr = ref.getFullYear() + '-' + String(ref.getMonth()+1).padStart(2,'0') + '-' + String(ref.getDate()).padStart(2,'0');
+  return alunoAtivoNaData(a, refStr);
+}
+// "Ativo de verdade agora": flag do cadastro + linha do tempo.
+function alunoAtivoAgora(a) {
+  return a.ativo === 'SIM' && alunoAtivoNoMes(a, mesAtualBR());
+}
+function mesAtualBR() {
+  const h = new Date(Date.now() - 3*60*60*1000);
+  return h.getFullYear() + '-' + String(h.getMonth()+1).padStart(2,'0');
+}
+
 // ── Contexto para a IA ─────────────────────────────────────────────────────────
 function buildContexto(dados, mes) {
-  const ativos = dados.alunos.filter(a => a.ativo === 'SIM');
-  const inativos = dados.alunos.filter(a => a.ativo !== 'SIM');
+  const ativos = dados.alunos.filter(a => a.ativo === 'SIM' && alunoAtivoNoMes(a, mes));
+  const inativos = dados.alunos.filter(a => !(a.ativo === 'SIM' && alunoAtivoNoMes(a, mes)));
 
   // Pagamentos do mês
   const pagMes = dados.alunos.map(a => {
@@ -4529,7 +4575,9 @@ async function rotinaResumoSemanal() {
     const hoje = new Date(Date.now() - 3*60*60*1000);
     const mesAtualStr = hoje.toISOString().slice(0,7);
     const dados = await getDados();
-    const ativos = dados.alunos.filter(a => a.ativo === 'SIM');
+    // Respeita a linha do tempo: quem foi renovado com data futura ainda não conta como
+    // ativo nem como inadimplente neste mês (mesma regra do site).
+    const ativos = dados.alunos.filter(a => a.ativo === 'SIM' && alunoAtivoNoMes(a, mesAtualStr));
 
     // Receita do mês até agora — mesmo cálculo do site/buildContexto:
     // todos os alunos (inclui inativos que pagaram) menos rescisões do mês
@@ -4898,7 +4946,7 @@ async function rotinaFechamentoMensal() {
       const pr = typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});
       if (pags[mesFechadoStr] > 0) { recFechado += pags[mesFechadoStr] - (pr[mesFechadoStr]||0); nPagFechado++; }
       if (pags[mesAnterior2] > 0) recAnt += pags[mesAnterior2] - (pr[mesAnterior2]||0);
-      if (a.ativo === 'SIM' && !(pags[mesFechadoStr] > 0)) inadimplentes.push(a);
+      if (a.ativo === 'SIM' && alunoAtivoNoMes(a, mesFechadoStr) && !(pags[mesFechadoStr] > 0)) inadimplentes.push(a);
     });
 
     // Nome sem ambiguidade: 2 palavras se há outro inadimplente com mesmo primeiro nome
