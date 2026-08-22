@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.21 - Comissão passa a valer pra QUALQUER professora percentual (a Mônica estava fixa no código e a Luiza não entrava no fechamento), inclusive quando ela é a principal da dupla. Duplas genéricas (Kelly + Luiza etc.) alinhadas com o site v14.15.
+// Versão 14.22 - Custo de professoras alinhado com a camada 'Regras do estúdio' do site v14.16: horas lançadas contam para qualquer professora não-proprietária (inclusive percentuais que cobriram aula), evitando divergência entre o fechamento do bot e o do site.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.21'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.22'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1182,18 +1182,21 @@ function buildContexto(dados, mes) {
   });
   const totalMonica = totalPorProf['monica'] || 0;
   const totalPercentuais = Object.values(totalPorProf).reduce((s, x) => s + x, 0);
-  const aulasKelly = dados.aulas.filter(k => k.prof_id === 'kelly' && k.mes === mes);
-  const totalKelly = aulasKelly.reduce((s, k) => s + (k.horas||k.vh||0)*vhKelly, 0);
-  // Professoras por hora que não sejam a Kelly também entram
-  const outrasHora = profs.filter(p => p.tipo === 'hora' && p.id !== 'kelly');
-  let totalOutrasHora = 0;
-  outrasHora.forEach(p => {
-    const vh = p.valor_hora > 0 ? p.valor_hora : 35;
-    totalOutrasHora += dados.aulas.filter(k => k.prof_id === p.id && k.mes === mes)
-                                  .reduce((s, k) => s + (k.horas||0)*vh, 0);
+  // Horas lançadas contam para QUALQUER professora que não seja a proprietária — inclusive
+  // as percentuais, que podem ter coberto uma aula. O site fazia diferente e os dois
+  // fechamentos divergiam. Mesma regra agora (custoProfessoras no site).
+  let totalHoras = 0;
+  profs.filter(p => p.tipo !== 'proprietaria').forEach(p => {
+    const vh = p.valor_hora > 0 ? p.valor_hora : (p.id === 'kelly' ? vhKelly : 35);
+    const h = dados.aulas.filter(k => k.prof_id === p.id && k.mes === mes)
+                         .reduce((s, k) => s + (k.horas||0)*vh, 0);
+    totalHoras += h;
+    totalPorProf[p.id] = (totalPorProf[p.id] || 0) + h;
   });
+  const aulasKelly = dados.aulas.filter(k => k.prof_id === 'kelly' && k.mes === mes);
+  const totalKelly = aulasKelly.reduce((s, k) => s + (k.horas||0)*vhKelly, 0);
   const totalLeda = retLeda;
-  const totalProf = totalLeda + totalPercentuais + totalKelly + totalOutrasHora;
+  const totalProf = totalLeda + totalPercentuais + totalHoras;
   const resultado = receitaMes - totalProf - totalCustos;
 
   // Agenda/faltas
