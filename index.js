@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.20 - Linha do tempo do aluno (alunoAtivoNaData/alunoAtivoNoMes) alinhada com o site: aluno reativado com data futura não conta como ativo/inadimplente no mês corrente (caso Almerinda), e aluno inativo sem histórico registrado não volta a ser contado como ativo.
+// Versão 14.21 - Comissão passa a valer pra QUALQUER professora percentual (a Mônica estava fixa no código e a Luiza não entrava no fechamento), inclusive quando ela é a principal da dupla. Duplas genéricas (Kelly + Luiza etc.) alinhadas com o site v14.15.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.20'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.21'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -967,7 +967,7 @@ async function interSumarioCobrancas(dataInicial, dataFinal) {
 
 async function getDados() {
   const [ra, rc, rk] = await Promise.all([
-    sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo,nfse_ativo,nfse_cpf,nfse_dias,nfse_desc,pref_envio,contato_emerg,grau_emerg,tel_emerg,historico,aulas_monica'),
+    sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_principal,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo,nfse_ativo,nfse_cpf,nfse_dias,nfse_desc,pref_envio,contato_emerg,grau_emerg,tel_emerg,historico,aulas_monica'),
     sbGet('custos', 'select=*&order=id.desc'),
     sbGet('aulas',  'select=*&order=id.desc')
   ]);
@@ -1152,20 +1152,48 @@ function buildContexto(dados, mes) {
   const vhKelly    = profKelly && profKelly.valor_hora > 0 ? profKelly.valor_hora : 35;
   const retLeda    = profLeda && profLeda.retirada > 0 ? profLeda.retirada : 6000;
 
-  let totalMonica = 0;
+  // Comissão de QUALQUER professora percentual (não só a Mônica, que estava fixa no código —
+  // a Luiza não entrava no fechamento). Mesma regra do site (fracaoDaProf): a professora
+  // recebe seu percentual sobre a fração das aulas que são dela, valendo tanto como
+  // principal quanto como secundária da dupla.
+  function fracaoDaProfBot(a, profId) {
+    if (a.professora === profId) return 1;
+    if ((a.professora||'leda') !== 'ambas') return 0;
+    const sec = a.prof_secundaria || 'monica';
+    const pri = a.prof_principal || 'leda';
+    const vezes = parseInt(a.vezes_semana) || 2;
+    if (vezes <= 0) return 0;
+    const aulasSec = Math.min(parseInt(a.aulas_prof) || 1, vezes);
+    if (sec === profId) return aulasSec / vezes;
+    if (pri === profId) return (vezes - aulasSec) / vezes;
+    return 0;
+  }
+  const percentuais = profs.filter(p => p.tipo === 'percentual');
+  const totalPorProf = {};
+  percentuais.forEach(p => { totalPorProf[p.id] = 0; });
   ativos.forEach(a => {
     const pags = typeof a.pagamentos === 'string' ? JSON.parse(a.pagamentos||'{}') : (a.pagamentos||{});
     const v = pags[mes] || 0;
     if (!v) return;
-    if (a.professora === 'monica') totalMonica += v * pctMonica;
-    else if (a.professora === 'ambas' && a.prof_secundaria === 'monica') {
-      totalMonica += v * pctMonica * ((a.aulas_prof||1)/(a.vezes_semana||2));
-    }
+    percentuais.forEach(p => {
+      const frac = fracaoDaProfBot(a, p.id);
+      if (frac > 0) totalPorProf[p.id] += v * ((p.percentual > 0 ? p.percentual : 40)/100) * frac;
+    });
   });
+  const totalMonica = totalPorProf['monica'] || 0;
+  const totalPercentuais = Object.values(totalPorProf).reduce((s, x) => s + x, 0);
   const aulasKelly = dados.aulas.filter(k => k.prof_id === 'kelly' && k.mes === mes);
   const totalKelly = aulasKelly.reduce((s, k) => s + (k.horas||k.vh||0)*vhKelly, 0);
+  // Professoras por hora que não sejam a Kelly também entram
+  const outrasHora = profs.filter(p => p.tipo === 'hora' && p.id !== 'kelly');
+  let totalOutrasHora = 0;
+  outrasHora.forEach(p => {
+    const vh = p.valor_hora > 0 ? p.valor_hora : 35;
+    totalOutrasHora += dados.aulas.filter(k => k.prof_id === p.id && k.mes === mes)
+                                  .reduce((s, k) => s + (k.horas||0)*vh, 0);
+  });
   const totalLeda = retLeda;
-  const totalProf = totalLeda + totalMonica + totalKelly;
+  const totalProf = totalLeda + totalPercentuais + totalKelly + totalOutrasHora;
   const resultado = receitaMes - totalProf - totalCustos;
 
   // Agenda/faltas
@@ -1203,7 +1231,7 @@ function buildContexto(dados, mes) {
       aReceber: aReceberMes, nAReceber: nAReceber,
       receitaEsperada: receitaEsperada,
       resultadoEsperado: receitaEsperada - totalProf - totalCustos,
-      detalheProfessoras: { leda: totalLeda, monica: totalMonica, kelly: totalKelly },
+      detalheProfessoras: Object.assign({ leda: totalLeda, monica: totalMonica, kelly: totalKelly }, totalPorProf),
       paramProf: { retLeda: retLeda, pctMonica: pctMonica, vhKelly: vhKelly } },
     inadimplentes: inadimplentes.map(a => ({ id: a.id, nome: a.nome, plano: a.tipo_plano })),
     custosMes: custosMes.map(c => ({ id: c.id, desc: c.descricao, valor: c.valor })),
@@ -1520,7 +1548,8 @@ function detectarAlunoNoTexto(dados, tL) {
     'Custos lancados: ' + (ctx.custosMes.map(function(c){return c.desc+' '+brl(c.valor);}).join(', ')||'Nenhum') + '\n' +
     'Faltas frequentes: ' + (ctx.faltasFrequentes.join(', ')||'Nenhuma') + '\n' +
     'Professoras este mes: Leda ' + brl(ctx.financeiro.paramProf.retLeda) + ' fixo |\n' +
-    'Monica ' + brl(ctx.financeiro.detalheProfessoras.monica) + ' (' + Math.round(ctx.financeiro.paramProf.pctMonica*100) + '% alunos dela) |\n' +
+    Object.keys(ctx.financeiro.detalheProfessoras).filter(function(k){ return k!=='leda' && k!=='kelly'; })
+      .map(function(k){ return k.charAt(0).toUpperCase()+k.slice(1) + ' ' + brl(ctx.financeiro.detalheProfessoras[k]) + ' (percentual sobre os alunos dela)'; }).join(' | ') + '\n' +
     'Kelly ' + brl(ctx.financeiro.detalheProfessoras.kelly) + ' (' + ctx.aulasKelly.reduce(function(s,k){return s+(k.horas||0);},0) + 'h x ' + brl(ctx.financeiro.paramProf.vhKelly) + ')\n' +
     'Ultimo pagamento por aluno: ' + JSON.stringify(ultimoValor) + '\n\n' +
     'REGRAS DE INTENCAO (siga rigorosamente):\n' +
