@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.22 - Custo de professoras alinhado com a camada 'Regras do estúdio' do site v14.16: horas lançadas contam para qualquer professora não-proprietária (inclusive percentuais que cobriram aula), evitando divergência entre o fechamento do bot e o do site.
+// Versão 14.23 - Revisão geral: datas de negócio passam a usar agoraBRT()/hojeStrBRT()/mesBRT() em vez de toISOString() sobre o relógio UTC do Render. Corrigidos 15 pontos (lançamento de aula/custo, check-in, vencimento de boleto, competência, pró-rata) que entre 21h e meia-noite BRT caíam no dia — ou no mês — seguinte. Mesma família do bug da Gildette.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.22'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.23'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -119,7 +119,7 @@ async function interGetToken(scope) {
 // move o valor de pagamentos[mes] para pagamentos_pendentes[mes]. Usado uma vez para regularizar
 // boletos antigos (pré-bot) que foram importados como pagos. Modo dry-run lista sem alterar.
 async function migrarBoletosFuturosParaPendente(dryRun) {
-  const hoje = new Date(Date.now() - 3*60*60*1000);
+  const hoje = agoraBRT();
   const hojeMes = hoje.toISOString().slice(0,7);
   // A janela dataInicial/dataFinal do Inter filtra por EMISSÃO. Boletos antigos foram
   // emitidos no passado (até ~18 meses atrás) com vencimento futuro. Buscamos em janelas
@@ -293,7 +293,7 @@ function gerarSeuNumero(alunoId, mesYYYYMM) {
 
 async function interSaldo() {
   const token = await interGetToken('extrato.read');
-  const hoje = new Date().toISOString().slice(0,10);
+  const hoje = hojeStrBRT();
   const r = await interReq(
     '/banking/v2/saldo',
     'GET', null, token
@@ -377,7 +377,7 @@ async function interCobrancasRobusto(opts) {
   const mesesFrente = opts.mesesFrente != null ? opts.mesesFrente : 12;
   const passo = opts.passo || 3;
   const timeoutMs = opts.timeoutMs || 25000;
-  const hoje = new Date(Date.now() - 3*60*60*1000);
+  const hoje = agoraBRT();
   const janelas = [];
   for (let m = -mesesAtras; m <= mesesFrente; m += passo) {
     const ini = new Date(hoje.getFullYear(), hoje.getMonth()+m, 1).toISOString().slice(0,10);
@@ -940,7 +940,7 @@ async function interSumarioCobrancas(dataInicial, dataFinal) {
     const token = await interGetToken('boleto-cobranca.read');
     // Endpoint filtra por data de vencimento — precisa cobrir passado (recebidos/atrasados)
     // E futuro (a receber). Default: 12 meses atrás até 12 meses à frente.
-    const hoje = new Date();
+    const hoje = agoraBRT(); // BRT, não UTC do servidor
     let ini = dataInicial || new Date(hoje.getFullYear(), hoje.getMonth()-12, hoje.getDate()).toISOString().slice(0,10);
     let fim = dataFinal || new Date(hoje.getFullYear(), hoje.getMonth()+12, hoje.getDate()).toISOString().slice(0,10);
     let r = await interReq('/cobranca/v3/cobrancas/sumario?dataInicial=' + ini + '&dataFinal=' + fim, 'GET', null, token);
@@ -1025,6 +1025,16 @@ async function saveChanges(ch) {
 // ── Utilitários ─────────────────────────────────────────────────────────────────
 function brl(v) { return 'R$ ' + Math.abs(Number(v)||0).toFixed(2).replace('.', ','); }
 
+// ── Datas: sempre no horário de Brasília, nunca em UTC ─────────────────────────
+// O Render roda em UTC. Como o Brasil é UTC-3, das 21h à meia-noite BRT o servidor já
+// está no dia seguinte — e no último dia do mês, no mês seguinte. Foi o bug da Gildette:
+// "Kelly deu 4 aulas" às 21h de 31/08 era lançado em setembro. Corrigido em 3 pontos na
+// v14.19; a revisão da v14.23 achou outros 10. Regra: nada de new Date().toISOString()
+// para data ou mês de negócio — use estas funções.
+function agoraBRT() { return new Date(Date.now() - 3*60*60*1000); }
+function hojeStrBRT() { return agoraBRT().toISOString().slice(0,10); }
+function mesBRT()     { return agoraBRT().toISOString().slice(0,7);  }
+
 // ── Linha do tempo do aluno ────────────────────────────────────────────────────
 // Portado do site (v14.12) para o bot ficar com a MESMA regra. Antes o bot só olhava o
 // flag ativo==='SIM', então um aluno reativado com o plano começando numa data futura
@@ -1061,7 +1071,7 @@ function alunoAtivoNoMes(a, mes) {
   const flag = a.ativo === 'SIM';
   if (!mes) return flag;
   const p = mes.split('-'), ano = parseInt(p[0]), m = parseInt(p[1]);
-  const hoje = new Date(Date.now() - 3*60*60*1000);
+  const hoje = agoraBRT();
   const mesCorrente = hoje.getFullYear() + '-' + String(hoje.getMonth()+1).padStart(2,'0');
   const isoHoje = hoje.getFullYear() + '-' + String(hoje.getMonth()+1).padStart(2,'0') + '-' + String(hoje.getDate()).padStart(2,'0');
   if (mes === mesCorrente) {
@@ -1076,10 +1086,7 @@ function alunoAtivoNoMes(a, mes) {
 function alunoAtivoAgora(a) {
   return a.ativo === 'SIM' && alunoAtivoNoMes(a, mesAtualBR());
 }
-function mesAtualBR() {
-  const h = new Date(Date.now() - 3*60*60*1000);
-  return h.getFullYear() + '-' + String(h.getMonth()+1).padStart(2,'0');
-}
+function mesAtualBR() { return mesBRT(); } // alias histórico
 
 // ── Contexto para a IA ─────────────────────────────────────────────────────────
 function buildContexto(dados, mes) {
@@ -1583,7 +1590,7 @@ function detectarAlunoNoTexto(dados, tL) {
     '    "professora": string ou null,\n' +
     '    "horas": numero ou null,\n' +
     '    "meses_utilizados": numero ou null,\n' +
-    '    "data": "YYYY-MM-DD" ou null (hoje ' + new Date().toISOString().slice(0,10) + '),\n' +
+    '    "data": "YYYY-MM-DD" ou null (hoje ' + hojeStrBRT() + '),\n' +
     '    "vencimento": "YYYY-MM-DD" ou null — data de vencimento de um boleto avulso/excepcional, se o usuario mencionar explicitamente (ex: "vencimento 2/10/2026" ou "vence dia 10/10"). Converta SEMPRE para o formato YYYY-MM-DD, independente de como o usuario escreveu (DD/MM/YYYY, DD/MM, etc). Se o usuario nao mencionar vencimento, retorne null,\n' +
     '    "hora": "HH:MM" ou null,\n' +
     '    "status_checkin": presente ou falta ou repos ou null,\n' +
@@ -1600,8 +1607,8 @@ function detectarAlunoNoTexto(dados, tL) {
 // ── Extração de parâmetros ──────────────────────────────────────────────────────
 async function extrairParams(intencao, texto, dados) {
   const nomes = dados.alunos.map(function(a){ return a.id + '|' + a.nome; }).join('\n');
-  const mesAtual = new Date().toISOString().slice(0,7);
-  const hojeStr = new Date().toISOString().slice(0,10);
+  const mesAtual = mesBRT();
+  const hojeStr = hojeStrBRT();
   const prompt =
     'Extraia os parâmetros da ação "' + intencao + '" da mensagem abaixo.\n\n' +
     'ALUNOS (id|nome):\n' + nomes + '\n\n' +
@@ -1628,7 +1635,7 @@ async function extrairParams(intencao, texto, dados) {
 
 // ── Executar ação ───────────────────────────────────────────────────────────────
 async function executar(intencao, p, dados, chatId) {
-  const mes = p?.mes || new Date().toISOString().slice(0,7);
+  const mes = p?.mes || mesBRT();
 
   if (intencao === 'sincronizar_boletos') {
     await tgSend(chatId, '🔄 Sincronizando boletos do Inter com a tabela local — pode levar ~1 min...');
@@ -1668,7 +1675,7 @@ async function executar(intencao, p, dados, chatId) {
     if (!p?.horas) return '❌ Informe o número de horas.';
     const profId = (p.professora||'').toLowerCase().includes('kelly') ? 'kelly' :
                    (p.professora||'').toLowerCase().includes('monica') ? 'monica' : 'kelly';
-    const data = p.data || new Date().toISOString().slice(0,10);
+    const data = p.data || hojeStrBRT();
     // Valor/hora real da professora (tabela professoras), com fallback 35
     const profObj = (dados.professoras||[]).find(x => x.id === profId);
     const vhReal = profObj && profObj.valor_hora > 0 ? profObj.valor_hora : 35;
@@ -1779,7 +1786,7 @@ async function executar(intencao, p, dados, chatId) {
       ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
       : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
     const status  = p?.status_checkin || 'presente';
-    const dataCi  = p?.data || new Date().toISOString().slice(0,10);
+    const dataCi  = p?.data || hojeStrBRT();
     const DIAS_PT = ['Dom','Seg','Ter','Qua','Qui','Sex','Sab'];
     const dow = new Date(dataCi+'T12:00:00').getDay();
     const diaKey = DIAS_PT[dow];
@@ -1828,7 +1835,7 @@ async function executar(intencao, p, dados, chatId) {
     if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
       ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
       : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
-    const dataCi = p?.data || new Date().toISOString().slice(0,10);
+    const dataCi = p?.data || hojeStrBRT();
     const ch = (dados.changes?.checkins) || {};
     let removidos = 0;
     Object.keys(ch).forEach(ck => {
@@ -1851,7 +1858,7 @@ async function executar(intencao, p, dados, chatId) {
       await tgSend(chatId, '⏳ Buscando boletos no Banco Inter (últimos 2 anos)...\n(pode demorar 2-3 minutos)');
       const token = await interGetToken('boleto-cobranca.read');
       // Buscar todas as cobranças pagas no Inter diretamente (independente da tabela boletos)
-      const hoje = new Date();
+      const hoje = agoraBRT(); // BRT, não UTC do servidor
       const dataFim = hoje.toISOString().slice(0,10);
       const dataIni = new Date(hoje.getFullYear()-2, hoje.getMonth(), hoje.getDate()).toISOString().slice(0,10);
       const params = new URLSearchParams({ dataInicial: dataIni, dataFinal: dataFim, itensPorPagina: 1000, paginaAtual: 0 });
@@ -1933,7 +1940,7 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'inter_extrato_debug') {
     try {
-      const hoje = new Date(Date.now() - 3*60*60*1000);
+      const hoje = agoraBRT();
       const dataFim = hoje.toISOString().slice(0,10);
       const dataInicio = new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
       const ext = await Promise.race([
@@ -1953,7 +1960,7 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'inter_extrato') {
     try {
-      const hoje = new Date(Date.now() - 3*60*60*1000); // BRT
+      const hoje = agoraBRT(); // BRT
       const dataFim = hoje.toISOString().slice(0,10);
       const dataInicio = p?.data_inicio || new Date(hoje.getTime() - 30*24*60*60*1000).toISOString().slice(0,10);
       console.log('[inter_extrato] buscando', dataInicio, 'a', dataFim);
@@ -2180,7 +2187,7 @@ async function executar(intencao, p, dados, chatId) {
 
   if (intencao === 'inter_boletos_vencidos') {
     try {
-      const hoje = new Date(Date.now() - 3*60*60*1000); // BRT
+      const hoje = agoraBRT(); // BRT
       const dataFim = hoje.toISOString().slice(0,10);
 
       console.log('[inter_boletos_vencidos] buscando...');
@@ -2396,7 +2403,9 @@ async function executar(intencao, p, dados, chatId) {
     if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
       ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
       : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
-    const hoje = new Date(); hoje.setHours(0,0,0,0);
+    // Data-base do vencimento tem que ser o dia em Brasília: em UTC, das 21h à meia-noite
+    // o boleto sairia com vencimento do mês seguinte.
+    const hoje = agoraBRT(); hoje.setHours(0,0,0,0);
     let vencDate = new Date(hoje.getFullYear(), hoje.getMonth(), aluno.dia_vencimento||10);
     if (vencDate < hoje) vencDate = new Date(hoje.getFullYear(), hoje.getMonth()+1, aluno.dia_vencimento||10);
     // Normalizar vencimento: aceitar tanto YYYY-MM-DD quanto DD/MM/YYYY (o Gemini pode
@@ -2676,7 +2685,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       const pm = aluno.data_matricula.split('-');
       anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
     } else {
-      const hoje = new Date(Date.now() - 3*60*60*1000); // BRT — virada 21h-00h no fim do mês emitia pro mês seguinte
+      const hoje = agoraBRT(); // BRT — virada 21h-00h no fim do mês emitia pro mês seguinte
       anoBase = hoje.getUTCFullYear(); mesBase = hoje.getUTCMonth();
     }
 
@@ -2911,7 +2920,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   if (intencao === 'confirmar_cheque') {
     const aluno = encontrarAluno(dados, p);
     if (!aluno) return '❌ Informe o nome do aluno.\nEx: _"cheque compensou Ana"_';
-    const mes = p?.mes || new Date().toISOString().slice(0,7);
+    const mes = p?.mes || mesBRT();
     const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
     // Verificar se há cheque pendente
     const hist = aluno.historico_alteracoes || [];
@@ -3188,7 +3197,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
 
     // 2. Emitir pró-rata se houver
     if (proRata > 0) {
-      const mesProRata = mesesCancelar[0] || new Date().toISOString().slice(0,7);
+      const mesProRata = mesesCancelar[0] || mesBRT();
       try {
         const diaVenc = aluno.dia_vencimento || 10;
         const [ano, mes2] = mesProRata.split('-').map(Number);
@@ -3260,7 +3269,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     }
 
     // 5. Log
-    await logOp('alterar_plano', aluno.nome + ' — ' + aluno.tipo_plano + '→' + novoPlano + ' R$' + novoValor + '/mês', aluno.id, novoValor, new Date().toISOString().slice(0,7), { cancelados: mesesCancelar, emitidos: mesesEmitir, proRata });
+    await logOp('alterar_plano', aluno.nome + ' — ' + aluno.tipo_plano + '→' + novoPlano + ' R$' + novoValor + '/mês', aluno.id, novoValor, mesBRT(), { cancelados: mesesCancelar, emitidos: mesesEmitir, proRata });
 
     msgBot += '\n✅ Alteração concluída!';
     return msgBot;
@@ -3271,7 +3280,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
       ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
       : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
-    const mes = p?.mes || new Date().toISOString().slice(0,7);
+    const mes = p?.mes || mesBRT();
     const filtroValor = p?.valor ? parseFloat(p.valor) : null;
     try {
       // Buscar boletos no Supabase E no Inter (para cobrir casos onde Supabase está desatualizado)
@@ -3496,7 +3505,7 @@ async function processar(msg) {
         const aluno = Array.isArray(ra) && ra[0];
         if (!aluno) return tgSend(chatId, '❌ Aluno não encontrado no banco.');
 
-        const hoje = new Date(Date.now() - 3*60*60*1000); // horário de Brasília, não UTC do servidor
+        const hoje = agoraBRT(); // horário de Brasília, não UTC do servidor
         const hojeStr = hoje.toISOString().slice(0,10);
         const dataFmt = hojeStr.split('-').reverse().join('/');
         const rescMes = hojeStr.slice(0,7);
@@ -3870,7 +3879,7 @@ async function processar(msg) {
 async function enviarAniversariantesHoje() {
   try {
     const dados = await getDados();
-    const hoje = new Date(Date.now() - 3*60*60*1000);
+    const hoje = agoraBRT();
     const dh = String(hoje.getDate()).padStart(2,'0');
     const mh = String(hoje.getMonth()+1).padStart(2,'0');
 
@@ -4117,7 +4126,7 @@ async function processarFilaBoletos() {
             { aluno_id: aluno.id, aluno_nome: aluno.nome },
             dados,
             TELEGRAM_CHAT_ID,
-            new Date().toISOString().slice(0,7)
+            mesBRT()
           );
           if (resultado) await tgSend(TELEGRAM_CHAT_ID, resultado);
         } else {
@@ -4491,7 +4500,7 @@ function _jaExecutouHoje(nome) {
 // ── 2. Alerta diário de inadimplência (09:00 BRT) ──────────────────────────
 async function rotinaAlertaInadimplencia() {
   try {
-    const hoje = new Date(Date.now() - 3*60*60*1000);
+    const hoje = agoraBRT();
     const ontem = new Date(hoje.getTime() - 86400000);
     const diaOntem = ontem.getDate();
     const mesAtualStr = hoje.toISOString().slice(0,7);
@@ -4584,7 +4593,7 @@ async function rotinaPlanosVencendo() {
 // ── 6. Detecção de abandono silencioso (segundas 09:00 BRT) ────────────────
 async function rotinaAbandonoSilencioso() {
   try {
-    const hoje = new Date(Date.now() - 3*60*60*1000);
+    const hoje = agoraBRT();
     const mesAtualStr = hoje.toISOString().slice(0,7);
     const mesAnterior = new Date(hoje.getFullYear(), hoje.getMonth()-1, 1).toISOString().slice(0,7);
     const dados = await getDados();
@@ -4614,7 +4623,7 @@ async function rotinaAbandonoSilencioso() {
 // ── 3. Resumo semanal (sextas 20:00 BRT) com saldo ──────────────────────────
 async function rotinaResumoSemanal() {
   try {
-    const hoje = new Date(Date.now() - 3*60*60*1000);
+    const hoje = agoraBRT();
     const mesAtualStr = hoje.toISOString().slice(0,7);
     const dados = await getDados();
     // Respeita a linha do tempo: quem foi renovado com data futura ainda não conta como
@@ -4974,7 +4983,7 @@ async function rotinaLimpezaBoletosAntigos() {
 
 async function rotinaFechamentoMensal() {
   try {
-    const hoje = new Date(Date.now() - 3*60*60*1000);
+    const hoje = agoraBRT();
     const mesFechado = new Date(hoje.getFullYear(), hoje.getMonth()-1, 1);
     const mesFechadoStr = mesFechado.toISOString().slice(0,7);
     const mesAnterior2 = new Date(hoje.getFullYear(), hoje.getMonth()-2, 1).toISOString().slice(0,7);
@@ -5276,7 +5285,7 @@ async function main() {
             payload?.cobranca?.valorNominal || payload?.pagamento?.valorPago || 0
           );
           const dataPag = payload?.dataLiquidacao || payload?.dataPagamento ||
-            (payload?.dataHoraSituacao || '').slice(0,10) || new Date().toISOString().slice(0,10);
+            (payload?.dataHoraSituacao || '').slice(0,10) || hojeStrBRT();
 
           // seuNumero: LCA-{id}-{mes} (bot) ou número puro = id (boletos antigos)
           const psn = parseSeuNumero(seuNum);
