@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.23 - Revisão geral: datas de negócio passam a usar agoraBRT()/hojeStrBRT()/mesBRT() em vez de toISOString() sobre o relógio UTC do Render. Corrigidos 15 pontos (lançamento de aula/custo, check-in, vencimento de boleto, competência, pró-rata) que entre 21h e meia-noite BRT caíam no dia — ou no mês — seguinte. Mesma família do bug da Gildette.
+// Versão 14.24 - Agendador com recuperação de atraso: rotina que perdeu o horário porque o bot estava fora do ar roda assim que ele sobe (mesmo dia), avisando no Telegram. Marca de execução migrada para o Supabase (tabela rotinas_executadas) — antes ficava em memória e sumia a cada reinício, apesar do comentário dizer o contrário.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.23'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.24'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4481,20 +4481,48 @@ async function verificarBoletosPagosInter() {
 // ── Rotinas automáticas agendadas ───────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Controle de execução única por dia (evita duplicar se bot reiniciar)
+// Controle de execução única por dia.
+//
+// BUG CORRIGIDO (v14.24): isto era só um objeto em memória, e o comentário antigo afirmava
+// que evitava duplicação após reinício do Render — não evitava. Memória morre com o
+// processo. No plano free o serviço dorme e reinicia várias vezes ao dia, então a marca
+// se perdia e a rotina podia repetir. Agora o registro fica no Supabase
+// (tabela rotinas_executadas) e sobrevive a reinício, deploy e hibernação.
+//
+// O cache em memória é carregado uma vez na subida e serve para não bater no banco a cada
+// verificação; a gravação é que vai para o Supabase.
 const _rotinasExecutadas = {}; // chave: 'nomeRotina-YYYY-MM-DD'
-// Helper de controle das rotinas: retorna true se a rotina nomeada já rodou hoje (evita duplicação após reinício do Render).
+
+// Lê do Supabase o que já rodou hoje. Chamado uma vez, antes de ligar o agendador.
+async function carregarRotinasExecutadas() {
+  const hojeBR = hojeStrBRT();
+  try {
+    const r = await sbGet('rotinas_executadas', 'select=nome,dia&dia=eq.' + hojeBR);
+    if (Array.isArray(r)) r.forEach(x => { _rotinasExecutadas[x.nome + '-' + x.dia] = true; });
+    console.log('[rotinas] já executadas hoje:', Object.keys(_rotinasExecutadas).length);
+  } catch (e) {
+    // Se o Supabase estiver fora, seguimos com o cache vazio: uma rotina repetida é bem
+    // menos grave que uma rotina que nunca roda.
+    console.warn('[rotinas] não consegui ler o histórico, seguindo com cache vazio:', e.message);
+  }
+}
+
+// true se a rotina já rodou hoje. Só consulta o cache — nunca bloqueia o agendador.
 function _jaExecutouHoje(nome) {
-  const hojeBR = new Date(Date.now() - 3*60*60*1000).toISOString().slice(0,10);
-  const chave = nome + '-' + hojeBR;
-  if (_rotinasExecutadas[chave]) return true;
-  _rotinasExecutadas[chave] = true;
-  // Limpar chaves antigas (manter só 7 dias)
+  return !!_rotinasExecutadas[nome + '-' + hojeStrBRT()];
+}
+
+// Marca ANTES de executar, para que duas verificações sobrepostas não disparem a mesma
+// rotina duas vezes. A gravação no banco é assíncrona e não segura a execução.
+function _marcarExecutada(nome) {
+  const hojeBR = hojeStrBRT();
+  _rotinasExecutadas[nome + '-' + hojeBR] = true;
+  sbPost('rotinas_executadas', { nome: nome, dia: hojeBR, executado_em: new Date().toISOString() })
+    .catch(e => console.warn('[rotinas] falha ao gravar marca de ' + nome + ':', e.message));
   Object.keys(_rotinasExecutadas).forEach(k => {
     const dt = k.slice(-10);
     if ((Date.now() - new Date(dt).getTime()) > 7*86400000) delete _rotinasExecutadas[k];
   });
-  return false;
 }
 
 // ── 2. Alerta diário de inadimplência (09:00 BRT) ──────────────────────────
@@ -5185,66 +5213,67 @@ async function rotinaBackupSemanal() {
 }
 
 // ── Agendador central das rotinas ────────────────────────────────────────────
-function agendarRotinasAutomaticas() {
-  async function checarRotinas() {
-    const brNow = new Date(Date.now() - 3*60*60*1000);
-    const hora = brNow.getHours();
-    const min = brNow.getMinutes();
-    const diaSemana = brNow.getDay(); // 0=dom, 5=sexta, 1=segunda
-    const diaMes = brNow.getDate();
+//
+// BUG CORRIGIDO (v14.24): o agendador só disparava se a hora fosse EXATAMENTE a marcada
+// (hora === 9 && min < 5). Se o bot estivesse dormindo, reiniciando ou em deploy naquele
+// minuto, a rotina era pulada em silêncio e ninguém ficava sabendo. Aconteceu em 27/08:
+// o serviço ficou fora das 17h22 do dia 26 até as 11h21 do dia 27 e perdeu aniversariantes,
+// inadimplência, conciliação e planos vencendo — o dia inteiro, sem aviso.
+//
+// Agora vale a regra "se já passou da hora e não rodou hoje, roda agora". A rotina executa
+// no horário quando o bot está de pé, e assim que ele sobe quando não estava. A recuperação
+// é sempre do MESMO DIA: um resumo de sexta não é enviado no sábado.
+const ROTINAS = [
+  { nome: 'aniversarios',     hora: 8,  min: 0, fn: () => enviarAniversariantesHoje(),  quando: () => true },
+  { nome: 'inadimplencia',    hora: 9,  min: 0, fn: () => rotinaAlertaInadimplencia(),  quando: () => true },
+  { nome: 'planosVencendo',   hora: 9,  min: 0, fn: () => rotinaPlanosVencendo(),       quando: () => true },
+  { nome: 'conciliacao',      hora: 9,  min: 5, fn: () => rotinaConciliacaoDiaria(),    quando: () => true },
+  { nome: 'abandono',         hora: 9,  min: 0, fn: () => rotinaAbandonoSilencioso(),   quando: d => d.getDay() === 1 },
+  { nome: 'fechamentoMensal', hora: 9,  min: 0, fn: () => rotinaFechamentoMensal(),     quando: d => d.getDate() === 1 },
+  { nome: 'resumoSemanal',    hora: 20, min: 0, fn: () => rotinaResumoSemanal(),        quando: d => d.getDay() === 5 },
+  { nome: 'backupSemanal',    hora: 20, min: 0, fn: () => rotinaBackupSemanal(),        quando: d => d.getDay() === 0 }
+];
 
-    // 09:00 — alerta de inadimplência (diário)
-    if (hora === 9 && min < 5 && !_jaExecutouHoje('inadimplencia')) {
-      await rotinaAlertaInadimplencia();
-    }
-    // 09:05 — conciliação Inter × sistema (diário, report-only)
-    if (hora === 9 && min >= 5 && min < 10 && !_jaExecutouHoje('conciliacao')) {
-      await rotinaConciliacaoDiaria();
-    }
-    // 09:00 — planos vencendo (diário, alerta em 7/3/0 dias)
-    if (hora === 9 && min < 5 && !_jaExecutouHoje('planosVencendo')) {
-      await rotinaPlanosVencendo();
-    }
-    // 09:00 segundas — abandono silencioso (semanal)
-    if (hora === 9 && min < 5 && diaSemana === 1 && !_jaExecutouHoje('abandono')) {
-      await rotinaAbandonoSilencioso();
-    }
-    // 20:00 sextas — resumo semanal com saldo
-    if (hora === 20 && min < 5 && diaSemana === 5 && !_jaExecutouHoje('resumoSemanal')) {
-      await rotinaResumoSemanal();
-    }
-    // 09:00 dia 1º — fechamento mensal
-    if (hora === 9 && min < 5 && diaMes === 1 && !_jaExecutouHoje('fechamentoMensal')) {
-      await rotinaFechamentoMensal();
-    }
-    // 20:00 domingos — backup semanal via Telegram
-    if (hora === 20 && min < 5 && diaSemana === 0 && !_jaExecutouHoje('backupSemanal')) {
-      await rotinaBackupSemanal();
+async function checarRotinas(motivo) {
+  const brNow = agoraBRT();
+  const agoraMin = brNow.getHours() * 60 + brNow.getMinutes();
+  for (const r of ROTINAS) {
+    if (!r.quando(brNow)) continue;                    // não é o dia dela
+    if (agoraMin < r.hora * 60 + r.min) continue;      // ainda não deu a hora
+    if (_jaExecutouHoje(r.nome)) continue;             // já rodou hoje
+    const atrasada = agoraMin > r.hora * 60 + r.min + 15;
+    _marcarExecutada(r.nome);                          // marca ANTES, para não duplicar
+    try {
+      console.log('[rotinas] executando ' + r.nome + (atrasada ? ' (recuperando atraso)' : '') + ' — ' + motivo);
+      await r.fn();
+      if (atrasada) {
+        const hhmm = String(r.hora).padStart(2,'0') + ':' + String(r.min).padStart(2,'0');
+        await tgSend(TELEGRAM_CHAT_ID,
+          '⏰ A rotina *' + r.nome + '* estava marcada para as ' + hhmm +
+          ' e rodou agora, com atraso — o bot não estava no ar no horário.');
+      }
+    } catch (e) {
+      console.error('[rotinas] falha em ' + r.nome + ':', e.message);
+      try { await tgSend(TELEGRAM_CHAT_ID, '⚠️ A rotina *' + r.nome + '* falhou: ' + e.message.slice(0,120)); } catch {}
     }
   }
-  setInterval(checarRotinas, 4 * 60 * 1000); // a cada 4 min
-  console.log('Rotinas automáticas agendadas: inadimplência (9h), conciliação Inter (9h05), planos vencendo (9h), abandono (seg 9h), resumo semanal (sex 20h), fechamento+PDF (dia 1º 9h), backup+templates+limpeza boletos 3m (dom 20h)');
 }
 
+async function agendarRotinasAutomaticas() {
+  // Carrega do banco o que já rodou hoje ANTES de verificar qualquer coisa: sem isso, uma
+  // subida às 11h reexecutaria tudo que já tinha rodado às 9h.
+  await carregarRotinasExecutadas();
+  await checarRotinas('subida do bot');   // recupera o que ficou para trás
+  setInterval(() => checarRotinas('verificação periódica'), 4 * 60 * 1000);
+  console.log('Rotinas automáticas agendadas (com recuperação de atraso no mesmo dia): ' +
+    ROTINAS.map(r => r.nome + ' ' + String(r.hora).padStart(2,'0') + 'h' + String(r.min).padStart(2,'0')).join(', '));
+}
 
 // Agenda o envio diário (8h BRT) das mensagens de aniversariantes do dia.
-function agendarRotinaAniversarios() {
-  // Verificar a cada hora se chegou às 8h (horário de Brasília = UTC-3)
-  async function checar() {
-    const agora = new Date();
-    const brNow = new Date(agora.getTime() - 3*60*60*1000);
-    const horaBrasilia = brNow.getHours();
-    const min = brNow.getMinutes();
-    if (horaBrasilia === 8 && min < 5) {
-      await enviarAniversariantesHoje();
-    }
-  }
-  // Verificar a cada 5 minutos
-  setInterval(checar, 5 * 60 * 1000);
-  // Verificar também na inicialização (para não perder se o bot reiniciar às 8h)
-  checar();
-  console.log('Rotina de aniversários agendada (08:00 BRT diariamente)');
-}
+// Os aniversários passaram a fazer parte da tabela ROTINAS acima (v14.24). O agendador
+// separado que existia aqui não tinha controle de execução única: a cada reinício entre
+// 8h00 e 8h04 as mensagens eram reenviadas — e no plano free o serviço reinicia sozinho.
+function agendarRotinaAniversarios() { /* mantido só para não quebrar chamadas antigas */ }
 
 const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguardando }
 
@@ -5449,7 +5478,7 @@ async function main() {
   setInterval(rotinaDetectarPixAlunos, 30 * 60 * 1000);
   setTimeout(rotinaDetectarPixAlunos, 60000); // primeira verificação 60s após iniciar
   // Rotinas automáticas: inadimplência, planos vencendo, abandono, resumo semanal, fechamento mensal
-  agendarRotinasAutomaticas();
+  await agendarRotinasAutomaticas(); // aguarda carregar o histórico do dia antes de disparar
 
   while (true) {
     try {
