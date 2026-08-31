@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.24 - Agendador com recuperação de atraso: rotina que perdeu o horário porque o bot estava fora do ar roda assim que ele sobe (mesmo dia), avisando no Telegram. Marca de execução migrada para o Supabase (tabela rotinas_executadas) — antes ficava em memória e sumia a cada reinício, apesar do comentário dizer o contrário.
+// Versão 14.25 - Alerta de nota fiscal pendente: quem pagou o mês, está marcado para emitir NF e ainda não tem nota emitida agora aparece em Alertas no site, e recebe aviso pelo Telegram na manhã do último dia do mês (calendário correto, incluindo ano bissexto).
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.24'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.25'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -967,7 +967,7 @@ async function interSumarioCobrancas(dataInicial, dataFinal) {
 
 async function getDados() {
   const [ra, rc, rk] = await Promise.all([
-    sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_principal,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo,nfse_ativo,nfse_cpf,nfse_dias,nfse_desc,pref_envio,contato_emerg,grau_emerg,tel_emerg,historico,aulas_monica'),
+    sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_principal,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo,nfse_ativo,nfse_cpf,nfse_dias,nfse_desc,pref_envio,contato_emerg,grau_emerg,tel_emerg,historico,aulas_monica,notas_fiscais_emitidas'),
     sbGet('custos', 'select=*&order=id.desc'),
     sbGet('aulas',  'select=*&order=id.desc')
   ]);
@@ -4618,6 +4618,35 @@ async function rotinaPlanosVencendo() {
   } catch(e) { console.error('[rotina-planos-vencendo] erro:', e.message); }
 }
 
+// ── Nota fiscal pendente no último dia do mês ───────────────────────────────
+// Mesma regra do card "🧾 Nota fiscal pendente" do site: aluno marcado para emitir NF
+// (nfse_ativo === 'SIM'), pagou este mês, e a competência não tem nota emitida ainda
+// (notas_fiscais_emitidas[mesAtual] ausente). Roda só no último dia do mês — é o último
+// momento pra emitir sem atrasar a competência.
+async function rotinaNotaFiscalPendente() {
+  try {
+    const dados = await getDados();
+    const mesAtual = new Date(Date.now() - 3*60*60*1000).toISOString().slice(0,7);
+
+    const pendentes = dados.alunos.filter(a => {
+      if (a.nfse_ativo !== 'SIM') return false;
+      const pags = typeof a.pagamentos === 'string' ? JSON.parse(a.pagamentos||'{}') : (a.pagamentos||{});
+      if (!(pags[mesAtual] > 0)) return false;
+      let n = a.notas_fiscais_emitidas;
+      if (n) { try { if (typeof n === 'string') n = JSON.parse(n||'{}'); } catch(e) { n = {}; } }
+      return !(n && n[mesAtual]);
+    });
+    if (!pendentes.length) return;
+
+    const linhas = pendentes.map(a => '🧾 *' + a.nome.split(' ').slice(0,2).join(' ') + '*').join('\n');
+    await tgSend(TELEGRAM_CHAT_ID,
+      '📆 *Último dia do mês — nota fiscal pendente*\n\n' +
+      pendentes.length + ' aluno(s) pagaram e ainda não têm NF emitida em ' + mesAtual + ':\n\n' + linhas +
+      '\n\n_Emita pelo site ou mande "emitir nf <nome> ' + mesAtual.split('-').reverse().join('/') + '"._');
+    console.log('[rotina-nf-pendente] alertados:', pendentes.length);
+  } catch(e) { console.error('[rotina-nf-pendente] erro:', e.message); }
+}
+
 // ── 6. Detecção de abandono silencioso (segundas 09:00 BRT) ────────────────
 async function rotinaAbandonoSilencioso() {
   try {
@@ -5223,6 +5252,10 @@ async function rotinaBackupSemanal() {
 // Agora vale a regra "se já passou da hora e não rodou hoje, roda agora". A rotina executa
 // no horário quando o bot está de pé, e assim que ele sobe quando não estava. A recuperação
 // é sempre do MESMO DIA: um resumo de sexta não é enviado no sábado.
+// Último dia do mês de uma data — new Date(ano, mes+1, 0) devolve o dia 0 do mês
+// seguinte, que é o último dia do mês atual.
+function ultimoDiaDoMes(d) { return new Date(d.getFullYear(), d.getMonth()+1, 0).getDate(); }
+
 const ROTINAS = [
   { nome: 'aniversarios',     hora: 8,  min: 0, fn: () => enviarAniversariantesHoje(),  quando: () => true },
   { nome: 'inadimplencia',    hora: 9,  min: 0, fn: () => rotinaAlertaInadimplencia(),  quando: () => true },
@@ -5230,6 +5263,7 @@ const ROTINAS = [
   { nome: 'conciliacao',      hora: 9,  min: 5, fn: () => rotinaConciliacaoDiaria(),    quando: () => true },
   { nome: 'abandono',         hora: 9,  min: 0, fn: () => rotinaAbandonoSilencioso(),   quando: d => d.getDay() === 1 },
   { nome: 'fechamentoMensal', hora: 9,  min: 0, fn: () => rotinaFechamentoMensal(),     quando: d => d.getDate() === 1 },
+  { nome: 'nfPendente',       hora: 9,  min: 0, fn: () => rotinaNotaFiscalPendente(),   quando: d => d.getDate() === ultimoDiaDoMes(d) },
   { nome: 'resumoSemanal',    hora: 20, min: 0, fn: () => rotinaResumoSemanal(),        quando: d => d.getDay() === 5 },
   { nome: 'backupSemanal',    hora: 20, min: 0, fn: () => rotinaBackupSemanal(),        quando: d => d.getDay() === 0 }
 ];
