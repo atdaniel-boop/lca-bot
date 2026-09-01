@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.25 - Alerta de nota fiscal pendente: quem pagou o mês, está marcado para emitir NF e ainda não tem nota emitida agora aparece em Alertas no site, e recebe aviso pelo Telegram na manhã do último dia do mês (calendário correto, incluindo ano bissexto).
+// Versão 14.26 - Aviso imediato de NF ao confirmar pagamento: nos 5 pontos onde o bot credita um pagamento (webhook, Pix, boleto pela rotina, confirmação manual, cheque), se o aluno emite NF e a competência ainda não tem nota, o bot manda o comando pronto pra emitir. Site: mesmo aviso na tela de Pagamentos, junto do aluno já marcado como pago.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.25'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.26'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1708,6 +1708,7 @@ async function executar(intencao, p, dados, chatId) {
     if (tinhaPend) patchData.pagamentos_pendentes = pend;
     await sbPatch('alunos', 'id=eq.' + aluno.id, patchData);
     await logOp('pagamento_confirmado', aluno.nome + ' - ' + mes, aluno.id, p.valor, mes);
+    await avisarNfSePendente(aluno, mes, p.valor);
     // Cancelar boleto Inter se existir um aberto para este mês — independente da
     // forma_pagamento cadastrada, pois o aluno pode ter boleto emitido mesmo estando
     // cadastrado como pix/dinheiro (ex: boleto avulso, cobrança excepcional).
@@ -2935,6 +2936,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const histNovo = [...hist, { data: new Date().toLocaleDateString('pt-BR'), tipo: 'cheque_compensado', desc: 'Cheque compensado - ' + mes + ' - ' + brl(val) }];
     await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: histNovo });
     await logOp('cheque_compensado', aluno.nome + ' - ' + mes, aluno.id, val, mes);
+    await avisarNfSePendente(aluno, mes, val);
     // Cancelar boleto Inter se existir aberto para este mês (aluno pode ter boleto
     // emitido e ter pago com cheque — sem isso o boleto fica aberto indefinidamente)
     let msgCancCheque = '';
@@ -4257,6 +4259,7 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
         if (tinhaPend) patch.pagamentos_pendentes = pend;
         await sbPatch('alunos', 'id=eq.' + aluno.id, patch);
         await logOp('pix_detectado', aluno.nome + ' - ' + mesAtualStr, aluno.id, valor, mesAtualStr);
+        await avisarNfSePendente(aluno, mesAtualStr, valor);
         // Cancelar boleto real no Inter, se ainda estiver aberto para este mês
         // (evita boleto ficar aberto/atrasado no Inter quando o aluno já pagou via Pix)
         let boletoCancelMsg = '';
@@ -4448,6 +4451,7 @@ async function verificarBoletosPagosInter() {
         if (tinhaPend) patch.pagamentos_pendentes = pend;
         await sbPatch('alunos', 'id=eq.' + alunoId, patch);
         await logOp('boleto_pago_rotina', aluno.nome + ' - ' + mes, alunoId, valor, mes);
+        await avisarNfSePendente(aluno, mes, valor);
         // Atualizar status na tabela boletos — sem isso o boleto continua 'aberto' no
         // nosso banco mesmo já pago no Inter, e o dashboard segue contando como "a receber".
         try {
@@ -4616,6 +4620,28 @@ async function rotinaPlanosVencendo() {
       '\n\n_Entre em contato para renovação._');
     console.log('[rotina-planos-vencendo] alertados:', pv.length);
   } catch(e) { console.error('[rotina-planos-vencendo] erro:', e.message); }
+}
+
+// ── Aviso imediato: "aluno pagou e emite NF" ────────────────────────────────
+// Chamado nos 5 pontos onde um pagamento é confirmado (webhook do Inter, Pix detectado,
+// boleto pago pela rotina, confirmação manual, cheque compensado). Não emite nada
+// sozinho — só avisa e já entrega o comando pronto, reaproveitando o parser de comandos
+// que já entende "emitir nf <nome> <mês>". Evita criar um fluxo de conversa novo
+// (esperar "sim"/"não") que poderia travar se você responder outra coisa primeiro.
+async function avisarNfSePendente(aluno, mes, valor) {
+  try {
+    if (!aluno || aluno.nfse_ativo !== 'SIM') return;
+    let notas = aluno.notas_fiscais_emitidas;
+    if (typeof notas === 'string') { try { notas = JSON.parse(notas||'{}'); } catch(e) { notas = {}; } }
+    if (notas && notas[mes]) return; // já tem nota dessa competência — nada a perguntar
+    const [ano, mesNum] = mes.split('-');
+    const primeiroNome = aluno.nome.split(' ')[0];
+    await tgSend(TELEGRAM_CHAT_ID,
+      '💰 Pagamento de *' + aluno.nome.split(' ').slice(0,2).join(' ') + '* confirmado — ' +
+      mesNum + '/' + ano + ', ' + brl(valor) + '.\n\n' +
+      '🧾 ' + primeiroNome + ' emite nota fiscal e ainda não tem NF dessa competência.\n\n' +
+      'Quer emitir agora? Responda:\n👉 emitir nf ' + primeiroNome + ' ' + mesNum + '/' + ano);
+  } catch(e) { console.error('[nf-aviso] erro:', e.message); }
 }
 
 // ── Nota fiscal pendente no último dia do mês ───────────────────────────────
@@ -5425,6 +5451,7 @@ async function main() {
                   const chatId = TELEGRAM_CHAT_ID;
                   if (chatId) {
                     await logOp('boleto_pago_webhook', aluno.nome + ' - ' + mes, alunoId, valorFinal, mes, {dataPagamento: dataPag});
+                    await avisarNfSePendente(aluno, mes, valorFinal);
                     await tgSend(chatId, '🏦 *Pagamento confirmado automaticamente!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorFinal) + '\n📅 ' + mes + ' - pago em ' + dataPag.split('-').reverse().join('/') + '\n_Boleto Inter baixado automaticamente._');
                   }
                   console.log('[WEBHOOK-INTER] Pagamento confirmado: aluno ' + alunoId + ' mes ' + mes + ' valor ' + valorFinal);
