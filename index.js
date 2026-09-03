@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.26 - Aviso imediato de NF ao confirmar pagamento: nos 5 pontos onde o bot credita um pagamento (webhook, Pix, boleto pela rotina, confirmação manual, cheque), se o aluno emite NF e a competência ainda não tem nota, o bot manda o comando pronto pra emitir. Site: mesmo aviso na tela de Pagamentos, junto do aluno já marcado como pago.
+// Versão 14.27 - Alerta de dívida de meses anteriores (paridade com o site v14.23, caso Marcelo Monteiro): rotinaAlertaInadimplencia agora também avisa mensalistas com meses passados sem pagamento, não só vencimento de ontem no mês corrente. Mesma regra do site: só mensalistas, nunca antes da matrícula, rescisão fecha a conta.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.26'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.27'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4530,6 +4530,49 @@ function _marcarExecutada(nome) {
 }
 
 // ── 2. Alerta diário de inadimplência (09:00 BRT) ──────────────────────────
+// Último valor pago, pela competência mais recente (não pela ordem de gravação no objeto —
+// mesmo cuidado do site: se um pagamento antigo foi lançado depois, Object.values() erra).
+function ultimoValorPagoBot(a) {
+  const pags = typeof a.pagamentos === 'string' ? JSON.parse(a.pagamentos||'{}') : (a.pagamentos||{});
+  const entradas = Object.entries(pags).filter(e => e[1] > 0).sort((x,y) => y[0].localeCompare(x[0]));
+  return entradas.length ? entradas[0][1] : 0;
+}
+// Meses das últimas 6 competências (antes do mês corrente) em que o aluno estava ativo e
+// não tem pagamento lançado. Só mensalistas — cíclico paga o ciclo inteiro de uma vez, não
+// ter pagamento lançado no meio do ciclo é normal, não dívida (mesma regra do site).
+function mesesEmAbertoAnterioresBot(a, mesAtualStr) {
+  if (a.tipo_plano !== 'mensal') return [];
+  const pags = typeof a.pagamentos === 'string' ? JSON.parse(a.pagamentos||'{}') : (a.pagamentos||{});
+  const [anoAt, mesAt] = mesAtualStr.split('-').map(Number);
+  const faltando = [];
+  for (let i = 1; i <= 6; i++) {
+    const d = new Date(anoAt, mesAt - 1 - i, 1);
+    const chave = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+    if (!alunoAtivoNoMes(a, chave)) continue; // não matriculado/ativo nesse mês — não deve
+    if (!(pags[chave] > 0)) faltando.push(chave);
+  }
+  return faltando.sort();
+}
+async function checarDividaMesesAnteriores(dados, mesAtualStr) {
+  const devedores = dados.alunos
+    .filter(a => a.ativo === 'SIM' && alunoAtivoNoMes(a, mesAtualStr) && a.tipo_plano === 'mensal')
+    .map(a => ({ a, meses: mesesEmAbertoAnterioresBot(a, mesAtualStr) }))
+    .filter(x => x.meses.length > 0);
+  if (!devedores.length) return;
+
+  const linhas = devedores.map(x => {
+    const valorMes = x.a.valor_referencia || ultimoValorPagoBot(x.a) || 0;
+    const mesesFmt = x.meses.map(m => { const p = m.split('-'); return p[1] + '/' + p[0]; }).join(', ');
+    return '🔴 *' + x.a.nome.split(' ').slice(0,2).join(' ') + '* — deve ' + mesesFmt +
+      (valorMes ? ' (≈ ' + brl(valorMes * x.meses.length) + ')' : '');
+  }).join('\n');
+
+  await tgSend(TELEGRAM_CHAT_ID,
+    '🔴 *Dívida de meses anteriores (' + devedores.length + ')*\n\n' + linhas +
+    '\n\n_Pra lançar: "Fulana pagou 359 em agosto"._');
+  console.log('[rotina-divida-anterior] alertados:', devedores.length);
+}
+
 async function rotinaAlertaInadimplencia() {
   try {
     const hoje = agoraBRT();
@@ -4548,6 +4591,14 @@ async function rotinaAlertaInadimplencia() {
         semVenc.map(a => '- ' + a.nome).join('\n') +
         '\n\nCorrija o cadastro pelo site — sem isso, o sistema não consegue calcular inadimplência/cobrança certa pra eles.');
     }
+
+    // BUG CORRIGIDO (v14.27, mesmo caso do site v14.23 — Marcelo Monteiro): este alerta só
+    // olhava "venceu ONTEM, no mês corrente". Quando o calendário virava de mês, a dívida de
+    // um mês anterior não pago simplesmente parava de ser mencionada — não porque foi paga,
+    // só porque a checagem nunca mais olhava pra trás. Mesma regra do site: só mensalistas
+    // (cíclicos pagam o pacote inteiro de uma vez, não é dívida mensal), nunca cobra antes da
+    // matrícula, e rescisão fecha a conta (não persegue quem já saiu).
+    await checarDividaMesesAnteriores(dados, mesAtualStr);
 
     // Alunos ativos cujo dia de vencimento foi ontem e não pagaram o mês atual
     const vencidosOntem = dados.alunos.filter(a => {
