@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.27 - Alerta de dívida de meses anteriores (paridade com o site v14.23, caso Marcelo Monteiro): rotinaAlertaInadimplencia agora também avisa mensalistas com meses passados sem pagamento, não só vencimento de ontem no mês corrente. Mesma regra do site: só mensalistas, nunca antes da matrícula, rescisão fecha a conta.
+// Versão 14.28 - Nunca mais enfileira/emite boleto pra aluno que não paga por boleto (caso Denise, cheque). Corrigido em duas camadas: o site não enfileira emissão fora da forma boleto (renovação e alteração de plano — cancelamento de boleto antigo continua acontecendo), e o bot recusa qualquer pedido de emissão que chegue pela fila pra aluno não-boleto, com mensagem clara em vez de "CPF não cadastrado".
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.27'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.28'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4096,16 +4096,27 @@ async function processarFilaBoletos() {
             const [k, v] = s.split(':');
             partes[k] = v || '';
           });
+          // Defesa redundante à do site: mesmo que 'emitir' venha preenchido por algum
+          // caminho antigo, nunca emite boleto novo pra quem não paga por boleto. O
+          // cancelamento dos boletos antigos (se houver) segue normalmente.
+          const mesesEmitirSeguro = (aluno.forma_pagamento === 'boleto') ? partes.emitir : '';
           resultado = await executar(
             'alterar_plano',
             { aluno_id: aluno.id, aluno_nome: aluno.nome,
               plano_novo: pedido.tipo_plano, valor: pedido.valor,
-              meses_cancelar: partes.cancelar, meses_emitir: partes.emitir,
+              meses_cancelar: partes.cancelar, meses_emitir: mesesEmitirSeguro,
               pro_rata: partes.prorata },
             dados, TELEGRAM_CHAT_ID
           );
           if (resultado) await tgSend(TELEGRAM_CHAT_ID, resultado);
         } else if (pedido.obs && pedido.obs.startsWith('excepcional|')) {
+          // BUG CORRIGIDO: cobrança excepcional em boleto pra quem não paga por boleto —
+          // o site já bloqueia isso, esta é a segunda camada de defesa no bot.
+          if (aluno.forma_pagamento !== 'boleto') {
+            await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'aluno não paga por boleto (forma: ' + (aluno.forma_pagamento||'?') + ')' });
+            await tgSend(TELEGRAM_CHAT_ID, '⚠️ Cobrança excepcional de *' + aluno.nome + '* não foi emitida: ela paga por *' + (aluno.forma_pagamento||'forma não cadastrada') + '*, não por boleto. Lance o pagamento manualmente quando chegar.');
+            continue;
+          }
           // Cobrança excepcional: emite UM boleto avulso com valor/vencimento/descrição próprios.
           const partesE = {};
           pedido.obs.split('|').slice(1).forEach(s => {
@@ -4122,6 +4133,15 @@ async function processarFilaBoletos() {
           );
           if (resultado) await tgSend(TELEGRAM_CHAT_ID, resultado);
         } else if (pedido.acao === 'emitir_plano') {
+          // BUG CORRIGIDO (caso Denise, paga por cheque): o site enfileirava emissão de
+          // boleto na renovação sem checar a forma de pagamento, e o bot tentava emitir
+          // de qualquer jeito — só parava se faltasse CPF, mensagem sem nexo nenhum pra
+          // quem nem deveria ter boleto. O site já foi corrigido; esta é a segunda camada.
+          if (aluno.forma_pagamento !== 'boleto') {
+            await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'aluno não paga por boleto (forma: ' + (aluno.forma_pagamento||'?') + ')' });
+            await tgSend(TELEGRAM_CHAT_ID, '⚠️ Plano de *' + aluno.nome + '* não gerou boletos: ela paga por *' + (aluno.forma_pagamento||'forma não cadastrada') + '*, não por boleto. Lance os pagamentos manualmente conforme forem chegando.');
+            continue;
+          }
           // Pedido normal: emitir plano completo
           resultado = await executar(
             'inter_emitir_plano',
