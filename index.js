@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.28 - Nunca mais enfileira/emite boleto pra aluno que não paga por boleto (caso Denise, cheque). Corrigido em duas camadas: o site não enfileira emissão fora da forma boleto (renovação e alteração de plano — cancelamento de boleto antigo continua acontecendo), e o bot recusa qualquer pedido de emissão que chegue pela fila pra aluno não-boleto, com mensagem clara em vez de "CPF não cadastrado".
+// Versão 14.29 - parseSeuNumero passa a reconhecer o formato de boleto avulso (LCA-{id}-{YYYYMM}A, com o A opcional pro caso de ser cortado pelo limite de 15 caracteres em ids grandes). Antes, boleto avulso pago nunca era creditado automaticamente nem aparecia na conciliação diária — a função devolvia alunoId null e a transação era descartada antes de qualquer outra checagem (caso Daniel, R$10, pago mas nunca detectado).
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.28'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.29'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -269,6 +269,17 @@ function parseSeuNumero(seuNum) {
   // Formato antigo: LCA-{id}-{YYYY-MM}
   const mLCA = sn.match(/^LCA-(\d+)-(\d{4}-\d{2})$/);
   if (mLCA) return { alunoId: parseInt(mLCA[1]), mes: mLCA[2] };
+  // BUG CORRIGIDO (caso Daniel, boleto avulso R$10 pago mas nunca creditado): o formato do
+  // boleto avulso — 'LCA-{id}-{YYYYMM}A' (gerado em bot_parte2.js, ver seuNumAvulso) — nunca
+  // batia com nenhum destes padrões. parseSeuNumero devolvia alunoId null, e tanto a
+  // conciliação diária quanto a rotina automática de crédito descartavam a transação antes
+  // de chegar em qualquer outra checagem (inclusive a de aluno ativo). O comando "extrato da
+  // conta" só acertava o nome porque tem um resgate à parte, caro (consulta individual à API
+  // do Inter por boleto), que a rotina automática nunca usou. Com o id do aluno grande o
+  // suficiente, o 'A' final é cortado pelo limite de 15 caracteres do seuNumero — por isso o
+  // 'A' é opcional aqui.
+  const mAvulso = sn.match(/^LCA-(\d+)-(\d{4})(\d{2})A?$/);
+  if (mAvulso) return { alunoId: parseInt(mAvulso[1]), mes: mAvulso[2] + '-' + mAvulso[3] };
   // Formato novo compacto: LCA-{id}-{YYMM} (cabe em 15 chars mesmo com id grande)
   const mLCAc = sn.match(/^LCA-(\d+)-(\d{2})(\d{2})$/);
   if (mLCAc) return { alunoId: parseInt(mLCAc[1]), mes: '20' + mLCAc[2] + '-' + mLCAc[3] };
