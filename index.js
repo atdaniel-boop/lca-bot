@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.29 - parseSeuNumero passa a reconhecer o formato de boleto avulso (LCA-{id}-{YYYYMM}A, com o A opcional pro caso de ser cortado pelo limite de 15 caracteres em ids grandes). Antes, boleto avulso pago nunca era creditado automaticamente nem aparecia na conciliação diária — a função devolvia alunoId null e a transação era descartada antes de qualquer outra checagem (caso Daniel, R$10, pago mas nunca detectado).
+// Versão 14.30 - Revisão geral (04/09/2026): _sbCheck agora acusa (console.warn) PATCH que bate em 0 linhas — sem travar as ~48 chamadas existentes. Reforçados com verificação real os 6 pontos que creditam pagamento (confirmar/desfazer pagamento, cheque compensado, Pix detectado, boleto pago por rotina e por webhook): nenhum mais declara sucesso sem confirmar que a gravação bateu numa linha de verdade, e as 3 rotinas automáticas abortam ANTES de cancelar um boleto real no Inter se o crédito local não confirmar. Corrigido também: Pix só era marcado "processado" (bloqueando nova tentativa) depois de confirmar a gravação, não antes.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.29'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '14.30'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -727,11 +727,24 @@ function sbHeaders() {
 // então checamos a resposta aqui — o Supabase retorna {code, message, details} em erro.
 // Sem isso, uma gravação bloqueada (ex: política RLS incorreta) passaria despercebida
 // e o código seguiria como se tivesse salvo com sucesso.
+//
+// BUG ENCONTRADO NA REVISÃO GERAL (04/09/2026): esta checagem cobria erro explícito do
+// Postgrest, mas não cobria o caso mais traiçoeiro — RLS bloqueando um PATCH sem gerar
+// erro nenhum, só devolvendo um array vazio (0 linhas afetadas). É a mesma família do bug
+// já corrigido no emitir-nf.js (marcação de NF que não persistia) e no site (aulas,
+// boletos). Como sbPatch/sbPost são usados em ~48 pontos nos 5 arquivos do bot, mudar o
+// comportamento (lançar erro) em todos de uma vez é arriscado sem auditar cada chamador —
+// por isso aqui só ACUSA (console.warn, não trava nada) uma resposta de array vazio num
+// PATCH; os pontos que mexem em dinheiro de verdade (confirmação de pagamento) foram
+// auditados e reforçados à parte, com aviso no Telegram.
 function _sbCheck(op, tabela, r) {
   if (r && typeof r === 'object' && !Array.isArray(r) && (r.code || r.message) && !r.id) {
     const msg = '[Supabase ' + op + ' ' + tabela + '] ' + (r.message || r.code) + (r.details ? ' — ' + r.details : '');
     console.error(msg);
     throw new Error(msg);
+  }
+  if (op === 'PATCH' && Array.isArray(r) && r.length === 0) {
+    console.warn('[Supabase PATCH ' + tabela + '] 0 linhas afetadas — o filtro não bateu em nada, ou a política RLS bloqueou a escrita. Nada foi gravado.');
   }
   return r;
 }
@@ -1717,7 +1730,16 @@ async function executar(intencao, p, dados, chatId) {
       desc: 'Pagamento ' + mes + ' via Bot Telegram: ' + brl(p.valor) });
     const patchData = { pagamentos: pags, historico_alteracoes: hist };
     if (tinhaPend) patchData.pagamentos_pendentes = pend;
-    await sbPatch('alunos', 'id=eq.' + aluno.id, patchData);
+    // BUG CORRIGIDO NA REVISÃO GERAL (04/09/2026): esta função sempre retornava "✅ Pagamento
+    // confirmado!" depois do sbPatch, mesmo quando ele não afetava nenhuma linha de verdade
+    // (RLS bloqueando, id errado, etc.) — sbPatch não lança erro nesse caso, só devolve um
+    // array vazio. O Telegram diria que o pagamento foi confirmado enquanto o banco continuava
+    // com o aluno marcado como não-pago. Mesma família do bug já corrigido na NF do Itair.
+    const rPatchConf = await sbPatch('alunos', 'id=eq.' + aluno.id, patchData);
+    if (!Array.isArray(rPatchConf) || !rPatchConf.length) {
+      return '⚠️ *Não consegui confirmar o pagamento.*\n\n' + aluno.nome + ' - ' + brl(p.valor) + ' - ' + mes +
+        '\n\nO Supabase não confirmou a gravação (0 linhas afetadas) — provável bloqueio de permissão na tabela `alunos`. *Nada foi salvo.* Tente de novo; se persistir, é preciso checar a política RLS.';
+    }
     await logOp('pagamento_confirmado', aluno.nome + ' - ' + mes, aluno.id, p.valor, mes);
     await avisarNfSePendente(aluno, mes, p.valor);
     // Cancelar boleto Inter se existir um aberto para este mês — independente da
@@ -1743,7 +1765,10 @@ async function executar(intencao, p, dados, chatId) {
     if (!pags[mesD]) return '⚠️ ' + aluno.nome + ' não tem pagamento em ' + mesD + '.';
     const val = pags[mesD];
     delete pags[mesD];
-    await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags });
+    const rPatchDesf = await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags });
+    if (!Array.isArray(rPatchDesf) || !rPatchDesf.length) {
+      return '⚠️ Não consegui desfazer o pagamento de *' + aluno.nome + '* (' + mesD + ') — o Supabase não confirmou a gravação. O pagamento continua registrado como estava.';
+    }
     await logOp('pagamento_desfeito', aluno.nome + ' - ' + mesD, aluno.id, val, mesD);
     return '✅ Pagamento desfeito!\n*' + aluno.nome + '* - ' + brl(val) + ' - ' + mesD + ' removido.';
   }
@@ -2945,7 +2970,10 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     pags[mes] = val;
     Object.keys(pend).forEach(k => { if (k === mes || k.startsWith(mes + '-')) delete pend[k]; });
     const histNovo = [...hist, { data: new Date().toLocaleDateString('pt-BR'), tipo: 'cheque_compensado', desc: 'Cheque compensado - ' + mes + ' - ' + brl(val) }];
-    await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: histNovo });
+    const rPatchCheq = await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: histNovo });
+    if (!Array.isArray(rPatchCheq) || !rPatchCheq.length) {
+      return '⚠️ Não consegui registrar a compensação do cheque de *' + aluno.nome + '* (' + mes + ') — o Supabase não confirmou a gravação. Nada foi salvo, tente de novo.';
+    }
     await logOp('cheque_compensado', aluno.nome + ' - ' + mes, aluno.id, val, mes);
     await avisarNfSePendente(aluno, mes, val);
     // Cancelar boleto Inter se existir aberto para este mês (aluno pode ter boleto
@@ -4277,7 +4305,6 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       } catch(eDup) { console.warn('[rotina-pix] erro ao checar duplicidade:', eDup.message); }
 
       // Lançar pagamento automaticamente
-      _pixProcessados.add(chave);
       try {
         pags[mesAtualStr] = valor;
         const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
@@ -4288,8 +4315,23 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
           desc: 'Pagamento ' + mesAtualStr + ' via Pix Inter (detectado no extrato): ' + brl(valor) });
         const patch = { pagamentos: pags, historico_alteracoes: hist };
         if (tinhaPend) patch.pagamentos_pendentes = pend;
-        await sbPatch('alunos', 'id=eq.' + aluno.id, patch);
+        // BUG CORRIGIDO NA REVISÃO GERAL (04/09/2026): esta rotina cancela o boleto REAL no
+        // Inter logo depois de creditar localmente. Sem verificar se o sbPatch realmente
+        // gravou, uma falha silenciosa (RLS, etc.) resultaria no pior cenário possível: o
+        // boleto de verdade cancelado no banco, e nosso sistema continuando sem nenhum
+        // registro do pagamento — o aluno ficaria sem boleto E sem crédito.
+        const rPatchPix = await sbPatch('alunos', 'id=eq.' + aluno.id, patch);
+        if (!Array.isArray(rPatchPix) || !rPatchPix.length) {
+          console.error('[rotina-pix] sbPatch não confirmou gravação para', aluno.nome, '— abortando ANTES de cancelar boleto real.');
+          await tgSend(TELEGRAM_CHAT_ID,
+            '⚠️ *Pix detectado, mas NÃO consegui creditar!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valor) + '\n📅 ' + mesAtualStr +
+            '\n\nO Supabase não confirmou a gravação — nada foi salvo, e por segurança NÃO cancelei nenhum boleto. Confirme manualmente: "confirmar pagamento ' + aluno.nome.split(' ')[0] + ' ' + valor + ' em ' + mesAtualStr.split('-').reverse().join('/') + '"');
+          continue;
+        }
         await logOp('pix_detectado', aluno.nome + ' - ' + mesAtualStr, aluno.id, valor, mesAtualStr);
+        _pixProcessados.add(chave); // só marca como processado DEPOIS de confirmar a gravação —
+        // se a gravação falhar (bloco acima), o próximo ciclo (30 min) tenta creditar de novo
+        // em vez de ignorar esse Pix pra sempre.
         await avisarNfSePendente(aluno, mesAtualStr, valor);
         // Cancelar boleto real no Inter, se ainda estiver aberto para este mês
         // (evita boleto ficar aberto/atrasado no Inter quando o aluno já pagou via Pix)
@@ -4480,7 +4522,17 @@ async function verificarBoletosPagosInter() {
           desc: 'Pagamento ' + mes + ' via boleto Inter (rotina automática): ' + brl(valor) });
         const patch = { pagamentos: pags, historico_alteracoes: hist };
         if (tinhaPend) patch.pagamentos_pendentes = pend;
-        await sbPatch('alunos', 'id=eq.' + alunoId, patch);
+        // Mesma proteção do Pix: esta rotina também trata o boleto no Inter/nossa tabela em
+        // seguida — se o crédito local não confirmou, é mais seguro parar aqui e avisar do
+        // que seguir como se o aluno tivesse pago.
+        const rPatchBol = await sbPatch('alunos', 'id=eq.' + alunoId, patch);
+        if (!Array.isArray(rPatchBol) || !rPatchBol.length) {
+          console.error('[rotina-inter] sbPatch não confirmou gravação para', aluno.nome, '— abortando.');
+          await tgSend(TELEGRAM_CHAT_ID,
+            '⚠️ *Boleto pago detectado, mas NÃO consegui creditar!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valor) + '\n📅 ' + mes +
+            '\n\nO Supabase não confirmou a gravação — nada foi salvo. Confirme manualmente: "confirmar pagamento ' + aluno.nome.split(' ')[0] + ' ' + valor + ' em ' + mes.split('-').reverse().join('/') + '"');
+          continue;
+        }
         await logOp('boleto_pago_rotina', aluno.nome + ' - ' + mes, alunoId, valor, mes);
         await avisarNfSePendente(aluno, mes, valor);
         // Atualizar status na tabela boletos — sem isso o boleto continua 'aberto' no
@@ -5524,7 +5576,18 @@ async function main() {
                     desc: 'Pagamento ' + mes + ' via boleto Inter (automático): ' + brl(valorFinal) });
                   const patch = { pagamentos: pags, historico_alteracoes: hist };
                   if (tinhaPend) patch.pagamentos_pendentes = pend;
-                  await sbPatch('alunos', 'id=eq.' + alunoId, patch);
+                  // Mesma proteção das outras rotinas de crédito: sem confirmar que a
+                  // gravação bateu numa linha de verdade, não faz sentido seguir marcando o
+                  // boleto como pago e avisando sucesso no Telegram.
+                  const rPatchWh = await sbPatch('alunos', 'id=eq.' + alunoId, patch);
+                  if (!Array.isArray(rPatchWh) || !rPatchWh.length) {
+                    console.error('[WEBHOOK-INTER] sbPatch não confirmou gravação para aluno', alunoId, '— abortando.');
+                    if (TELEGRAM_CHAT_ID) {
+                      await tgSend(TELEGRAM_CHAT_ID,
+                        '⚠️ *Boleto pago recebido pelo webhook, mas NÃO consegui creditar!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorFinal) + '\n📅 ' + mes +
+                        '\n\nO Supabase não confirmou a gravação — nada foi salvo. Confirme manualmente: "confirmar pagamento ' + aluno.nome.split(' ')[0] + ' ' + valorFinal + ' em ' + mes.split('-').reverse().join('/') + '"');
+                    }
+                  } else {
                   try {
                     await sbPatch('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto',
                       { status: 'pago', pago_em: new Date().toISOString() });
@@ -5537,6 +5600,7 @@ async function main() {
                     await tgSend(chatId, '🏦 *Pagamento confirmado automaticamente!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorFinal) + '\n📅 ' + mes + ' - pago em ' + dataPag.split('-').reverse().join('/') + '\n_Boleto Inter baixado automaticamente._');
                   }
                   console.log('[WEBHOOK-INTER] Pagamento confirmado: aluno ' + alunoId + ' mes ' + mes + ' valor ' + valorFinal);
+                  }
                 }
               }
             }
