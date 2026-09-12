@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 14.30 - Revisão geral (04/09/2026): _sbCheck agora acusa (console.warn) PATCH que bate em 0 linhas — sem travar as ~48 chamadas existentes. Reforçados com verificação real os 6 pontos que creditam pagamento (confirmar/desfazer pagamento, cheque compensado, Pix detectado, boleto pago por rotina e por webhook): nenhum mais declara sucesso sem confirmar que a gravação bateu numa linha de verdade, e as 3 rotinas automáticas abortam ANTES de cancelar um boleto real no Inter se o crédito local não confirmar. Corrigido também: Pix só era marcado "processado" (bloqueando nova tentativa) depois de confirmar a gravação, não antes.
+// Versão 15.1 - Caso Claudia Marcia (renovação após rescisão): a busca por "qual renovação ancora o ciclo atual" usava o último mês pago como âncora, sem considerar que esse pagamento podia ser de ANTES de uma rescisão — gerava validade de plano e boletos com mês/vencimento errados. Corrigido e extraído pra função única compartilhada (encontrarRenovacaoAtual + cicloInicioDeRenovacao), eliminando duas cópias divergentes do mesmo algoritmo (inter_emitir_plano e inter_reenviar_boletos). De brinde: o reenvio também usava o dia em que a renovação foi digitada em vez do dia de vencimento como início do período.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '14.30'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.1'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1112,6 +1112,85 @@ function alunoAtivoAgora(a) {
 }
 function mesAtualBR() { return mesBRT(); } // alias histórico
 
+// Mês (0-indexado, estilo JS Date) em que o ciclo de cobrança começa, dado um evento de
+// renovação e o dia de vencimento do aluno. Compartilhado entre inter_emitir_plano e
+// inter_reenviar_boletos — mesmo motivo da encontrarRenovacaoAtual acima: eram cópias
+// separadas, e uma delas (o reenvio) usava por engano o DIA em que a renovação foi
+// digitada como início do período, em vez do dia de VENCIMENTO — dava "Validade: 14/09 a
+// 15/12" ao invés de "16/09 a 15/12" sempre que a data de renovação e a de vencimento
+// fossem dias diferentes (o caso comum: você digita a renovação num dia, o vencimento é
+// outro).
+function cicloInicioDeRenovacao(renovacao, diaVencimento) {
+  const dp = renovacao.data.split('/');
+  const diaRenov = parseInt(dp[0]), mesRenov = parseInt(dp[1]), anoRenov = parseInt(dp[2]);
+  const diaVenc = diaVencimento || 10;
+  // Usar o mês da renovação como base do ciclo — mas só considerar o MESMO mês se o dia de
+  // vencimento ainda não tivesse passado na data em que a renovação foi feita.
+  // Ex: renovou dia 28/07 com vencimento dia 2 → dia 2 já passou em julho → ciclo começa em agosto.
+  if (diaVenc >= diaRenov) {
+    return { ano: anoRenov, mes0: mesRenov - 1 };
+  }
+  let mes0 = mesRenov; // mês seguinte (0-based = mesRenov já é +1)
+  let ano = anoRenov;
+  if (mes0 > 11) { mes0 = 0; ano++; }
+  return { ano, mes0 };
+}
+
+// ── Renovação que ancora o ciclo atual (usada por inter_emitir_plano e por
+// inter_reenviar_boletos — antes eram DUAS cópias separadas do mesmo algoritmo, o que
+// permitiu um bug ficar corrigido numa e esquecido na outra) ────────────────────────
+// Encontra, entre as renovações do histórico, a que corresponde ao ciclo de cobrança
+// ATUAL — não necessariamente a mais recente cadastrada (pode haver duplicatas de
+// execuções anteriores), mas também não necessariamente a mais antiga compatível com
+// "algum pagamento antigo qualquer".
+//
+// BUG CORRIGIDO (caso Claudia Marcia, 11/09/2026): pagamento de ANTES da rescisão/
+// inativação mais recente é de um ciclo já encerrado — não pode servir de âncora pro
+// ciclo atual. Claudia saiu em julho/2026 (pagou até então) e renovou de novo em
+// setembro/2026; sem filtrar isso, "julho" continuava sendo o "último pago", e como
+// setembro não cabia na tolerância de +1 mês a partir de julho, o código descartava a
+// renovação de HOJE e escolhia uma renovação antiga por engano — gerando validade de
+// plano errada e boletos com mês/vencimento sem nexo nenhum.
+function encontrarRenovacaoAtual(historicoAlteracoes, pagamentos) {
+  const hist = historicoAlteracoes || [];
+  const pags = pagamentos || {};
+  const renovacoes = hist.filter(h => h.tipo === 'renovacao' && h.data);
+  if (!renovacoes.length) return null;
+
+  const mesesPagos = Object.keys(pags).filter(k => /^\d{4}-\d{2}$/.test(k) && (pags[k]||0) > 0).sort();
+
+  const eventosFechamento = hist.filter(h => (h.tipo === 'rescisao' || h.tipo === 'inativacao') && h.data);
+  let dataUltimoFechamento = null;
+  eventosFechamento.forEach(h => {
+    const dp = h.data.split('/'); if (dp.length !== 3) return;
+    const dt = new Date(parseInt(dp[2]), parseInt(dp[1])-1, parseInt(dp[0]));
+    if (!dataUltimoFechamento || dt > dataUltimoFechamento) dataUltimoFechamento = dt;
+  });
+  const mesesPagosRelevantes = dataUltimoFechamento
+    ? mesesPagos.filter(k => { const [ay,am] = k.split('-').map(Number); return new Date(ay,am-1,1) > dataUltimoFechamento; })
+    : mesesPagos;
+  const ultimoPago = mesesPagosRelevantes.length ? mesesPagosRelevantes[mesesPagosRelevantes.length-1] : null;
+
+  // BUG CORRIGIDO v14.4 (site): candidatas ordenadas da mais ANTIGA pra mais nova, e a
+  // primeira compatível era escolhida — como QUALQUER renovação de anos atrás também
+  // satisfaz a tolerância (ano menor), alunos com várias renovações legítimas ao longo do
+  // tempo (ex: Hannelore, cliente desde fev/2025) tinham a mensagem de validade montada com
+  // a PRIMEIRA renovação já feita, não a de agora. Agora ordena da mais RECENTE pra mais
+  // antiga, escolhendo a primeira (mais nova) compatível — que é a de agora.
+  const candidatas = renovacoes.slice().sort((a,b) => {
+    const da = a.data.split('/'), db = b.data.split('/');
+    return new Date(parseInt(db[2]),parseInt(db[1])-1,parseInt(db[0])) - new Date(parseInt(da[2]),parseInt(da[1])-1,parseInt(da[0]));
+  });
+  if (!ultimoPago) return candidatas[0];
+  const [anoP, mesP] = ultimoPago.split('-').map(Number);
+  return candidatas.find(h => {
+    const dp = h.data.split('/');
+    const anoH = parseInt(dp[2]), mesH = parseInt(dp[1]);
+    // A renovação deve começar no mês pago ou até 1 mês depois (tolerância)
+    return (anoH < anoP) || (anoH === anoP && mesH <= mesP + 1);
+  }) || candidatas[0];
+}
+
 // ── Contexto para a IA ─────────────────────────────────────────────────────────
 function buildContexto(dados, mes) {
   const ativos = dados.alunos.filter(a => a.ativo === 'SIM' && alunoAtivoNoMes(a, mes));
@@ -1592,6 +1671,7 @@ function detectarAlunoNoTexto(dados, tL) {
     '- "resumo financeiro", "resultado do mes", "receita do estudio" → consulta\n' +
     '- "saldo" sem mencao a banco/conta/Inter → consulta sobre o estudio\n' +
     '- "boleto(s) aberto(s)/pendente(s)", "quem falta pagar", "alguem devendo" → consulta objetiva, use só os dados de "A receber neste mes" acima\n' +
+    '- "emitir nf ALUNO [mês]", "emitir nota fiscal de ALUNO", "nf do ALUNO" → SEMPRE encaminhar_nf. NUNCA confundir com inter_emitir_boleto: "nf"/"nota fiscal" é sempre nota fiscal (encaminhar_nf), mesmo aparecendo perto de palavras como "emitir" que também aparecem em pedidos de boleto — a presença de "nf" ou "nota fiscal" decide, não a palavra "emitir" sozinha.\n' +
     '- REGRA CRÍTICA (não quebrar): qualquer frase que DESCREVE algo que aconteceu e precisa ser REGISTRADO — professora deu aula ("kelly deu 4 aulas"), aluno pagou ("joão pagou 300"), custo foi lançado ("paguei 200 de luz") — é SEMPRE tipo:"acao" com a intencao correspondente (lancar_aula/confirmar_pagamento/lancar_custo/etc), NUNCA tipo:"consulta", mesmo sendo uma frase curta e direta. As instruções de ESTILO DA RESPOSTA abaixo dizem respeito SÓ ao texto do campo "resposta" quando tipo="consulta" — elas não mudam se algo é ação ou consulta.\n\n' +
     'MENSAGEM: "' + texto + '"\n\n' +
     'ESTILO DA RESPOSTA (aplica-se somente quando tipo="consulta", nunca influencia se algo é "acao"):\n' +
@@ -1604,7 +1684,7 @@ function detectarAlunoNoTexto(dados, tL) {
     '{\n' +
     '  "tipo": "consulta" ou "acao",\n' +
     '  "resposta": "resposta em Markdown se consulta, null se acao",\n' +
-    '  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_sumario/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos/confirmar_cheque/alterar_plano,\n' +
+    '  "intencao": null se consulta, ou lancar_custo/lancar_aula/confirmar_pagamento/calcular_rescisao/remover_custo/remover_custo_id/desfazer_pagamento/desfazer_aula/checkin/desfazer_checkin/inter_saldo/inter_sumario/inter_extrato/inter_boletos/inter_boletos_vencidos/inter_emitir_boleto/inter_emitir_plano/inter_cancelar_boleto/inter_reenviar_boletos/confirmar_cheque/alterar_plano/encaminhar_nf,\n' +
     '  "params": {\n' +
     '    "aluno_nome": string ou null,\n' +
     '    "valor": numero — PRIORIDADE ABSOLUTA: se o usuario digitou um numero no texto, use EXATAMENTE esse numero, mesmo que diferente do historico. Apenas se NENHUM numero foi digitado, use o ultimo pagamento do aluno. Ou null,\n' +
@@ -2435,6 +2515,45 @@ async function executar(intencao, p, dados, chatId) {
     } catch(e) { return '❌ Erro boletos Inter: ' + e.message; }
   }
 
+  // BUG CORRIGIDO NA REVISÃO GERAL (11/09/2026): o bot principal instruía "responda emitir
+  // nf <nome> <mês>" (nas mensagens de avisarNfSePendente e rotinaNotaFiscalPendente), mas
+  // esse comando só existia no bot de NF, separado. Aqui, sem uma intenção própria pra
+  // reconhecer, a IA confundia com inter_emitir_boleto e emitia um BOLETO por engano. Agora
+  // o bot principal reconhece o pedido e ENCAMINHA pra fila que o bot de NF já processa
+  // (fila_notas_fiscais — a mesma que o botão "📄 NFS-e" do site usa).
+  if (intencao === 'encaminhar_nf') {
+    const aluno = encontrarAluno(dados, p);
+    if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
+      ? '⚠️ Há ' + aluno.length + ' alunos com esse nome. Especifique:\n' + aluno.map((a,i)=>(i+1)+'. '+a.nome+' (id '+a.id+')').join('\n')
+      : '❌ Aluno não encontrado: "' + p?.aluno_nome + '".';
+    if (aluno.nfse_ativo !== 'SIM') return '⚠️ *' + aluno.nome + '* não está marcado pra emitir NF (campo "Emite NF?" na ficha). Confira o cadastro antes de tentar de novo.';
+    // mes chega como 'YYYY-MM' do parser (ou null = mês atual); a fila espera 'MM/AAAA'.
+    const mesYM = p?.mes || mesBRT();
+    const [anoNF, mesNF] = mesYM.split('-');
+    const mesFila = mesNF + '/' + anoNF;
+    // Mesma regra do alerta automático: a Receita rejeita competência futura, e nossa
+    // competência é a data de vencimento do mês pedido. Sem essa checagem, o pedido seria
+    // encaminhado, o bot de NF preencheria tudo, e o portal do governo recusaria no fim.
+    if (!competenciaJaVenceuBot(aluno, mesYM)) {
+      const venc = vencimentoCompetenciaBot(aluno, mesYM);
+      return '⚠️ Ainda não dá pra emitir a NF de *' + aluno.nome + '* (' + mesFila + ') — o vencimento dessa competência é ' +
+        venc.toLocaleDateString('pt-BR') + ', ainda não chegou. A Receita não aceita competência futura. Tente de novo a partir dessa data.';
+    }
+    try {
+      const rFila = await sbPost('fila_notas_fiscais', {
+        aluno_id: aluno.id, aluno_nome: aluno.nome, mes: mesFila,
+        chat_id: TELEGRAM_CHAT_ID, status: 'pendente', criado_em: new Date().toISOString()
+      });
+      if (!Array.isArray(rFila) || !rFila.length) {
+        return '⚠️ Não consegui encaminhar o pedido de NF de *' + aluno.nome + '* — o Supabase não confirmou a gravação. Tente de novo, ou emita pelo site.';
+      }
+    } catch(e) {
+      return '⚠️ Erro ao encaminhar pedido de NF: ' + e.message;
+    }
+    return '📤 Pedido de NF de *' + aluno.nome + '* (' + mesFila + ') encaminhado.\n\n' +
+      'Isso aqui é o bot principal — quem preenche e emite é o bot de notas fiscais, separado. Em alguns minutos você recebe uma revisão pra confirmar antes de emitir de verdade.';
+  }
+
   if (intencao === 'inter_emitir_boleto') {
     const aluno = encontrarAluno(dados, p);
     if (!aluno || Array.isArray(aluno)) return Array.isArray(aluno)
@@ -2670,34 +2789,10 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     try {
       const histAtual = typeof aluno.historico_alteracoes==='string'
         ? JSON.parse(aluno.historico_alteracoes||'[]') : (aluno.historico_alteracoes||[]);
-      const renovacoes = histAtual.filter(h => h.tipo === 'renovacao' && h.data);
-      if (renovacoes.length) {
-        // Último mês efetivamente pago (chave YYYY-MM exata)
-        const mesesPagos = Object.keys(pags).filter(k => /^\d{4}-\d{2}$/.test(k) && (pags[k]||0) > 0).sort();
-        const ultimoPago = mesesPagos.length ? mesesPagos[mesesPagos.length-1] : null;
-        // BUG CORRIGIDO v14.4 (site): candidatas ordenadas da mais ANTIGA pra mais nova, e a
-        // primeira compatível era escolhida — como QUALQUER renovação de anos atrás também
-        // satisfaz a tolerância (ano menor), alunos com várias renovações legítimas ao longo
-        // do tempo (ex: Hannelore, cliente desde fev/2025) tinham a mensagem de validade
-        // montada com a PRIMEIRA renovação já feita, não a de agora (caso real: validade saiu
-        // "21/02/2025 a 20/02/2027" numa renovação feita hoje). Agora ordena da mais RECENTE
-        // pra mais antiga, escolhendo a primeira (mais nova) compatível — que é a de agora.
-        const candidatas = renovacoes.slice().sort((a,b) => {
-          const da = a.data.split('/'), db = b.data.split('/');
-          return new Date(parseInt(db[2]),parseInt(db[1])-1,parseInt(db[0])) - new Date(parseInt(da[2]),parseInt(da[1])-1,parseInt(da[0]));
-        });
-        if (ultimoPago) {
-          const [anoP, mesP] = ultimoPago.split('-').map(Number);
-          renovacaoExistente = candidatas.find(h => {
-            const dp = h.data.split('/');
-            const anoH = parseInt(dp[2]), mesH = parseInt(dp[1]);
-            // A renovação deve começar no mês pago ou até 1 mês depois (tolerância)
-            return (anoH < anoP) || (anoH === anoP && mesH <= mesP + 1);
-          }) || candidatas[0];
-        } else {
-          renovacaoExistente = candidatas[0];
-        }
-      }
+      // Lógica compartilhada com inter_reenviar_boletos (bot_parte3.js) — ver
+      // encontrarRenovacaoAtual em bot_parte1.js. Antes eram duas cópias separadas do
+      // mesmo algoritmo; um bug corrigido numa ficava esquecido na outra.
+      renovacaoExistente = encontrarRenovacaoAtual(histAtual, pags);
     } catch(eHR) { console.error('[emitir_plano] erro ao ler histórico:', eHR.message); }
 
     let anoBase, mesBase;
@@ -2705,18 +2800,9 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       const pm = p.mes.split('-');
       anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
     } else if (renovacaoExistente) {
-      // Usar o mês da renovação como base do ciclo — mas só considerar o MESMO mês se
-      // o dia de vencimento ainda não tivesse passado na data em que a renovação foi feita.
-      // Ex: renovou dia 28/07 com vencimento dia 2 → dia 2 já passou em julho → ciclo começa em agosto.
-      const dp = renovacaoExistente.data.split('/');
-      const diaRenov = parseInt(dp[0]), mesRenov = parseInt(dp[1]), anoRenov = parseInt(dp[2]);
-      const diaVencAluno = aluno.dia_vencimento || 10;
-      if (diaVencAluno >= diaRenov) {
-        anoBase = anoRenov; mesBase = mesRenov - 1;
-      } else {
-        anoBase = anoRenov; mesBase = mesRenov; // mês seguinte (0-based = mesRenov já é +1)
-        if (mesBase > 11) { mesBase = 0; anoBase++; }
-      }
+      // Mesmo helper usado no reenvio (cicloInicioDeRenovacao, bot_parte1.js).
+      const ciclo = cicloInicioDeRenovacao(renovacaoExistente, aluno.dia_vencimento);
+      anoBase = ciclo.ano; mesBase = ciclo.mes0;
     } else if (aluno.data_matricula && /^\d{4}-\d{2}-\d{2}$/.test(aluno.data_matricula)) {
       // Usar o mês da data de matrícula como base (ex: matrícula 10/07 → 1º boleto em julho).
       const pm = aluno.data_matricula.split('-');
@@ -3125,45 +3211,26 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           const DURACAO_R = {mensal:1,trimestral:3,semestral:6};
           let periodoR = '';
           try {
-            // BUG CORRIGIDO v14.4: a versão anterior procurava um campo 'desc' com texto
-            // "dd/mm/aaaa a dd/mm/aaaa" que as renovações normais NUNCA têm (guardam
-            // plano_novo/valor/dia_venc, não uma string de período) — sempre caía num
-            // fallback que usava o menor/maior mês de TODOS os boletos não-cancelados do
-            // aluno, o que pega o início do primeiro ciclo já feito, não o da renovação
-            // atual, para quem já renovou antes (caso real: Hannelore, cliente desde
-            // fev/2025, mostrou validade desde 2025 numa renovação feita hoje). Agora usa
-            // a mesma lógica confiável do emitir_plano: pega a renovação mais RECENTE
-            // compatível com o último mês pago, direto do campo 'data' da própria entrada.
+            // Lógica compartilhada com inter_emitir_plano (bot_parte2.js) — ver
+            // encontrarRenovacaoAtual em bot_parte1.js. Antes eram duas cópias separadas do
+            // mesmo algoritmo; um bug corrigido numa (caso Hannelore, depois caso Claudia
+            // Marcia) ficava esquecido na outra até alguém topar com ele de novo.
             const rAlR = await sbGet('alunos', 'select=historico_alteracoes&id=eq.' + aluno.id);
             const alR = (Array.isArray(rAlR) ? rAlR[0] : rAlR?.data?.[0]) || {};
             const histR = alR.historico_alteracoes || [];
             const pagsR = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
-            const renovacoesR = histR.filter(h => h.tipo === 'renovacao' && h.data);
-            let renovAtual = null;
-            if (renovacoesR.length) {
-              const mesesPagosR = Object.keys(pagsR).filter(k => /^\d{4}-\d{2}$/.test(k) && (pagsR[k]||0) > 0).sort();
-              const ultimoPagoR = mesesPagosR.length ? mesesPagosR[mesesPagosR.length-1] : null;
-              const candidatasR = renovacoesR.slice().sort((a,b) => {
-                const da = a.data.split('/'), db = b.data.split('/');
-                return new Date(parseInt(db[2]),parseInt(db[1])-1,parseInt(db[0])) - new Date(parseInt(da[2]),parseInt(da[1])-1,parseInt(da[0]));
-              });
-              if (ultimoPagoR) {
-                const [anoP, mesP] = ultimoPagoR.split('-').map(Number);
-                renovAtual = candidatasR.find(h => {
-                  const dp = h.data.split('/');
-                  const anoH = parseInt(dp[2]), mesH = parseInt(dp[1]);
-                  return (anoH < anoP) || (anoH === anoP && mesH <= mesP + 1);
-                }) || candidatasR[0];
-              } else {
-                renovAtual = candidatasR[0];
-              }
-            }
+            const renovAtual = encontrarRenovacaoAtual(histR, pagsR);
             if (renovAtual) {
-              const dp = renovAtual.data.split('/');
-              const dtIniR = new Date(parseInt(dp[2]), parseInt(dp[1])-1, parseInt(dp[0]));
-              const durR = DURACAO_R[renovAtual.plano_novo] || DURACAO_R[aluno.tipo_plano] || 1;
+              // BUG CORRIGIDO (caso Claudia Marcia): usava o DIA em que a renovação foi
+              // digitada (dp[0]) como início do período — dava "Validade: 14/09 a 15/12" em
+              // vez de "16/09 a 15/12" sempre que o dia da renovação e o dia de vencimento
+              // fossem diferentes. Agora usa o mesmo helper de inter_emitir_plano
+              // (cicloInicioDeRenovacao), que ancora certo no dia de VENCIMENTO.
               const diaVencR = renovAtual.dia_venc || aluno.dia_vencimento || 10;
-              const dtFimR = new Date(dtIniR.getFullYear(), dtIniR.getMonth()+durR, diaVencR-1);
+              const ciclo = cicloInicioDeRenovacao(renovAtual, diaVencR);
+              const durR = DURACAO_R[renovAtual.plano_novo] || DURACAO_R[aluno.tipo_plano] || 1;
+              const dtIniR = new Date(ciclo.ano, ciclo.mes0, diaVencR);
+              const dtFimR = new Date(ciclo.ano, ciclo.mes0 + durR, diaVencR - 1);
               periodoR = fmtR(dtIniR) + ' a ' + fmtR(dtFimR);
             } else {
               // Sem histórico de renovação: usar duração do plano a partir do vencimento do 1º boleto
@@ -4280,9 +4347,24 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       if (candidatos.length !== 1) { semMatch++; continue; } // sem match único e seguro, ignorar
       const aluno = candidatos[0];
 
-      // Já pagou o mês? pular (evita duplicar com rotina de boletos e lançamentos manuais)
+      // Já pagou o mês corrente? Antes disso pulava direto — mas o aluno pode ter pago
+      // ADIANTADO o mês seguinte (ex: Breno vence dia 5, manda o Pix no dia 30 do mês
+      // anterior). Só mensalistas têm essa continuidade previsível: cíclico (trimestral/
+      // semestral) paga o pacote inteiro de uma vez, "mês atual pago" não indica nada sobre
+      // o mês seguinte pra eles, então não tentamos adivinhar.
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
-      if ((pags[mesAtualStr]||0) > 0) { _pixProcessados.add(chave); jaPagos++; continue; }
+      let mesCredito = mesAtualStr;
+      if ((pags[mesAtualStr]||0) > 0) {
+        const [anoPM, mesPM] = mesAtualStr.split('-').map(Number);
+        let anoProx = anoPM, mesProx = mesPM + 1;
+        if (mesProx > 12) { mesProx = 1; anoProx++; }
+        const proxMesStr = anoProx + '-' + String(mesProx).padStart(2,'0');
+        if (aluno.tipo_plano === 'mensal' && !((pags[proxMesStr]||0) > 0)) {
+          mesCredito = proxMesStr;
+        } else {
+          _pixProcessados.add(chave); jaPagos++; continue;
+        }
+      }
 
       // BUG CORRIGIDO v13.5: esta rotina varre Pix genéricos no extrato e SEMPRE assumia que
       // eram para o mês atual — mas se o Pix na verdade liquidou um boleto de OUTRO mês (ex:
@@ -4306,13 +4388,13 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
 
       // Lançar pagamento automaticamente
       try {
-        pags[mesAtualStr] = valor;
+        pags[mesCredito] = valor;
         const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
-        const tinhaPend = (pend[mesAtualStr]||0) > 0;
-        if (tinhaPend) delete pend[mesAtualStr];
+        const tinhaPend = (pend[mesCredito]||0) > 0;
+        if (tinhaPend) delete pend[mesCredito];
         const hist = aluno.historico_alteracoes || [];
         hist.push({ data: hojeBR.toLocaleDateString('pt-BR'), tipo: 'pagamento',
-          desc: 'Pagamento ' + mesAtualStr + ' via Pix Inter (detectado no extrato): ' + brl(valor) });
+          desc: 'Pagamento ' + mesCredito + ' via Pix Inter (detectado no extrato): ' + brl(valor) });
         const patch = { pagamentos: pags, historico_alteracoes: hist };
         if (tinhaPend) patch.pagamentos_pendentes = pend;
         // BUG CORRIGIDO NA REVISÃO GERAL (04/09/2026): esta rotina cancela o boleto REAL no
@@ -4324,20 +4406,20 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
         if (!Array.isArray(rPatchPix) || !rPatchPix.length) {
           console.error('[rotina-pix] sbPatch não confirmou gravação para', aluno.nome, '— abortando ANTES de cancelar boleto real.');
           await tgSend(TELEGRAM_CHAT_ID,
-            '⚠️ *Pix detectado, mas NÃO consegui creditar!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valor) + '\n📅 ' + mesAtualStr +
-            '\n\nO Supabase não confirmou a gravação — nada foi salvo, e por segurança NÃO cancelei nenhum boleto. Confirme manualmente: "confirmar pagamento ' + aluno.nome.split(' ')[0] + ' ' + valor + ' em ' + mesAtualStr.split('-').reverse().join('/') + '"');
+            '⚠️ *Pix detectado, mas NÃO consegui creditar!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valor) + '\n📅 ' + mesCredito +
+            '\n\nO Supabase não confirmou a gravação — nada foi salvo, e por segurança NÃO cancelei nenhum boleto. Confirme manualmente: "confirmar pagamento ' + aluno.nome.split(' ')[0] + ' ' + valor + ' em ' + mesCredito.split('-').reverse().join('/') + '"');
           continue;
         }
-        await logOp('pix_detectado', aluno.nome + ' - ' + mesAtualStr, aluno.id, valor, mesAtualStr);
+        await logOp('pix_detectado', aluno.nome + ' - ' + mesCredito, aluno.id, valor, mesCredito);
         _pixProcessados.add(chave); // só marca como processado DEPOIS de confirmar a gravação —
         // se a gravação falhar (bloco acima), o próximo ciclo (30 min) tenta creditar de novo
         // em vez de ignorar esse Pix pra sempre.
-        await avisarNfSePendente(aluno, mesAtualStr, valor);
+        await avisarNfSePendente(aluno, mesCredito, valor);
         // Cancelar boleto real no Inter, se ainda estiver aberto para este mês
         // (evita boleto ficar aberto/atrasado no Inter quando o aluno já pagou via Pix)
         let boletoCancelMsg = '';
         try {
-          const rBolPix = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&mes=eq.' + mesAtualStr + '&status=eq.aberto&select=id,codigo_solicitacao');
+          const rBolPix = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&mes=eq.' + mesCredito + '&status=eq.aberto&select=id,codigo_solicitacao');
           let bolsPix = Array.isArray(rBolPix) ? rBolPix : (rBolPix?.data || []);
           // BUG CORRIGIDO v14.10: se o aluno não tem NENHUM registro na nossa tabela local de
           // boletos (caso de alunos legados, cujos boletos nunca foram sincronizados pro banco —
@@ -4356,10 +4438,10 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
                 const bc = item.cobranca || item;
                 if (!['A_RECEBER','ATRASADO'].includes(bc.situacao)) return false;
                 const psn = parseSeuNumero(bc.seuNumero);
-                if (psn.alunoId === aluno.id && (psn.mes === mesAtualStr || !psn.mes)) return true;
+                if (psn.alunoId === aluno.id && (psn.mes === mesCredito || !psn.mes)) return true;
                 const nomePag = semAcento(bc.pagador?.nome || '').split(/\s+/).filter(x => !preposPix.includes(x));
                 return partesAlunoPix[0] && partesAlunoPix[1] && nomePag.includes(partesAlunoPix[0]) && nomePag.includes(partesAlunoPix[1])
-                  && (bc.dataVencimento||'').slice(0,7) === mesAtualStr;
+                  && (bc.dataVencimento||'').slice(0,7) === mesCredito;
               }).map(item => {
                 const bc = item.cobranca || item;
                 return { id: null, codigo_solicitacao: bc.codigoSolicitacao, _interOnly: true };
@@ -4384,7 +4466,7 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
             // existia no Inter (sem id local), cria o registro em vez de tentar atualizar.
             if (b._interOnly || !b.id) {
               await sbPost('boletos', {
-                aluno_id: aluno.id, mes: mesAtualStr, valor: valor, codigo_solicitacao: b.codigo_solicitacao,
+                aluno_id: aluno.id, mes: mesCredito, valor: valor, codigo_solicitacao: b.codigo_solicitacao,
                 status: cancelouNoInter ? 'cancelado' : 'pago_outro_meio_erro_cancelamento',
                 cancelado_em: new Date().toISOString(), criado_em: new Date().toISOString()
               });
@@ -4408,8 +4490,8 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
           '💸 *Pix detectado e lançado!*\n\n' +
           '👤 ' + aluno.nome + '\n' +
           '💰 ' + brl(valor) + '\n' +
-          '📅 ' + mesAtualStr + ' — Pix recebido hoje no Inter.' + boletoCancelMsg + '\n\n' +
-          '_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mesAtualStr + '"_');
+          '📅 ' + mesCredito + ' — Pix recebido hoje no Inter.' + boletoCancelMsg + '\n\n' +
+          '_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mesCredito + '"_');
         console.log('[rotina-pix] lançado:', aluno.nome, valor);
         lancados++;
         lancadosNomes.push(aluno.nome.split(' ').slice(0,2).join(' ') + ' (' + brl(valor) + ')');
@@ -4615,6 +4697,30 @@ function _marcarExecutada(nome) {
 // ── 2. Alerta diário de inadimplência (09:00 BRT) ──────────────────────────
 // Último valor pago, pela competência mais recente (não pela ordem de gravação no objeto —
 // mesmo cuidado do site: se um pagamento antigo foi lançado depois, Object.values() erra).
+// ── Vencimento da competência de NF ─────────────────────────────────────────
+// A Receita rejeita nota com competência FUTURA, e nosso sistema lança a competência como
+// a data de vencimento do mês de referência (é assim que tem que ser). Enquanto o
+// vencimento daquele mês não chegou, a nota não pode ser emitida ainda — mesmo que o aluno
+// já tenha pago adiantado. Sem isso, o aviso automático disparava na hora do pagamento
+// antecipado, e a tentativa de emitir era recusada pelo portal do governo.
+// Mesma regra do site (vencimentoCompetencia/competenciaJaVenceu) e mesmo clamp de dia
+// usado em emitir-nf.js — as três implementações têm que continuar idênticas.
+function vencimentoCompetenciaBot(a, mesChave) {
+  const dv = parseInt(a.dia_vencimento) || 10;
+  const p = mesChave.split('-');
+  const ano = parseInt(p[0]), mes = parseInt(p[1]);
+  const ultimoDia = new Date(ano, mes, 0).getDate();
+  const dia = Math.min(dv, ultimoDia);
+  const venc = new Date(ano, mes-1, dia);
+  venc.setHours(0,0,0,0);
+  return venc;
+}
+function competenciaJaVenceuBot(a, mesChave) {
+  const hoje = agoraBRT();
+  hoje.setHours(0,0,0,0);
+  return hoje >= vencimentoCompetenciaBot(a, mesChave);
+}
+
 function ultimoValorPagoBot(a) {
   const pags = typeof a.pagamentos === 'string' ? JSON.parse(a.pagamentos||'{}') : (a.pagamentos||{});
   const entradas = Object.entries(pags).filter(e => e[1] > 0).sort((x,y) => y[0].localeCompare(x[0]));
@@ -4768,6 +4874,10 @@ async function avisarNfSePendente(aluno, mes, valor) {
     let notas = aluno.notas_fiscais_emitidas;
     if (typeof notas === 'string') { try { notas = JSON.parse(notas||'{}'); } catch(e) { notas = {}; } }
     if (notas && notas[mes]) return; // já tem nota dessa competência — nada a perguntar
+    // Pagou adiantado — vencimento da competência ainda não chegou. Não é hora de perguntar
+    // ainda (a Receita recusaria); o aviso volta a valer sozinho assim que o dia chegar,
+    // via rotinaNotaFiscalPendente ou na próxima vez que este aluno pagar outro mês.
+    if (!competenciaJaVenceuBot(aluno, mes)) return;
     const [ano, mesNum] = mes.split('-');
     const primeiroNome = aluno.nome.split(' ')[0];
     await tgSend(TELEGRAM_CHAT_ID,
@@ -4792,6 +4902,7 @@ async function rotinaNotaFiscalPendente() {
       if (a.nfse_ativo !== 'SIM') return false;
       const pags = typeof a.pagamentos === 'string' ? JSON.parse(a.pagamentos||'{}') : (a.pagamentos||{});
       if (!(pags[mesAtual] > 0)) return false;
+      if (!competenciaJaVenceuBot(a, mesAtual)) return false; // mesma regra do site/avisarNfSePendente
       let n = a.notas_fiscais_emitidas;
       if (n) { try { if (typeof n === 'string') n = JSON.parse(n||'{}'); } catch(e) { n = {}; } }
       return !(n && n[mesAtual]);
