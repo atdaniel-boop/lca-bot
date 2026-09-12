@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.1 - Caso Claudia Marcia (renovação após rescisão): a busca por "qual renovação ancora o ciclo atual" usava o último mês pago como âncora, sem considerar que esse pagamento podia ser de ANTES de uma rescisão — gerava validade de plano e boletos com mês/vencimento errados. Corrigido e extraído pra função única compartilhada (encontrarRenovacaoAtual + cicloInicioDeRenovacao), eliminando duas cópias divergentes do mesmo algoritmo (inter_emitir_plano e inter_reenviar_boletos). De brinde: o reenvio também usava o dia em que a renovação foi digitada em vez do dia de vencimento como início do período.
+// Versão 15.2 - Três pedidos (12/09/2026): (1) novo card em Alertas detectando faltas seguidas (limite 3, contando no total de aulas do aluno, ignorando semanas sem check-in registrado, quebrado por reposição feita) com 3 modelos de mensagem de incentivo (não cobrança) que alternam por aluno+ano; (2) mensagem de aniversário também ganhou 3 modelos (ativo e inativo), mesma regra de alternância; (3) cor do vermelho de falta na grade da Agenda mais clara, pra melhorar legibilidade.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.1'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.2'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4018,19 +4018,44 @@ async function enviarAniversariantesHoje() {
       const telInfo = telNorm ? '📱 ' + telNorm + ' | ' + telFmt : '📵 sem telefone';
       const status = ativo ? '🟢 Ativa(o)' : '🔴 Inativa(o)';
 
+      // 3 modelos cada, pra não ficar repetitivo — mesma escolha estável usada no site
+      // (aluno+ano), pra quem olhar os dois lados ver mensagens coerentes.
+      const idxAniv = (a.id || 0) + hoje.getFullYear();
       let msg;
       if (ativo) {
-        msg = '🎂 Feliz aniversário, ' + nome1 + '!\n\n' +
-          'Que este novo ano de vida seja repleto de saúde, alegria e muita energia! ' +
-          'É uma alegria enorme tê-l' + ola + ' aqui no LCA, cuidando do seu corpo e da sua qualidade de vida com tanto carinho e dedicação.\n\n' +
-          'Que os próximos anos sejam cada vez mais leves - no movimento e no coração. 💛\n\n' +
-          'Com carinho, Equipe LCA Studio de Pilates';
+        const modelosAtivo = [
+          '🎂 Feliz aniversário, ' + nome1 + '!\n\n' +
+            'Que este novo ano de vida seja repleto de saúde, alegria e muita energia! ' +
+            'É uma alegria enorme tê-l' + ola + ' aqui no LCA, cuidando do seu corpo e da sua qualidade de vida com tanto carinho e dedicação.\n\n' +
+            'Que os próximos anos sejam cada vez mais leves - no movimento e no coração. 💛\n\n' +
+            'Com carinho, Equipe LCA Studio de Pilates',
+          '🎂 Parabéns, ' + nome1 + '! 🎉\n\n' +
+            'Hoje o dia é seu, e queremos celebrar junto com você! Que este novo ciclo venha cheio de saúde, leveza e boas energias - dentro e fora do tapete.\n\n' +
+            'Obrigada por fazer parte da nossa turma do LCA. É um prazer acompanhar sua evolução.\n\n' +
+            'Um abraço carinhoso, Equipe LCA Studio de Pilates',
+          '🎂 Feliz aniversário, ' + nome1 + '! 🌸\n\n' +
+            'Que seu novo ano venha repleto de conquistas, saúde e muitos motivos pra sorrir. Ter você aqui no LCA, cuidando de você com tanta dedicação, é um verdadeiro prazer pra gente.\n\n' +
+            'Que venham muitas aulas boas pela frente! 💪\n\n' +
+            'Com carinho, Equipe LCA Studio de Pilates'
+        ];
+        msg = modelosAtivo[idxAniv % modelosAtivo.length];
       } else {
-        msg = '🎂 Feliz aniversário, ' + nome1 + '!\n\n' +
-          'Que este novo ano de vida seja cheio de saúde e momentos especiais. ' +
-          'Você faz parte da história do LCA e a gente não esquece disso.\n\n' +
-          'E se um dia quiser voltar, será sempre ' + bem + '. 🌿\n\n' +
-          'Com carinho, Equipe LCA Studio de Pilates';
+        const modelosInativo = [
+          '🎂 Feliz aniversário, ' + nome1 + '!\n\n' +
+            'Que este novo ano de vida seja cheio de saúde e momentos especiais. ' +
+            'Você faz parte da história do LCA e a gente não esquece disso.\n\n' +
+            'E se um dia quiser voltar, será sempre ' + bem + '. 🌿\n\n' +
+            'Com carinho, Equipe LCA Studio de Pilates',
+          '🎂 Parabéns, ' + nome1 + '! 🎉\n\n' +
+            'Mesmo de longe, queremos desejar um ano novo cheio de saúde, alegria e boas surpresas. Você sempre vai fazer parte da nossa história aqui no LCA.\n\n' +
+            'Nossa porta está sempre aberta, quando quiser voltar. 🌿\n\n' +
+            'Um abraço, Equipe LCA Studio de Pilates',
+          '🎂 Feliz aniversário, ' + nome1 + '! 🌸\n\n' +
+            'Queremos deixar um carinho especial nesse seu dia - que venha cheio de saúde e coisas boas. Guardamos boas lembranças da sua passagem pelo LCA.\n\n' +
+            'Se bater a vontade de voltar pro tapete, será sempre ' + bem + '. 💛\n\n' +
+            'Com carinho, Equipe LCA Studio de Pilates'
+        ];
+        msg = modelosInativo[idxAniv % modelosInativo.length];
       }
 
       return '👤 *' + a.nome + '* - ' + status + '\n' + telInfo + '\n\n📋 *Mensagem para copiar:*\n```\n' + msg + '\n```';
