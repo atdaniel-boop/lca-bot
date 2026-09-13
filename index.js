@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.2 - Três pedidos (12/09/2026): (1) novo card em Alertas detectando faltas seguidas (limite 3, contando no total de aulas do aluno, ignorando semanas sem check-in registrado, quebrado por reposição feita) com 3 modelos de mensagem de incentivo (não cobrança) que alternam por aluno+ano; (2) mensagem de aniversário também ganhou 3 modelos (ativo e inativo), mesma regra de alternância; (3) cor do vermelho de falta na grade da Agenda mais clara, pra melhorar legibilidade.
+// Versão 15.4 - Corrigido o boleto vindo com nome de arquivo errado ao ser emitido (mas certo ao reenviar). Causa: quatro pontos mandavam PDF de boleto pro Telegram (emitir plano, emitir avulso, cobrança excepcional, reenvio automático da fila) e só o reenvio usava o método confiável (download direto em base64 - ver v12.29, que já registrava que buscar pelo link é pouco confiável logo após a emissão). Consolidado num único helper (buscarEEnviarPdfBoleto), usado agora pelos quatro pontos - elimina a divergência que causava o comportamento inconsistente.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.2'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.4'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -713,6 +713,49 @@ async function tgSendPDF(chatId, pdfUrl, filename, caption, meta) {
     r.end();
   });
 }
+
+// BUG CORRIGIDO (relatado em 12/09/2026 — "boleto emitido vem com nome de arquivo errado"):
+// existiam TRÊS pontos mandando PDF de boleto pro Telegram (emitir plano, emitir avulso,
+// reenvio automático da fila), e só o reenvio usava o método confiável. A correção v12.29
+// já tinha registrado isso: buscar o PDF pelo link (tgSendPDF, download por URL) é pouco
+// confiável logo após a emissão — o documento por trás do link pode não estar pronto ainda,
+// e o que quer que seja baixado nesse meio-tempo é enviado com metadado errado pro Telegram.
+// O download direto em base64 (endpoint /pdf) sempre funcionou bem, mas só o reenvio o usava.
+// Agora os três pontos passam por aqui — um só lugar, em vez de três cópias podendo divergir
+// de novo (foi exatamente esse tipo de duplicação que causou o bug da Claudia Marcia).
+// Devolve true se conseguiu enviar (por qualquer um dos dois métodos), false se nenhum
+// funcionou ainda (o chamador decide o que fazer — normalmente agendar um reenvio depois).
+async function buscarEEnviarPdfBoleto(chatId, codigoSolicitacao, linkInicial, nomeArq, caption, meta) {
+  let link = linkInicial || '';
+  let pdfBuffer = null;
+  try {
+    const token = await interGetToken('boleto-cobranca.read');
+    const pdfResp = await interReq('/cobranca/v3/cobrancas/' + codigoSolicitacao + '/pdf', 'GET', null, token);
+    const pdfBase64 = pdfResp?.data?.pdf || pdfResp?.pdf ||
+      (typeof pdfResp?.data === 'string' && pdfResp.data.length > 500 ? pdfResp.data : null) ||
+      (typeof pdfResp === 'string' && pdfResp.length > 500 ? pdfResp : null);
+    if (pdfBase64) pdfBuffer = Buffer.from(pdfBase64, 'base64');
+  } catch(ePdfDireto) { console.warn('[pdf-boleto] download direto (base64) falhou:', ePdfDireto.message); }
+
+  if (!pdfBuffer && !link) {
+    try {
+      const token2 = await interGetToken('boleto-cobranca.read');
+      const rBol = await interReq('/cobranca/v3/cobrancas/' + codigoSolicitacao, 'GET', null, token2);
+      link = rBol?.data?.linkVisualizacaoBoleto || rBol?.data?.link || '';
+    } catch(eLinkBol) { console.warn('[pdf-boleto] busca de link falhou:', eLinkBol.message); }
+  }
+
+  if (pdfBuffer) {
+    await tgSendPDFBuffer(chatId, pdfBuffer, nomeArq, caption, meta);
+    return true;
+  }
+  if (link) {
+    await tgSendPDF(chatId, link, nomeArq, caption, meta);
+    return true;
+  }
+  return false;
+}
+
 // ── Polling ──────────────────────────────────────────────────────────────────────
 function tgUpdates(offset) {
   return req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=' + offset + '&timeout=25', 'GET', {}, null, 35000);
@@ -2619,15 +2662,22 @@ async function executar(intencao, p, dados, chatId) {
         const anoAvulso = mesVencAvulso.slice(0,4);
         const nomeArq = 'Boleto - ' + aluno.nome.split(' ')[0] + ' - ' + mesNomeAvulso + ' ' + anoAvulso + '.pdf';
         const caption = '✅ *Boleto emitido!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorBoleto) + '\n📅 Vencimento: ' + venc.split('-').reverse().join('/') + '\n🔑 Código: ' + cod;
-        if (link) {
-          try {
-            await tgSendPDF(chatId, link, nomeArq, caption, {alunoId: aluno.id, mes: chaveAvulso});
-            return null; // já enviou o arquivo
-          } catch(ePdf) {
-            console.error('[PDF avulso]', ePdf.message);
-          }
-        }
+        try {
+          const enviado = await buscarEEnviarPdfBoleto(chatId, cod, link, nomeArq, caption, {alunoId: aluno.id, mes: chaveAvulso});
+          if (enviado) return null; // já enviou o arquivo
+        } catch(ePdf) { console.error('[PDF avulso]', ePdf.message); }
+        // PDF ainda não disponível por nenhum dos dois métodos — agendar reenvio automático,
+        // mesma proteção que já existia pra emissão de plano (antes, o avulso simplesmente
+        // desistia e mandava só o link, sem tentar de novo depois).
+        try {
+          await sbPost('fila_boletos', {
+            aluno_id: aluno.id, aluno_nome: aluno.nome,
+            acao: 'reenviar_pdf', codigo_solicitacao: cod, mes: chaveAvulso,
+            chat_id: chatId, criado_em: new Date().toISOString(), status: 'pendente'
+          });
+        } catch(eFilaAv) { console.error('[PDF avulso] erro ao agendar reenvio:', eFilaAv.message); }
         return caption + (link ? '\n\n[Visualizar boleto](' + link + ')' : '') +
+          '\n\n⏳ PDF ainda gerando — reenvio automático agendado.' +
           '\n\n_Use "confirmar pagamento ' + aluno.nome.split(' ')[0] + '" quando pagar._';
       }
       return '⚠️ Resposta: ' + JSON.stringify(result).slice(0,200);
@@ -2703,10 +2753,10 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       const link = res?.linkVisualizacaoBoleto || res?.link || '';
       const cabec = '🧾 *Cobrança excepcional - ' + aluno.nome.split(' ')[0] + '*\n' +
                     '📝 ' + descricao + '\n💰 ' + brl(valor) + ' | vence ' + fmtData2(vencimento);
-      if (link) {
+      if (res?.codigoSolicitacao) {
         try {
-          await tgSendPDF(chatId, link, 'Cobranca - ' + aluno.nome.split(' ')[0] + '.pdf', cabec, {alunoId: aluno.id, mes: chaveExc});
-          return null;
+          const enviado = await buscarEEnviarPdfBoleto(chatId, res.codigoSolicitacao, link, 'Cobranca - ' + aluno.nome.split(' ')[0] + '.pdf', cabec, {alunoId: aluno.id, mes: chaveExc});
+          if (enviado) return null;
         } catch(ePdf) {
           return cabec + '\n[ver boleto](' + link + ')';
         }
@@ -2875,27 +2925,35 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     ]);
     const mesesPulados = [];
 
+    // BUG CORRIGIDO (caso Claudia Marcia, 12/09/2026): esta função ia direto pro Inter emitir
+    // boletos reais, sem NENHUM passo de revisão humana — foi assim que a validade e o
+    // vencimento errados viraram boletos de verdade antes de alguém perceber. Agora o cálculo
+    // de "quais meses emitir, com que vencimento" é feito UMA VEZ (mesesAEmitir, abaixo) e
+    // reaproveitado tanto pra mostrar a prévia quanto pra emitir de fato — evita duas versões
+    // da mesma conta divergindo (foi exatamente esse tipo de duplicação que causou o bug da
+    // Claudia em primeiro lugar, em encontrarRenovacaoAtual/cicloInicioDeRenovacao).
+    const mesesAEmitir = [];
     for (let i = 0; i < dur; i++) {
-      let dtVenc  = new Date(anoBase, mesBase + i, diaVenc);
-      // mês de referência ORIGINAL (para chave/seuNumero únicos, mesmo se a data for remapeada)
       const dtOriginal = new Date(anoBase, mesBase + i, diaVenc);
-      const mesStr  = dtOriginal.getFullYear() + '-' + String(dtOriginal.getMonth()+1).padStart(2,'0');
-
-      // Pular meses já cobertos (pago ou boleto já emitido)
+      const mesStr = dtOriginal.getFullYear() + '-' + String(dtOriginal.getMonth()+1).padStart(2,'0');
       if (mesesJaCobertos.has(mesStr)) {
         mesesPulados.push(mesStr);
-        console.log('[PLANO] Pulando ' + mesStr + ' — já coberto (pago ou boleto pendente)');
         continue;
       }
       // Se a data de vencimento já passou, usar hoje + 2 dias (Inter recusa data retroativa)
-      const hojeDate = new Date(); hojeDate.setHours(0,0,0,0);
-      if (dtVenc < hojeDate) {
-        dtVenc = new Date(hojeDate.getTime() + 2*24*60*60*1000);
-        console.log('[PLANO] Boleto ' + (i+1) + ': venc original ' + dtOriginal.toISOString().slice(0,10) + ' já passou - usando ' + dtVenc.toISOString().slice(0,10));
-      }
-      const anoVenc = dtVenc.getFullYear();
-      const mesNome = MESES_PT[dtOriginal.getMonth()];
-      const numBoleto = i + 1;
+      let dtVenc = new Date(anoBase, mesBase + i, diaVenc);
+      const hojeDate0 = new Date(); hojeDate0.setHours(0,0,0,0);
+      if (dtVenc < hojeDate0) dtVenc = new Date(hojeDate0.getTime() + 2*24*60*60*1000);
+      mesesAEmitir.push({
+        numBoleto: i + 1, mesStr, dtVenc, dtOriginal,
+        anoVenc: dtVenc.getFullYear(), mesNome: MESES_PT[dtOriginal.getMonth()]
+      });
+    }
+
+    // Emite direto — cálculo de mesesAEmitir feito uma única vez acima (evita duas versões
+    // divergentes da mesma conta, que foi a causa raiz do bug da Claudia Marcia).
+    for (let idx = 0; idx < mesesAEmitir.length; idx++) {
+      const { mesStr, dtVenc, dtOriginal, anoVenc, mesNome, numBoleto } = mesesAEmitir[idx];
 
       const descricao =
         'Validade do Plano: ' + periodoPlano + ' ' +
@@ -2924,7 +2982,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
             'o banco recusou os dados';
           resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - ❌ ' + String(motivo).slice(0,80));
           erros++;
-          if (i < dur - 1) await new Promise(r => setTimeout(r, 800));
+          if (idx < mesesAEmitir.length - 1) await new Promise(r => setTimeout(r, 800));
           continue;
         }
         const cod  = result?.codigoSolicitacao || result?.nossoNumero || '?';
@@ -2956,26 +3014,20 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         } catch(ePend) { console.error('[emitir_plano] erro ao gravar pendente:', ePend.message); }
         // Enviar PDF com nome correto
         const nomeArq = 'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc + ' - ' + aluno.nome.split(' ')[0] + '.pdf';
-        // Se ainda sem link, tentar buscar novamente com delay maior antes de desistir
-        if (!link && cod !== '?') {
-          try {
-            await new Promise(r => setTimeout(r, 2500));
-            const token2 = await interGetToken('boleto-cobranca.read');
-            const rBol2 = await interReq('/cobranca/v3/cobrancas/' + cod, 'GET', null, token2);
-            link = rBol2?.data?.linkVisualizacaoBoleto || rBol2?.data?.link || '';
-          } catch(eLink2) { console.warn('[PDF plano ' + numBoleto + '] 2ª tentativa de link falhou:', eLink2.message); }
+        let pdfEnviado = false;
+        try {
+          pdfEnviado = await buscarEEnviarPdfBoleto(
+            chatId, cod, link, nomeArq,
+            '📄 Boleto ' + numBoleto + '/' + dur + ' - ' + mesNome + ' ' + anoVenc + ' | vence ' + fmtData(dtVenc) + ' | ' + brl(valor),
+            {alunoId: aluno.id, mes: mesStr}
+          );
+          if (pdfEnviado) resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ✅ PDF enviado acima');
+        } catch(ePdf) {
+          console.error('[PDF plano ' + numBoleto + ']', ePdf.message);
+          resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ⚠️ PDF falhou' + (link ? ', [ver boleto](' + link + ')' : ''));
+          pdfEnviado = true; // já registrou o erro acima — não cair também no "reenvio agendado" abaixo
         }
-        if (link) {
-          try {
-            await tgSendPDF(chatId,link, nomeArq,
-              '📄 Boleto ' + numBoleto + '/' + dur + ' - ' + mesNome + ' ' + anoVenc + ' | vence ' + fmtData(dtVenc) + ' | ' + brl(valor),
-              {alunoId: aluno.id, mes: mesStr});
-            resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ✅ PDF enviado acima');
-          } catch(ePdf) {
-            console.error('[PDF plano ' + numBoleto + ']', ePdf.message);
-            resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ⚠️ PDF falhou, [ver boleto](' + link + ')');
-          }
-        } else {
+        if (!pdfEnviado) {
           resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - vence ' + fmtData(dtVenc) + ' - ⏳ PDF ainda gerando, reenvio automático agendado');
           // Agendar reenvio automático via fila (processada a cada 2 min)
           try {
@@ -2999,13 +3051,13 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
         resultados.push(numBoleto + '. *' + mesNome + ' ' + anoVenc + '* - ❌ ' + e.message.slice(0,60));
         erros++;
       }
-      if (i < dur - 1) await new Promise(r => setTimeout(r, 800));
+      if (idx < mesesAEmitir.length - 1) await new Promise(r => setTimeout(r, 800));
     }
 
-    const status = erros === 0 ? '✅' : erros === dur ? '❌' : '⚠️';
+    const status = erros === 0 ? '✅' : erros === mesesAEmitir.length ? '❌' : '⚠️';
     // Registrar a renovação no histórico apenas se NÃO havia uma já cobrindo este período
     // (evita duplicar quando o comando apenas completa a emissão de uma renovação existente)
-    if (erros < dur && !renovacaoExistente) {
+    if (erros < mesesAEmitir.length && !renovacaoExistente) {
       try {
         const rAlH = await sbGet('alunos', 'select=historico_alteracoes&id=eq.' + aluno.id);
         const alH = (Array.isArray(rAlH) ? rAlH[0] : rAlH?.data?.[0]) || {};
@@ -3023,7 +3075,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       } catch(eHist) { console.error('[emitir_plano] erro ao registrar renovacao no historico:', eHist.message); }
     }
 
-    const boletosEmitidos = dur - mesesPulados.length;
+    const boletosEmitidos = mesesAEmitir.length - erros;
     const resumo = status + ' *Plano ' + planoLabel + ' - ' + aluno.nome.split(' ')[0] + '*\n' +
       '📋 ' + periodoPlano + '\n💰 ' + brl(valor) + '/mês × ' + boletosEmitidos + ' boleto(s)' +
       (mesesPulados.length ? '\n⏭️ Pulados (' + mesesPulados.length + ' já cobertos): ' + mesesPulados.join(', ') : '') +
@@ -3142,38 +3194,18 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       let enviados = 0;
       for (const b of boletos) {
         try {
-          let link = b.linkVisualizacaoBoleto || '';
-          if (!link && b.codigo_solicitacao) {
-            const token = await interGetToken('boleto-cobranca.read');
-            // Tentar buscar PDF diretamente
-            const pdfResp = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao + '/pdf', 'GET', null, token);
-            // O Inter retorna o PDF em base64 no campo 'pdf' ou diretamente como string
-            const pdfBase64 = pdfResp?.data?.pdf || pdfResp?.pdf ||
-              (typeof pdfResp?.data === 'string' && pdfResp.data.length > 500 ? pdfResp.data : null) ||
-              (typeof pdfResp === 'string' && pdfResp.length > 500 ? pdfResp : null);
-            if (pdfBase64) {
-              link = 'data:application/pdf;base64,' + pdfBase64;
-            } else {
-              const det = await interReq('/cobranca/v3/cobrancas/' + b.codigo_solicitacao, 'GET', null, token);
-              const cob = det?.cobranca || det?.data?.cobranca || det?.data || det;
-              link = cob?.linkVisualizacaoBoleto || cob?.link || cob?.linkBoleto ||
-                     det?.linkVisualizacaoBoleto || det?.link || '';
-            }
-          }
           const mesNome = MESES_PT2[parseInt((b.mes||'').slice(5,7))-1] || b.mes;
           const vencFmt = (b.vencimento||'').split('-').reverse().join('/');
           const nomeArq = 'Boleto - ' + mesNome + ' - ' + aluno.nome.split(' ')[0] + '.pdf';
           const caption = '📄 *' + mesNome + '* | vence ' + vencFmt + ' | ' + brl(b.valor||0);
-          if (link) {
-            if (link.startsWith('data:application/pdf;base64,')) {
-              const pdfBuffer = Buffer.from(link.replace('data:application/pdf;base64,', ''), 'base64');
-              await tgSendPDFBuffer(chatId, pdfBuffer, nomeArq, caption, {alunoId: aluno.id, mes: b.mes});
-            } else {
-              await tgSendPDF(chatId, link, nomeArq, caption, {alunoId: aluno.id, mes: b.mes});
-            }
+          // Mesmo helper usado na emissão (bot_parte1.js) — antes esta função já tentava
+          // base64-antes-de-link por conta própria (era por isso que "reenviar boletos"
+          // sempre funcionava, diferente da emissão); agora usa a versão compartilhada.
+          const enviado = await buscarEEnviarPdfBoleto(chatId, b.codigo_solicitacao, b.linkVisualizacaoBoleto || '', nomeArq, caption, {alunoId: aluno.id, mes: b.mes});
+          if (enviado) {
             enviados++;
           } else {
-            await tgSend(chatId, '⚠️ ' + mesNome + ': link não disponível');
+            await tgSend(chatId, '⚠️ ' + mesNome + ': PDF não disponível ainda');
           }
           if (boletos.length > 1) await new Promise(r => setTimeout(r, 600));
         } catch(eBol) {
@@ -4132,35 +4164,21 @@ async function processarFilaBoletos() {
               continue;
             }
             const link0 = cob?.linkVisualizacaoBoleto || cob?.link || det?.linkVisualizacaoBoleto || det?.link || '';
-            let link = link0;
-            let pdfBufferR = null;
-            // BUG CORRIGIDO v12.29: o retry automático só tentava linkVisualizacaoBoleto
-            // (que demora/nunca aparece pra boletos recém-emitidos), diferente do comando
-            // manual "reenviar boletos" que também tenta baixar o PDF em base64 direto do
-            // endpoint /pdf — e é essa 2ª forma que sempre funcionava. Agora o automático
-            // tenta as mesmas duas formas antes de desistir.
-            if (!link) {
-              try {
-                const pdfResp = await interReq('/cobranca/v3/cobrancas/' + pedido.codigo_solicitacao + '/pdf', 'GET', null, token);
-                const pdfBase64 = pdfResp?.data?.pdf || pdfResp?.pdf ||
-                  (typeof pdfResp?.data === 'string' && pdfResp.data.length > 500 ? pdfResp.data : null) ||
-                  (typeof pdfResp === 'string' && pdfResp.length > 500 ? pdfResp : null);
-                if (pdfBase64) pdfBufferR = Buffer.from(pdfBase64, 'base64');
-              } catch (ePdfDireto) { console.warn('[fila_boletos] PDF direto ainda não disponível:', ePdfDireto.message); }
-            }
-            if (link || pdfBufferR) {
-              const mesNomeR = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt((pedido.mes||'').slice(5,7))-1] || pedido.mes;
-              const nomeArqR = 'Boleto - ' + mesNomeR + ' - ' + (pedido.aluno_nome||'').split(' ')[0] + '.pdf';
-              const captionR = '📄 Boleto ' + mesNomeR + ' - ' + (pedido.aluno_nome||'') + ' (reenvio automático)';
-              if (pdfBufferR) {
-                await tgSendPDFBuffer(pedido.chat_id || TELEGRAM_CHAT_ID, pdfBufferR, nomeArqR, captionR, {alunoId: pedido.aluno_id, mes: pedido.mes});
-              } else {
-                await tgSendPDF(pedido.chat_id || TELEGRAM_CHAT_ID, link, nomeArqR, captionR, {alunoId: pedido.aluno_id, mes: pedido.mes});
-              }
+            // Mesmo helper usado na emissão de plano e no boleto avulso (buscarEEnviarPdfBoleto,
+            // bot_parte1.js) — antes eram três cópias, e só esta (o reenvio) tentava o download
+            // direto em base64, o método comprovadamente confiável. Ver correção v12.29.
+            const mesNomeR = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][parseInt((pedido.mes||'').slice(5,7))-1] || pedido.mes;
+            const nomeArqR = 'Boleto - ' + mesNomeR + ' - ' + (pedido.aluno_nome||'').split(' ')[0] + '.pdf';
+            const captionR = '📄 Boleto ' + mesNomeR + ' - ' + (pedido.aluno_nome||'') + ' (reenvio automático)';
+            const enviado = await buscarEEnviarPdfBoleto(
+              pedido.chat_id || TELEGRAM_CHAT_ID, pedido.codigo_solicitacao, link0, nomeArqR, captionR,
+              {alunoId: pedido.aluno_id, mes: pedido.mes}
+            );
+            if (enviado) {
               await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: 'PDF reenviado' });
               console.log('[fila_boletos] PDF reenviado com sucesso:', pedido.codigo_solicitacao);
             } else {
-              // Ainda sem link — reagendar mais uma vez (até 5 tentativas via campo obs como contador)
+              // Ainda sem link nem PDF — reagendar mais uma vez (até 5 tentativas via campo obs como contador)
               const tentativas = parseInt(pedido.obs || '0') + 1;
               if (tentativas < 5) {
                 await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'pendente', obs: String(tentativas) });
@@ -5193,6 +5211,17 @@ async function rotinaConciliacaoDiaria() {
     const mesAtualStr = new Date(Date.now() - 3*3600*1000).toISOString().slice(0,7);
     const divergencias = [];
 
+    // BUG/LACUNA ENCONTRADA (caso Claudia Marcia, 12/09/2026): quando um boleto é cancelado
+    // MANUALMENTE direto no Inter (fora do bot — ex: pra corrigir um boleto emitido com dado
+    // errado), nosso banco nunca fica sabendo sozinho: a linha em 'boletos' continua com
+    // status='aberto' pra sempre, a menos que alguém lembre de rodar SQL manual (foi
+    // exatamente o que aconteceu). As checagens abaixo já cobriam pago-vs-não-creditado;
+    // esta cobre especificamente ABERTO-NO-NOSSO-BANCO-MAS-CANCELADO-NO-INTER, e corrige
+    // sozinho quando encontra (é só um status interno — não mexe em dinheiro nenhum).
+    const rBoletosAbertos = await sbGet('boletos', 'status=eq.aberto&select=id,aluno_id,mes,codigo_solicitacao');
+    const boletosAbertosLocal = Array.isArray(rBoletosAbertos) ? rBoletosAbertos : [];
+    const porCodigo = new Map(boletosAbertosLocal.filter(b => b.codigo_solicitacao).map(b => [b.codigo_solicitacao, b]));
+
     for (const item of cobrancas) {
       const bc = item.cobranca || item;
       const psn = parseSeuNumero(bc.seuNumero);
@@ -5210,12 +5239,22 @@ async function rotinaConciliacaoDiaria() {
       if ((sit === 'A_RECEBER' || sit === 'ATRASADO') && pagoLocal) {
         divergencias.push('🔻 ' + aluno.nome.split(' ').slice(0,2).join(' ') + ' ' + mes + ': marcado pago no sistema, mas boleto ainda ABERTO no Inter (' + brl(parseFloat(bc.valorNominal||0)) + ')');
       }
+      // Novo: cancelado de verdade no Inter, mas nosso banco ainda acha que está aberto.
+      if (sit === 'CANCELADO' && bc.codigoSolicitacao && porCodigo.has(bc.codigoSolicitacao)) {
+        const bLocal = porCodigo.get(bc.codigoSolicitacao);
+        try {
+          await sbPatch('boletos', 'id=eq.' + bLocal.id, { status: 'cancelado', cancelado_em: new Date().toISOString() });
+          divergencias.push('🧹 ' + aluno.nome.split(' ').slice(0,2).join(' ') + ' ' + mes + ': cancelado no Inter, mas continuava "aberto" no sistema — corrigido automaticamente.');
+        } catch(eFix) {
+          divergencias.push('⚠️ ' + aluno.nome.split(' ').slice(0,2).join(' ') + ' ' + mes + ': cancelado no Inter, mas continua "aberto" no sistema, e não consegui corrigir sozinho (' + eFix.message.slice(0,60) + ') — corrija manualmente.');
+        }
+      }
     }
     if (divergencias.length) {
       await tgSend(TELEGRAM_CHAT_ID,
         '🔍 *Conciliação diária Inter × Sistema*\n\n' +
         divergencias.slice(0,15).join('\n') + (divergencias.length>15 ? '\n_... +' + (divergencias.length-15) + ' divergência(s)_' : '') +
-        '\n\n_Nada foi alterado automaticamente — confira cada caso. Boleto aberto p/ mês pago por outro meio: "cancelar boleto NOME MES"._');
+        '\n\n_Nada foi alterado automaticamente, exceto a correção de status 🧹 acima — confira os outros casos. Boleto aberto p/ mês pago por outro meio: "cancelar boleto NOME MES".');
     }
     console.log('[conciliacao] divergências:', divergencias.length);
   } catch(e) { console.error('[conciliacao] erro:', e.message); }
