@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.4 - Corrigido o boleto vindo com nome de arquivo errado ao ser emitido (mas certo ao reenviar). Causa: quatro pontos mandavam PDF de boleto pro Telegram (emitir plano, emitir avulso, cobrança excepcional, reenvio automático da fila) e só o reenvio usava o método confiável (download direto em base64 - ver v12.29, que já registrava que buscar pelo link é pouco confiável logo após a emissão). Consolidado num único helper (buscarEEnviarPdfBoleto), usado agora pelos quatro pontos - elimina a divergência que causava o comportamento inconsistente.
+// Versão 15.6 - Corrigida mensagem de falso sucesso no cancelamento de boleto via Pix: dizia "cancelado no Inter automaticamente" sempre que um boleto correspondente era encontrado, mesmo quando a tentativa de cancelamento falhava de verdade (confirmado no app do Inter: "Cobrança com falha no cancelamento", boleto continuou A receber). Agora avisa claramente quando falha, com o código da cobrança pra cancelamento manual.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.4'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.6'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4433,8 +4433,20 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       try {
         pags[mesCredito] = valor;
         const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
-        const tinhaPend = (pend[mesCredito]||0) > 0;
+        // BUG CORRIGIDO (caso Daniel, 15/09/2026): só limpava a chave exata "YYYY-MM" — nunca
+        // as chaves de boleto avulso/cobrança excepcional (formato "YYYY-MM-av<timestamp>" ou
+        // "YYYY-MM-exc..."). O Pix creditava certinho, o boleto real era cancelado no Inter,
+        // mas a pendência do avulso continuava aparecendo como "aguardando" na ficha pra
+        // sempre — o pagamento foi resolvido em outro lugar do sistema, não onde a tela olha.
+        // Como o sufixo (timestamp) é imprevisível, casa por PREFIXO do mês + MESMO VALOR.
+        let tinhaPend = (pend[mesCredito]||0) > 0;
         if (tinhaPend) delete pend[mesCredito];
+        Object.keys(pend).forEach(k => {
+          if (k !== mesCredito && k.startsWith(mesCredito + '-') && Math.abs((pend[k]||0) - valor) < 0.01) {
+            delete pend[k];
+            tinhaPend = true;
+          }
+        });
         const hist = aluno.historico_alteracoes || [];
         hist.push({ data: hojeBR.toLocaleDateString('pt-BR'), tipo: 'pagamento',
           desc: 'Pagamento ' + mesCredito + ' via Pix Inter (detectado no extrato): ' + brl(valor) });
@@ -4462,7 +4474,16 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
         // (evita boleto ficar aberto/atrasado no Inter quando o aluno já pagou via Pix)
         let boletoCancelMsg = '';
         try {
-          const rBolPix = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&mes=eq.' + mesCredito + '&status=eq.aberto&select=id,codigo_solicitacao');
+          // BUG CORRIGIDO (caso Daniel, 15/09/2026): buscava só mes=eq.mesCredito — nunca achava
+          // um boleto avulso/excepcional local (mes='YYYY-MM-av...'), então sempre caía no
+          // fallback "só existe no Inter" e criava um registro NOVO em vez de atualizar o
+          // original — o boleto real ficava corretamente cancelado no Inter, mas nossa tabela
+          // local acumulava um registro fantasma duplicado, e o original nunca era atualizado.
+          // Busca todos os "aberto" do aluno e filtra por prefixo do mês aqui — evita depender
+          // de sintaxe like/ilike do PostgREST, que nunca foi testada contra o Supabase real.
+          const rBolPixTodos = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.aberto&select=id,codigo_solicitacao,mes');
+          const bolsPixTodos = Array.isArray(rBolPixTodos) ? rBolPixTodos : (rBolPixTodos?.data || []);
+          const rBolPix = bolsPixTodos.filter(b => b.mes === mesCredito || (b.mes||'').startsWith(mesCredito + '-'));
           let bolsPix = Array.isArray(rBolPix) ? rBolPix : (rBolPix?.data || []);
           // BUG CORRIGIDO v14.10: se o aluno não tem NENHUM registro na nossa tabela local de
           // boletos (caso de alunos legados, cujos boletos nunca foram sincronizados pro banco —
@@ -4492,6 +4513,13 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
             } catch(eBuscaInter) { console.error('[rotina-pix] erro ao buscar boleto no Inter:', eBuscaInter.message); }
           }
           const todosBols = [...bolsPix, ...bolsInterPix];
+          // BUG CORRIGIDO (caso Daniel Amorim Teixeira, 15/09/2026): a mensagem final dizia
+          // "cancelado no Inter automaticamente" sempre que um boleto correspondente era
+          // ACHADO — mesmo quando interCancelarBoleto() falhava de verdade (Inter confirmou:
+          // "Cobrança com falha no cancelamento", boleto continuou "A receber"). O status
+          // cancelouNoInter já existia por boleto, só nunca era usado pra montar a mensagem —
+          // ela olhava só se algo tinha sido encontrado, nunca se o cancelamento deu certo.
+          const cancelados = [], falharam = [];
           for (const b of todosBols) {
             if (!b.codigo_solicitacao) continue;
             let cancelouNoInter = true;
@@ -4504,6 +4532,7 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
                 console.error('[rotina-pix] falha ao cancelar no Inter, marcando status mesmo assim:', b.codigo_solicitacao, eCancPix.message);
               }
             }
+            (cancelouNoInter ? cancelados : falharam).push(b.codigo_solicitacao);
             // Sempre registrar o status — mesmo se o cancelamento no Inter falhar, o dashboard
             // não deve continuar contando como "a receber" um mês já pago. Se o boleto só
             // existia no Inter (sem id local), cria o registro em vez de tentar atualizar.
@@ -4520,7 +4549,10 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
               });
             }
           }
-          if (todosBols.length) {
+          if (falharam.length) {
+            boletoCancelMsg = '\n⚠️ *ATENÇÃO: o boleto correspondente NÃO foi cancelado no Inter* (a tentativa falhou) — ele continua "A receber" lá, mesmo já pago aqui. Cancele manualmente no app do Inter. Código(s): ' + falharam.join(', ') +
+              (cancelados.length ? '\n🏦 Outro(s) boleto(s) foram cancelados normalmente: ' + cancelados.join(', ') : '');
+          } else if (todosBols.length) {
             boletoCancelMsg = '\n🏦 Boleto correspondente cancelado no Inter automaticamente.';
           } else {
             boletoCancelMsg = '\n⚠️ Não encontrei nenhum boleto aberto/atrasado correspondente (nem local, nem no Inter) — confira manualmente se existe um boleto pra cancelar.';
