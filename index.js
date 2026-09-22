@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.6 - Corrigida mensagem de falso sucesso no cancelamento de boleto via Pix: dizia "cancelado no Inter automaticamente" sempre que um boleto correspondente era encontrado, mesmo quando a tentativa de cancelamento falhava de verdade (confirmado no app do Inter: "Cobrança com falha no cancelamento", boleto continuou A receber). Agora avisa claramente quando falha, com o código da cobrança pra cancelamento manual.
+// Versão 15.8 - Nome de arquivo de documento (boleto, backup) permite espaço — antes o sanitizador convertia qualquer espaço em "_" (ex: "Boleto_1_-_Outubro_2026_-_Lenita.pdf"), mais restritivo do que o Telegram exige. Agora só bloqueia o que quebraria o cabeçalho de envio de verdade (aspas, barra, contrabarra, quebra de linha).
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.6'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.8'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -628,7 +628,13 @@ async function tgSend(chatId, text) {
 async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption, meta) {
   if (meta && meta.alunoId && meta.mes) sbStorageUpload(meta.alunoId, meta.mes, pdfBuffer);
   const boundary = '----TGBoundary' + Date.now();
-  const safeFilename = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+    // Pedido do usuário (19/09/2026): o nome mostrado no Telegram vinha com espaço virando
+  // "_" (ex: "Boleto_1_-_Outubro_2026_-_Lenita.pdf") porque o sanitizador original só
+  // permitia letra/número/_/-/. — mais restritivo do que precisa: o Telegram aceita espaço e
+  // parênteses tranquilamente no nome do documento. Só precisa excluir o que quebraria o
+  // cabeçalho Content-Disposition de verdade: aspas, barra, contrabarra e caracteres de
+  // controle (quebra de linha etc.) — não espaço.
+  const safeFilename = filename.replace(/[^a-zA-Z0-9 _\-\.()]/g, '_');
   const parts = [
     '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
     '--' + boundary + '\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown',
@@ -677,11 +683,26 @@ async function tgSendPDF(chatId, pdfUrl, filename, caption, meta) {
       res.on('end', () => resolve(Buffer.concat(chunks)));
     }).on('error', reject).on('timeout', () => reject(new Error('timeout baixando PDF')));
   });
+  // BUG CORRIGIDO (18/09/2026 — mesma causa do problema de nome estranho no boleto):
+  // baixava e mandava pro Telegram sem checar se o conteúdo era mesmo um PDF válido. Se o
+  // link do Inter respondesse com algo pequeno/incompleto (o documento ainda gerando, por
+  // exemplo), isso ia pro Telegram do mesmo jeito — sem erro nenhum, só com o arquivo
+  // errado. Agora exige tamanho mínimo e o cabeçalho %PDF antes de seguir; se não bater,
+  // trata como "ainda não disponível" (o chamador cai pro reenvio automático agendado).
+  if (pdfBuffer.length < 500 || pdfBuffer.slice(0,5).toString('latin1') !== '%PDF-') {
+    throw new Error('conteúdo baixado do link não parece um PDF válido (tamanho: ' + pdfBuffer.length + ' bytes)');
+  }
   if (meta && meta.alunoId && meta.mes) sbStorageUpload(meta.alunoId, meta.mes, pdfBuffer);
 
   // Enviar via multipart/form-data para o Telegram
   const boundary = '----TGBoundary' + Date.now();
-  const safeFilename = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+    // Pedido do usuário (19/09/2026): o nome mostrado no Telegram vinha com espaço virando
+  // "_" (ex: "Boleto_1_-_Outubro_2026_-_Lenita.pdf") porque o sanitizador original só
+  // permitia letra/número/_/-/. — mais restritivo do que precisa: o Telegram aceita espaço e
+  // parênteses tranquilamente no nome do documento. Só precisa excluir o que quebraria o
+  // cabeçalho Content-Disposition de verdade: aspas, barra, contrabarra e caracteres de
+  // controle (quebra de linha etc.) — não espaço.
+  const safeFilename = filename.replace(/[^a-zA-Z0-9 _\-\.()]/g, '_');
 
   const parts = [
     '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
@@ -731,7 +752,21 @@ async function buscarEEnviarPdfBoleto(chatId, codigoSolicitacao, linkInicial, no
   try {
     const token = await interGetToken('boleto-cobranca.read');
     const pdfResp = await interReq('/cobranca/v3/cobrancas/' + codigoSolicitacao + '/pdf', 'GET', null, token);
-    const pdfBase64 = pdfResp?.data?.pdf || pdfResp?.pdf ||
+    // BUG CORRIGIDO (18/09/2026 — "primeiro boleto de cliente novo vem com nome estranho,
+    // reenviar às vezes também falha na primeira tentativa"): só os dois caminhos de
+    // fallback (pdfResp.data como string / pdfResp como string) tinham checagem de tamanho
+    // mínimo (> 500) — os dois caminhos PRINCIPAIS (pdfResp.data.pdf / pdfResp.pdf) não
+    // tinham nenhuma. Se o Inter devolver um conteúdo pequeno (um placeholder de "ainda
+    // gerando", não vazio/nulo) bem nesse formato — o que parece acontecer com mais
+    // frequência no primeiro boleto de um pagador novo, plausivelmente por um provisionamento
+    // que leva mais tempo na primeira vez — esse conteúdo passava direto sem checagem
+    // nenhuma, e era enviado pro Telegram como se fosse o PDF de verdade. Agora as quatro
+    // variantes exigem o mesmo tamanho mínimo, então um placeholder pequeno é tratado como
+    // "ainda não disponível" (cai pro link, ou pro reenvio automático agendado) em vez de
+    // ser mandado por engano.
+    const pdfBase64 =
+      (typeof pdfResp?.data?.pdf === 'string' && pdfResp.data.pdf.length > 500 ? pdfResp.data.pdf : null) ||
+      (typeof pdfResp?.pdf === 'string' && pdfResp.pdf.length > 500 ? pdfResp.pdf : null) ||
       (typeof pdfResp?.data === 'string' && pdfResp.data.length > 500 ? pdfResp.data : null) ||
       (typeof pdfResp === 'string' && pdfResp.length > 500 ? pdfResp : null);
     if (pdfBase64) pdfBuffer = Buffer.from(pdfBase64, 'base64');
@@ -750,8 +785,19 @@ async function buscarEEnviarPdfBoleto(chatId, codigoSolicitacao, linkInicial, no
     return true;
   }
   if (link) {
-    await tgSendPDF(chatId, link, nomeArq, caption, meta);
-    return true;
+    try {
+      await tgSendPDF(chatId, link, nomeArq, caption, meta);
+      return true;
+    } catch(eLinkSend) {
+      // A validação de conteúdo (ver tgSendPDF) é tratada como "ainda não disponível", não
+      // como falha de verdade — cai pro reenvio automático agendado, igual à falta de link.
+      // Qualquer OUTRO erro (rede, Telegram) continua subindo normalmente pro chamador.
+      if (eLinkSend.message && eLinkSend.message.includes('não parece um PDF válido')) {
+        console.warn('[pdf-boleto] conteúdo do link inválido, tratando como ainda não disponível:', eLinkSend.message);
+      } else {
+        throw eLinkSend;
+      }
+    }
   }
   return false;
 }
@@ -1088,6 +1134,8 @@ async function saveChanges(ch) {
       { ...sbHeaders(), Prefer: 'resolution=merge-duplicates' }, { id: 1, data: ch });
   } catch(e) { console.error('saveChanges erro:', e.message); }
 }
+// ── bot_parte2.js (6 partes) — continuação de executar() iniciada em bot_parte1.js ──
+
 
 // ── Utilitários ─────────────────────────────────────────────────────────────────
 function brl(v) { return 'R$ ' + Math.abs(Number(v)||0).toFixed(2).replace('.', ','); }
@@ -2012,6 +2060,8 @@ async function executar(intencao, p, dados, chatId) {
     if (dados.changes) { dados.changes.checkins = ch; await saveChanges(dados.changes); }
     return '✅ Check-in desfeito!\n*' + aluno.nome + '* - ' + dataCi.slice(8) + '/' + dataCi.slice(5,7);
   }
+// ── bot_parte3.js (6 partes) — continuação de executar() iniciada em bot_parte2.js (ainda dentro do handler inter_emitir_plano) ──
+
 
   if (intencao === 'recuperar_cpfs') {
     try {
@@ -2975,6 +3025,8 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           referencia: 'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc,
           seuNumero: gerarSeuNumero(aluno.id, mesStr)
         });
+// ── bot_parte4.js (6 partes) — continuação de executar() iniciada em bot_parte3.js ──
+
         // Se o Inter rejeitou (sem codigoSolicitacao), tratar como erro com mensagem clara
         if (!result?.codigoSolicitacao) {
           const motivo = result?.detail || result?.title || result?.message ||
@@ -3957,6 +4009,8 @@ async function processar(msg) {
     const al = dados.alunos.find(function(a){ return a.nome.toLowerCase().includes((params.aluno_nome||'').toLowerCase()); });
     if (al) params.aluno_id = al.id;
   }
+// ── bot_parte5.js (6 partes) — continuação de processar() iniciada em bot_parte4.js ──
+
 
   // Blindagem: valor numérico explícito no texto prevalece sobre extração da IA
   // (Gemini às vezes ignora o valor digitado e usa o valor de referência do contexto)
@@ -4908,6 +4962,8 @@ async function rotinaAlertaInadimplencia() {
       if (vpFmt) linha += '\n   📅 Plano vence: ' + vpFmt;
       return linha;
     }).join('\n\n');
+// ── bot_parte6.js (6 partes) — continuação de rotinaAlertaInadimplencia() iniciada em bot_parte5.js ──
+
 
     await tgSend(TELEGRAM_CHAT_ID,
       '⚠️ *Vencimentos de ontem sem pagamento (' + vencidosOntem.length + ')*\n\n' + linhas +
@@ -5510,7 +5566,9 @@ async function rotinaFechamentoMensal() {
 async function tgSendJSONBuffer(chatId, jsonBuffer, filename, caption) {
   const https = require('https');
   const boundary = '----TGBoundary' + Date.now();
-  const safeFilename = filename.replace(/[^a-zA-Z0-9_\-\.]/g, '_');
+  // Mesmo ajuste de 19/09/2026 aplicado em tgSendPDF/tgSendPDFBuffer (bot_parte1.js): espaço
+  // não precisa virar "_", só o que quebraria o cabeçalho Content-Disposition de verdade.
+  const safeFilename = filename.replace(/[^a-zA-Z0-9 _\-\.()]/g, '_');
   const parts = [
     '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
     '--' + boundary + '\r\nContent-Disposition: form-data; name="caption"\r\n\r\n' + (caption||''),
