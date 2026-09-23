@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.8 - Nome de arquivo de documento (boleto, backup) permite espaço — antes o sanitizador convertia qualquer espaço em "_" (ex: "Boleto_1_-_Outubro_2026_-_Lenita.pdf"), mais restritivo do que o Telegram exige. Agora só bloqueia o que quebraria o cabeçalho de envio de verdade (aspas, barra, contrabarra, quebra de linha).
+// Versão 15.10 - Novo comando "teste supabase": mostra o papel da chave SUPABASE_KEY configurada no Render (anon ou service_role, lido de dentro da própria chave) e faz uma leitura real. Usado na troca da chave dos bots para service_role, antes de remover as políticas anon do Supabase.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.8'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.10'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1549,7 +1549,12 @@ async function processarComIA(texto, dados, mes) {
     return { tipo: 'acao', intencao: 'resumo_semanal', params: {} };
   }
   // Comando "backup" sob demanda
-  if (tL === 'backup' || tL === 'fazer backup' || tL === 'exportar backup') {
+  // Diagnóstico da conexão com o Supabase (22/09/2026): mostra o papel da chave em uso
+  // (anon ou service_role) e faz uma leitura. Usado na troca da chave dos bots.
+  if (tL.trim() === 'teste supabase') {
+    return { tipo: 'acao', intencao: 'teste_supabase', params: {} };
+  }
+  if (tL === 'backup' || tL === 'backup agora' || tL === 'fazer backup' || tL === 'exportar backup') {
     return { tipo: 'acao', intencao: 'backup_agora', params: {} };
   }
   // Verificar Pix recebidos agora (antecipa a rotina de 30 min)
@@ -3594,6 +3599,22 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
   if (intencao === 'resumo_semanal') {
     await rotinaResumoSemanal();
     return null; // mensagem já enviada pela rotina
+  }
+
+  if (intencao === 'teste_supabase') {
+    // Papel lido de dentro da própria chave configurada no Render (SUPABASE_KEY). As chaves
+    // anon e service_role têm o mesmo formato (eyJ...), então só olhando o conteúdo dá pra
+    // saber qual foi colada. Não grava nada no banco.
+    let papel;
+    try {
+      papel = JSON.parse(Buffer.from(String(SUPABASE_KEY).split('.')[1], 'base64url').toString()).role || '(sem campo role)';
+    } catch(eP) { papel = '(não consegui ler a chave: ' + eP.message + ')'; }
+    let leitura;
+    try {
+      const r = await sbGet('alunos', 'select=id');
+      leitura = Array.isArray(r) ? '✅ Leitura OK: ' + r.length + ' alunos' : '❌ Resposta inesperada: ' + JSON.stringify(r).slice(0, 150);
+    } catch(eL) { leitura = '❌ Leitura falhou: ' + eL.message.slice(0, 150); }
+    return '🔧 *Teste Supabase — bot principal*\n\n👤 Papel da chave: *' + papel + '*\n' + leitura;
   }
 
   if (intencao === 'backup_agora') {
