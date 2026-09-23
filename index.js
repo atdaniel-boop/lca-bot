@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.10 - Novo comando "teste supabase": mostra o papel da chave SUPABASE_KEY configurada no Render (anon ou service_role, lido de dentro da própria chave) e faz uma leitura real. Usado na troca da chave dos bots para service_role, antes de remover as políticas anon do Supabase.
+// Versão 15.12 - Nome de arquivo enviado ao Telegram (boleto e backup) mantém acentos: o filtro trocava ç/ã/é por "_" ("Mar_o 2027", "L_cia"). Agora aceita qualquer letra, normaliza o acento e continua bloqueando só aspas, barras e quebras de linha.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.10'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.12'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -634,7 +634,12 @@ async function tgSendPDFBuffer(chatId, pdfBuffer, filename, caption, meta) {
   // parênteses tranquilamente no nome do documento. Só precisa excluir o que quebraria o
   // cabeçalho Content-Disposition de verdade: aspas, barra, contrabarra e caracteres de
   // controle (quebra de linha etc.) — não espaço.
-  const safeFilename = filename.replace(/[^a-zA-Z0-9 _\-\.()]/g, '_');
+  // BUG CORRIGIDO (23/09/2026 — "Mar_o 2027"): o filtro só aceitava letras sem acento e
+  // trocava ç/ã/é etc. por "_" (afetava "Março" e nomes como Lúcia, José). O cabeçalho
+  // vai em UTF-8 (Buffer.from sem codificação) e o Content-Length é em bytes, então letra
+  // acentuada é segura. Continua trocando o que quebraria o cabeçalho: aspas, barras,
+  // quebras de linha. normalize('NFC') junta acento digitado separado (c + ¸ → ç).
+  const safeFilename = String(filename).normalize('NFC').replace(/[^\p{L}\p{N} _\-\.()]/gu, '_');
   const parts = [
     '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
     '--' + boundary + '\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nMarkdown',
@@ -702,7 +707,12 @@ async function tgSendPDF(chatId, pdfUrl, filename, caption, meta) {
   // parênteses tranquilamente no nome do documento. Só precisa excluir o que quebraria o
   // cabeçalho Content-Disposition de verdade: aspas, barra, contrabarra e caracteres de
   // controle (quebra de linha etc.) — não espaço.
-  const safeFilename = filename.replace(/[^a-zA-Z0-9 _\-\.()]/g, '_');
+  // BUG CORRIGIDO (23/09/2026 — "Mar_o 2027"): o filtro só aceitava letras sem acento e
+  // trocava ç/ã/é etc. por "_" (afetava "Março" e nomes como Lúcia, José). O cabeçalho
+  // vai em UTF-8 (Buffer.from sem codificação) e o Content-Length é em bytes, então letra
+  // acentuada é segura. Continua trocando o que quebraria o cabeçalho: aspas, barras,
+  // quebras de linha. normalize('NFC') junta acento digitado separado (c + ¸ → ç).
+  const safeFilename = String(filename).normalize('NFC').replace(/[^\p{L}\p{N} _\-\.()]/gu, '_');
 
   const parts = [
     '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
@@ -1282,6 +1292,90 @@ function encontrarRenovacaoAtual(historicoAlteracoes, pagamentos) {
   }) || candidatas[0];
 }
 
+// ── Tipos de lançamento de pagamento (22/09/2026) ─────────────────────────────────
+// A mesma chave identifica o lançamento em pagamentos, pagamentos_pendentes e boletos:
+//   'YYYY-MM'           mensalidade
+//   'YYYY-MM-av<n>'     boleto avulso — na prática, a MENSALIDADE cobrada num boleto à
+//                       parte (o valor padrão dele é o da mensalidade)
+//   'YYYY-MM-exc<...>'  cobrança excepcional (proporcional, taxa, ajuste)
+//   'YYYY-MM-resc<n>'   saldo de rescisão
+// Regra: mensalidade e avulso são creditados na chave SIMPLES do mês, que é o que todas as
+// telas leem como "mês pago" e como base da comissão das professoras. Excepcional e
+// rescisão ficam na PRÓPRIA chave: são cobranças à parte, com nota fiscal própria, e não
+// entram na comissão (decisão do usuário em 22/09/2026). Receita soma tudo.
+//
+// BUG CORRIGIDO: os três créditos automáticos (boleto pela rotina, boleto pelo webhook e
+// Pix) gravavam tudo na chave simples e decidiam "já pago" olhando só ela. Com mensalidade
+// E excepcional/rescisão no mesmo mês, o segundo pagamento era IGNORADO (dinheiro no Inter,
+// nada no sistema); e se a cobrança extra fosse paga primeiro, marcava o mês como pago com o
+// valor dela e apagava também a pendência da mensalidade.
+function ehChaveExtra(k) { return /^\d{4}-\d{2}-(exc|resc)/.test(String(k || '')); }
+function rotuloLancamentoBot(k) {
+  k = String(k || ''); const mes = k.slice(0, 7);
+  if (/-resc/.test(k)) return mes + ' (rescisão)';
+  if (/-exc/.test(k)) return mes + ' (excepcional)';
+  if (/-av/.test(k)) return mes + ' (avulso)';
+  return mes;
+}
+
+// Tudo o que entrou no mês (receita): chave simples + avulso + excepcional + rescisão.
+function recebidoMesBot(pags, mes) {
+  pags = pags || {};
+  return Object.keys(pags).reduce((s, k) => (k === mes || k.startsWith(mes + '-')) ? s + (pags[k] || 0) : s, 0);
+}
+
+// BOLETO pago: a qual lançamento ele pertence, onde creditar e que pendências ele quita.
+// chaveBoleto = a chave gravada na nossa tabela boletos para esse codigo_solicitacao (a
+// fonte exata). Sem ela (boleto legado), procura UMA cobrança extra pendente do mês com o
+// mesmo valor nominal; se não houver exatamente uma, é a mensalidade (comportamento antigo).
+function planejarCreditoBoleto(mes, chaveBoleto, valorNominal, pend) {
+  pend = pend || {};
+  let chaveLanc = (chaveBoleto && (chaveBoleto === mes || String(chaveBoleto).startsWith(mes + '-'))) ? chaveBoleto : null;
+  if (!chaveLanc) {
+    const extras = Object.keys(pend).filter(k => k.startsWith(mes + '-') && ehChaveExtra(k) &&
+      (pend[k] || 0) > 0 && Math.abs((pend[k] || 0) - (valorNominal || 0)) < 0.01);
+    chaveLanc = extras.length === 1 ? extras[0] : mes;
+  }
+  const extra = ehChaveExtra(chaveLanc);
+  const destino = extra ? chaveLanc : mes;
+  // Mensalidade quita a chave simples e as de avulso do mês — NUNCA as extras.
+  const quita = extra ? [chaveLanc]
+    : Object.keys(pend).filter(k => (k === mes || k.startsWith(mes + '-')) && !ehChaveExtra(k));
+  const esperado = quita.some(k => (pend[k] || 0) > 0);
+  return { chaveLanc, destino, extra, quita, esperado };
+}
+
+// PIX: não diz a qual cobrança pertence, então decide pelo valor, nesta ordem:
+//   1) mensalidade do mês atual ainda não paga, com pendência (simples ou avulso) do MESMO
+//      valor → mensalidade (comportamento de sempre, tem prioridade no empate);
+//   2) exatamente UMA cobrança extra pendente (qualquer mês) do mesmo valor → essa extra;
+//   3) regra de sempre: mês atual; se já pago, mensalista credita o mês seguinte (caso
+//      Breno), cíclico descarta como duplicado.
+function planejarCreditoPix(pags, pend, mesAtual, valor, tipoPlano) {
+  pags = pags || {}; pend = pend || {};
+  const igual = k => (pend[k] || 0) > 0 && Math.abs((pend[k] || 0) - valor) < 0.01;
+  const mensalQuita = m => Object.keys(pend).filter(k =>
+    k === m || (k.startsWith(m + '-') && !ehChaveExtra(k) && igual(k)));
+  const regularIgual = Object.keys(pend).some(k =>
+    (k === mesAtual || k.startsWith(mesAtual + '-')) && !ehChaveExtra(k) && igual(k));
+  if (!((pags[mesAtual] || 0) > 0) && regularIgual) {
+    return { destino: mesAtual, extra: false, quita: mensalQuita(mesAtual), pular: false };
+  }
+  const extras = Object.keys(pend).filter(k => ehChaveExtra(k) && igual(k) && !((pags[k] || 0) > 0));
+  if (extras.length === 1) {
+    return { destino: extras[0], extra: true, quita: [extras[0]], pular: false };
+  }
+  let mesCredito = mesAtual;
+  if ((pags[mesAtual] || 0) > 0) {
+    const [a, m] = mesAtual.split('-').map(Number);
+    const prox = (m === 12 ? (a + 1) + '-01' : a + '-' + String(m + 1).padStart(2, '0'));
+    if (tipoPlano === 'mensal' && !((pags[prox] || 0) > 0)) mesCredito = prox;
+    else return { pular: true };
+  }
+  return { destino: mesCredito, extra: false, quita: mensalQuita(mesCredito), pular: false };
+}
+
+
 // ── Contexto para a IA ─────────────────────────────────────────────────────────
 function buildContexto(dados, mes) {
   const ativos = dados.alunos.filter(a => a.ativo === 'SIM' && alunoAtivoNoMes(a, mes));
@@ -1292,7 +1386,8 @@ function buildContexto(dados, mes) {
     const pags = typeof a.pagamentos === 'string' ? JSON.parse(a.pagamentos||'{}') : (a.pagamentos||{});
     const v = pags[mes] || 0;
     return { id: a.id, nome: a.nome, ativo: a.ativo, plano: a.tipo_plano, vezes: a.vezes_semana,
-             professora: a.professora, pagou: v > 0, valor: v };
+             professora: a.professora, pagou: v > 0, valor: v,
+             recebido: recebidoMesBot(pags, mes) }; // receita: mensalidade + excepcional + rescisão
   });
 
   // Receita líquida do mês = pagamentos - saldos de rescisão (igual ao recMes do web)
@@ -1300,7 +1395,9 @@ function buildContexto(dados, mes) {
     const pr = typeof a.pagamentos_rescisao === 'string' ? JSON.parse(a.pagamentos_rescisao||'{}') : (a.pagamentos_rescisao||{});
     return s + (pr[mes] || 0);
   }, 0);
-  const receitaMes = pagMes.reduce((s, a) => s + a.valor, 0) - totalRescisaoMes;
+  // Receita = tudo o que entrou no mês (inclui excepcional e rescisão, que ficam em chave
+  // própria desde 22/09/2026). "Pagou" e comissão continuam só com a mensalidade.
+  const receitaMes = pagMes.reduce((s, a) => s + a.recebido, 0) - totalRescisaoMes;
   // A receber no mês = soma de pagamentos_pendentes[mes] (boletos emitidos aguardando pagamento)
   let aReceberMes = 0, nAReceber = 0;
   dados.alunos.forEach(a => {
@@ -4470,19 +4567,16 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       // anterior). Só mensalistas têm essa continuidade previsível: cíclico (trimestral/
       // semestral) paga o pacote inteiro de uma vez, "mês atual pago" não indica nada sobre
       // o mês seguinte pra eles, então não tentamos adivinhar.
+      // A qual lançamento esse Pix pertence — regra em planejarCreditoPix (bot_parte2.js):
+      // mensalidade pendente do mesmo valor tem prioridade; senão, UMA cobrança extra
+      // (excepcional/rescisão) pendente do mesmo valor; senão, a regra de sempre (mês atual,
+      // ou o seguinte para mensalista que pagou adiantado — caso Breno).
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
-      let mesCredito = mesAtualStr;
-      if ((pags[mesAtualStr]||0) > 0) {
-        const [anoPM, mesPM] = mesAtualStr.split('-').map(Number);
-        let anoProx = anoPM, mesProx = mesPM + 1;
-        if (mesProx > 12) { mesProx = 1; anoProx++; }
-        const proxMesStr = anoProx + '-' + String(mesProx).padStart(2,'0');
-        if (aluno.tipo_plano === 'mensal' && !((pags[proxMesStr]||0) > 0)) {
-          mesCredito = proxMesStr;
-        } else {
-          _pixProcessados.add(chave); jaPagos++; continue;
-        }
-      }
+      const pendPix = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
+      const planoPix = planejarCreditoPix(pags, pendPix, mesAtualStr, valor, aluno.tipo_plano);
+      if (planoPix.pular) { _pixProcessados.add(chave); jaPagos++; continue; }
+      const mesCredito = planoPix.destino; // chave simples do mês, ou a chave da cobrança extra
+      const rotuloPix = rotuloLancamentoBot(mesCredito);
 
       // BUG CORRIGIDO v13.5: esta rotina varre Pix genéricos no extrato e SEMPRE assumia que
       // eram para o mês atual — mas se o Pix na verdade liquidou um boleto de OUTRO mês (ex:
@@ -4507,26 +4601,14 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       // Lançar pagamento automaticamente
       try {
         pags[mesCredito] = valor;
-        const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
-        // BUG CORRIGIDO (caso Daniel, 15/09/2026): só limpava a chave exata "YYYY-MM" — nunca
-        // as chaves de boleto avulso/cobrança excepcional (formato "YYYY-MM-av<timestamp>" ou
-        // "YYYY-MM-exc..."). O Pix creditava certinho, o boleto real era cancelado no Inter,
-        // mas a pendência do avulso continuava aparecendo como "aguardando" na ficha pra
-        // sempre — o pagamento foi resolvido em outro lugar do sistema, não onde a tela olha.
-        // Como o sufixo (timestamp) é imprevisível, casa por PREFIXO do mês + MESMO VALOR.
-        let tinhaPend = (pend[mesCredito]||0) > 0;
-        if (tinhaPend) delete pend[mesCredito];
-        Object.keys(pend).forEach(k => {
-          if (k !== mesCredito && k.startsWith(mesCredito + '-') && Math.abs((pend[k]||0) - valor) < 0.01) {
-            delete pend[k];
-            tinhaPend = true;
-          }
-        });
+        // Pendências que esse Pix quita (calculadas em planejarCreditoPix): mensalidade →
+        // chave simples + avulso do mesmo valor (caso Daniel, 15/09); extra → só a própria.
+        // Antes apagava também excepcional/rescisão do mesmo valor ao creditar a mensalidade.
+        planoPix.quita.forEach(k => { delete pendPix[k]; });
         const hist = aluno.historico_alteracoes || [];
         hist.push({ data: hojeBR.toLocaleDateString('pt-BR'), tipo: 'pagamento',
-          desc: 'Pagamento ' + mesCredito + ' via Pix Inter (detectado no extrato): ' + brl(valor) });
-        const patch = { pagamentos: pags, historico_alteracoes: hist };
-        if (tinhaPend) patch.pagamentos_pendentes = pend;
+          desc: 'Pagamento ' + rotuloPix + ' via Pix Inter (detectado no extrato): ' + brl(valor) });
+        const patch = { pagamentos: pags, pagamentos_pendentes: pendPix, historico_alteracoes: hist };
         // BUG CORRIGIDO NA REVISÃO GERAL (04/09/2026): esta rotina cancela o boleto REAL no
         // Inter logo depois de creditar localmente. Sem verificar se o sbPatch realmente
         // gravou, uma falha silenciosa (RLS, etc.) resultaria no pior cenário possível: o
@@ -4537,7 +4619,7 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
           console.error('[rotina-pix] sbPatch não confirmou gravação para', aluno.nome, '— abortando ANTES de cancelar boleto real.');
           await tgSend(TELEGRAM_CHAT_ID,
             '⚠️ *Pix detectado, mas NÃO consegui creditar!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valor) + '\n📅 ' + mesCredito +
-            '\n\nO Supabase não confirmou a gravação — nada foi salvo, e por segurança NÃO cancelei nenhum boleto. Confirme manualmente: "confirmar pagamento ' + aluno.nome.split(' ')[0] + ' ' + valor + ' em ' + mesCredito.split('-').reverse().join('/') + '"');
+            '\n\nO Supabase não confirmou a gravação — nada foi salvo, e por segurança NÃO cancelei nenhum boleto. Confirme manualmente: "confirmar pagamento ' + aluno.nome.split(' ')[0] + ' ' + valor + ' em ' + mesCredito.slice(0,7).split('-').reverse().join('/') + '"');
           continue;
         }
         await logOp('pix_detectado', aluno.nome + ' - ' + mesCredito, aluno.id, valor, mesCredito);
@@ -4558,7 +4640,10 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
           // de sintaxe like/ilike do PostgREST, que nunca foi testada contra o Supabase real.
           const rBolPixTodos = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.aberto&select=id,codigo_solicitacao,mes');
           const bolsPixTodos = Array.isArray(rBolPixTodos) ? rBolPixTodos : (rBolPixTodos?.data || []);
-          const rBolPix = bolsPixTodos.filter(b => b.mes === mesCredito || (b.mes||'').startsWith(mesCredito + '-'));
+          // Mensalidade: boletos da chave simples e de avulso do mês — NUNCA o de uma cobrança
+          // extra (excepcional/rescisão), que é outra dívida. Extra: só o boleto dela.
+          const rBolPix = bolsPixTodos.filter(b => b.mes === mesCredito ||
+            (!planoPix.extra && (b.mes||'').startsWith(mesCredito + '-') && !ehChaveExtra(b.mes)));
           let bolsPix = Array.isArray(rBolPix) ? rBolPix : (rBolPix?.data || []);
           // BUG CORRIGIDO v14.10: se o aluno não tem NENHUM registro na nossa tabela local de
           // boletos (caso de alunos legados, cujos boletos nunca foram sincronizados pro banco —
@@ -4568,7 +4653,9 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
           // Agora, se não achar localmente, busca direto no Inter (sem filtro de situação —
           // filtro de busca já provou ser não confiável) antes de desistir.
           let bolsInterPix = [];
-          if (!bolsPix.length) {
+          // Busca direta no Inter só para mensalidade: o seuNumero de uma cobrança extra não
+          // distingue com segurança qual dívida é, e cancelar o boleto errado seria pior.
+          if (!bolsPix.length && !planoPix.extra) {
             try {
               const rTudoPix = await interCobrancasRobusto({});
               const preposPix = ['de','da','do','das','dos','e'];
@@ -4576,6 +4663,9 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
               bolsInterPix = (rTudoPix?.cobrancas || []).filter(item => {
                 const bc = item.cobranca || item;
                 if (!['A_RECEBER','ATRASADO'].includes(bc.situacao)) return false;
+                // Só o boleto do MESMO valor do Pix — antes podia cancelar o de outra cobrança
+                // do mesmo mês (ex: o excepcional, cujo seuNumero não traz o mês).
+                if (Math.abs(parseFloat(bc.valorNominal || 0) - valor) >= 0.01) return false;
                 const psn = parseSeuNumero(bc.seuNumero);
                 if (psn.alunoId === aluno.id && (psn.mes === mesCredito || !psn.mes)) return true;
                 const nomePag = semAcento(bc.pagador?.nome || '').split(/\s+/).filter(x => !preposPix.includes(x));
@@ -4640,7 +4730,7 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
           '💸 *Pix detectado e lançado!*\n\n' +
           '👤 ' + aluno.nome + '\n' +
           '💰 ' + brl(valor) + '\n' +
-          '📅 ' + mesCredito + ' — Pix recebido hoje no Inter.' + boletoCancelMsg + '\n\n' +
+          '📅 ' + rotuloPix + ' — Pix recebido hoje no Inter.' + boletoCancelMsg + '\n\n' +
           '_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mesCredito + '"_');
         console.log('[rotina-pix] lançado:', aluno.nome, valor);
         lancados++;
@@ -4730,30 +4820,34 @@ async function verificarBoletosPagosInter() {
       // criando um loop que volta a cada 5 minutos. Agora, todo boleto com codigo_solicitacao
       // já registrado como 'pago' ou 'cancelado' no nosso banco é ignorado permanentemente,
       // não importa o que aconteça com pagamentos_pendentes depois.
+      let chaveBoleto = null; // chave exata do lançamento, gravada na nossa tabela ao emitir
       if (bc.codigoSolicitacao) {
         try {
-          const rJaReg = await sbGet('boletos', 'codigo_solicitacao=eq.' + bc.codigoSolicitacao + '&select=id,status');
+          const rJaReg = await sbGet('boletos', 'codigo_solicitacao=eq.' + bc.codigoSolicitacao + '&select=id,status,mes');
           const jaReg = Array.isArray(rJaReg) ? rJaReg : (rJaReg?.data || []);
           if (jaReg.some(b => b.status === 'pago' || b.status === 'cancelado')) continue;
+          chaveBoleto = (jaReg.find(b => b.mes) || {}).mes || null;
         } catch(eChk) { console.warn('[rotina-inter] erro ao checar duplicidade por codigo_solicitacao:', eChk.message); }
       }
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
-      if ((pags[mes]||0) > 0) continue; // já confirmado
-      // (2) Só se o mês está em pagamentos_pendentes (boleto que o sistema espera receber)
       const pend = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
-      const pendMesTotal = Object.keys(pend).filter(k => k === mes || k.startsWith(mes + '-')).reduce((s,k) => s+(pend[k]||0), 0);
-      if (!(pendMesTotal > 0)) continue; // não estava esperando esse mês → não baixa
+      // A qual lançamento esse boleto pertence e o que ele quita (regra em planejarCreditoBoleto,
+      // bot_parte2.js). Antes olhava só a chave simples do mês: um excepcional/rescisão pago no
+      // mesmo mês da mensalidade era ignorado, ou quitava a mensalidade junto.
+      const plano = planejarCreditoBoleto(mes, chaveBoleto, parseFloat(bc.valorNominal || valor), pend);
+      if ((pags[plano.destino]||0) > 0) continue; // esse lançamento já foi confirmado
+      // (2) Só se o lançamento está em pagamentos_pendentes (boleto que o sistema espera receber)
+      if (!plano.esperado) continue;
+      const rotulo = rotuloLancamentoBot(plano.chaveLanc);
 
       // Confirmar pagamento
       try {
-        pags[mes] = valor;
-        const tinhaPend = pendMesTotal > 0;
-        if (tinhaPend) Object.keys(pend).forEach(k => { if (k === mes || k.startsWith(mes + '-')) delete pend[k]; });
+        pags[plano.destino] = valor;
+        plano.quita.forEach(k => { delete pend[k]; });
         const hist = aluno.historico_alteracoes || [];
         hist.push({ data: new Date().toLocaleDateString('pt-BR'), tipo: 'pagamento',
-          desc: 'Pagamento ' + mes + ' via boleto Inter (rotina automática): ' + brl(valor) });
-        const patch = { pagamentos: pags, historico_alteracoes: hist };
-        if (tinhaPend) patch.pagamentos_pendentes = pend;
+          desc: 'Pagamento ' + rotulo + ' via boleto Inter (rotina automática): ' + brl(valor) });
+        const patch = { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: hist };
         // Mesma proteção do Pix: esta rotina também trata o boleto no Inter/nossa tabela em
         // seguida — se o crédito local não confirmou, é mais seguro parar aqui e avisar do
         // que seguir como se o aluno tivesse pago.
@@ -4765,23 +4859,29 @@ async function verificarBoletosPagosInter() {
             '\n\nO Supabase não confirmou a gravação — nada foi salvo. Confirme manualmente: "confirmar pagamento ' + aluno.nome.split(' ')[0] + ' ' + valor + ' em ' + mes.split('-').reverse().join('/') + '"');
           continue;
         }
-        await logOp('boleto_pago_rotina', aluno.nome + ' - ' + mes, alunoId, valor, mes);
-        await avisarNfSePendente(aluno, mes, valor);
+        await logOp('boleto_pago_rotina', aluno.nome + ' - ' + rotulo, alunoId, valor, plano.destino);
+        await avisarNfSePendente(aluno, plano.destino, valor);
         // Atualizar status na tabela boletos — sem isso o boleto continua 'aberto' no
         // nosso banco mesmo já pago no Inter, e o dashboard segue contando como "a receber".
+        // Pelo codigo_solicitacao quando houver (o boleto exato); antes filtrava pela chave
+        // simples do mês e nunca marcava boleto avulso/excepcional/rescisão. pago_em é o campo
+        // que o Pix usa pra não creditar em dobro — antes só o webhook o preenchia.
         try {
-          await sbPatch('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto',
-            { status: 'pago', cancelado_em: new Date().toISOString() });
+          const agoraIso = new Date().toISOString();
+          await sbPatch('boletos', (bc.codigoSolicitacao
+              ? 'codigo_solicitacao=eq.' + bc.codigoSolicitacao
+              : 'aluno_id=eq.' + alunoId + '&mes=eq.' + plano.chaveLanc) + '&status=eq.aberto',
+            { status: 'pago', pago_em: agoraIso, cancelado_em: agoraIso });
         } catch(eStB) { console.error('[rotina-inter] erro ao atualizar status do boleto:', eStB.message); }
-        sbStorageDelete(alunoId, mes);
+        sbStorageDelete(alunoId, plano.chaveLanc);
         await tgSend(TELEGRAM_CHAT_ID,
           '🏦 *Pagamento confirmado automaticamente!*\n\n' +
           '👤 ' + aluno.nome + '\n' +
           '💰 ' + brl(valor) + '\n' +
-          '📅 ' + mes + ' — boleto Inter baixado.\n' +
+          '📅 ' + rotulo + ' — boleto Inter baixado.\n' +
           '_Detectado pela rotina automática._');
         confirmados++;
-        confirmadosNomes.push(aluno.nome.split(' ')[0] + ' (' + mes + ')');
+        confirmadosNomes.push(aluno.nome.split(' ')[0] + ' (' + rotulo + ')');
         console.log('[rotina-inter] Pagamento confirmado:', aluno.nome, mes, valor);
       } catch(e) {
         console.error('[rotina-inter] erro ao confirmar:', aluno.nome, e.message);
@@ -5032,6 +5132,16 @@ async function avisarNfSePendente(aluno, mes, valor) {
     if (!competenciaJaVenceuBot(aluno, mes)) return;
     const [ano, mesNum] = mes.split('-');
     const primeiroNome = aluno.nome.split(' ')[0];
+    // Cobrança extra (excepcional/rescisão) tem NF própria, emitida pelo botão 🧾+ da linha
+    // dela no histórico financeiro — "emitir nf Nome MM/AAAA" emitiria a da mensalidade.
+    if (ehChaveExtra(mes)) {
+      await tgSend(TELEGRAM_CHAT_ID,
+        '💰 Pagamento de *' + aluno.nome.split(' ').slice(0,2).join(' ') + '* confirmado — ' +
+        rotuloLancamentoBot(mes) + ', ' + brl(valor) + '.\n\n' +
+        '🧾 ' + primeiroNome + ' emite nota fiscal e esse lançamento ainda não tem NF.\n\n' +
+        'Para emitir: no site, ficha de ' + primeiroNome + ' → Histórico financeiro → botão 🧾+ na linha desse lançamento.');
+      return;
+    }
     await tgSend(TELEGRAM_CHAT_ID,
       '💰 Pagamento de *' + aluno.nome.split(' ').slice(0,2).join(' ') + '* confirmado — ' +
       mesNum + '/' + ano + ', ' + brl(valor) + '.\n\n' +
@@ -5496,8 +5606,12 @@ async function rotinaFechamentoMensal() {
     dados.alunos.forEach(a => {
       const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
       const pr = typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});
-      if (pags[mesFechadoStr] > 0) { recFechado += pags[mesFechadoStr] - (pr[mesFechadoStr]||0); nPagFechado++; }
-      if (pags[mesAnterior2] > 0) recAnt += pags[mesAnterior2] - (pr[mesAnterior2]||0);
+      // Receita soma tudo o que entrou (mensalidade + excepcional + rescisão); a contagem de
+      // pagantes e de inadimplentes continua olhando só a mensalidade.
+      const recebF = recebidoMesBot(pags, mesFechadoStr), recebA = recebidoMesBot(pags, mesAnterior2);
+      if (recebF > 0) recFechado += recebF - (pr[mesFechadoStr]||0);
+      if (pags[mesFechadoStr] > 0) nPagFechado++;
+      if (recebA > 0) recAnt += recebA - (pr[mesAnterior2]||0);
       if (a.ativo === 'SIM' && alunoAtivoNoMes(a, mesFechadoStr) && !(pags[mesFechadoStr] > 0)) inadimplentes.push(a);
     });
 
@@ -5589,7 +5703,12 @@ async function tgSendJSONBuffer(chatId, jsonBuffer, filename, caption) {
   const boundary = '----TGBoundary' + Date.now();
   // Mesmo ajuste de 19/09/2026 aplicado em tgSendPDF/tgSendPDFBuffer (bot_parte1.js): espaço
   // não precisa virar "_", só o que quebraria o cabeçalho Content-Disposition de verdade.
-  const safeFilename = filename.replace(/[^a-zA-Z0-9 _\-\.()]/g, '_');
+  // BUG CORRIGIDO (23/09/2026 — "Mar_o 2027"): o filtro só aceitava letras sem acento e
+  // trocava ç/ã/é etc. por "_" (afetava "Março" e nomes como Lúcia, José). O cabeçalho
+  // vai em UTF-8 (Buffer.from sem codificação) e o Content-Length é em bytes, então letra
+  // acentuada é segura. Continua trocando o que quebraria o cabeçalho: aspas, barras,
+  // quebras de linha. normalize('NFC') junta acento digitado separado (c + ¸ → ç).
+  const safeFilename = String(filename).normalize('NFC').replace(/[^\p{L}\p{N} _\-\.()]/gu, '_');
   const parts = [
     '--' + boundary + '\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n' + chatId,
     '--' + boundary + '\r\nContent-Disposition: form-data; name="caption"\r\n\r\n' + (caption||''),
@@ -5819,10 +5938,12 @@ async function main() {
             // Agora, todo boleto já registrado como pago/cancelado pelo mesmo codigo_solicitacao
             // é ignorado permanentemente, e nunca usamos "mes" sozinho pra decidir qual boleto
             // baixar quando sabemos exatamente qual codigo_solicitacao foi pago.
+            let chaveBoletoWh = null; // chave exata do lançamento, gravada na nossa tabela ao emitir
             if (codSolicWebhook) {
               try {
-                const rJaProc = await sbGet('boletos', 'codigo_solicitacao=eq.' + codSolicWebhook + '&select=id,status');
+                const rJaProc = await sbGet('boletos', 'codigo_solicitacao=eq.' + codSolicWebhook + '&select=id,status,mes');
                 const jaProc = Array.isArray(rJaProc) ? rJaProc : (rJaProc?.data || []);
+                chaveBoletoWh = (jaProc.find(b => b.mes) || {}).mes || null;
                 if (jaProc.some(b => b.status === 'pago' || b.status === 'cancelado')) {
                   console.log('[WEBHOOK-INTER] Boleto ' + codSolicWebhook + ' já processado antes — ignorado.');
                   res.writeHead(200, {'Content-Type':'text/plain'}); res.end('ok'); return;
@@ -5844,24 +5965,28 @@ async function main() {
             if (!valorFinal) {
               console.log('[WEBHOOK-INTER] Sem valor — ignorado. seuNum=' + seuNum);
             } else {
-              const rAlunos = await sbGet('alunos', 'select=id,nome,pagamentos,pagamentos_pendentes,historico_alteracoes&id=eq.' + alunoId);
+              // BUG CORRIGIDO (22/09/2026): não buscava nfse_ativo/notas_fiscais_emitidas/
+              // dia_vencimento — avisarNfSePendente saía cedo e o aviso de NF nunca disparava
+              // para pagamentos recebidos pelo webhook.
+              const rAlunos = await sbGet('alunos', 'select=id,nome,pagamentos,pagamentos_pendentes,historico_alteracoes,nfse_ativo,notas_fiscais_emitidas,dia_vencimento&id=eq.' + alunoId);
               const aluno = (Array.isArray(rAlunos) ? rAlunos[0] : rAlunos?.data?.[0]);
               if (!aluno) {
                 console.log('[WEBHOOK-INTER] Aluno ' + alunoId + ' não encontrado');
               } else {
                 const pags = typeof aluno.pagamentos === 'string' ? JSON.parse(aluno.pagamentos || '{}') : (aluno.pagamentos || {});
-                if (pags[mes] && pags[mes] > 0) {
-                  console.log('[WEBHOOK-INTER] Pagamento já existe para aluno ' + alunoId + ' mes ' + mes + ' - ignorado');
+                const pend = typeof aluno.pagamentos_pendentes === 'string' ? JSON.parse(aluno.pagamentos_pendentes || '{}') : (aluno.pagamentos_pendentes || {});
+                // Mesma regra da rotina de boletos (planejarCreditoBoleto, bot_parte2.js)
+                const plano = planejarCreditoBoleto(mes, chaveBoletoWh, valorFinal, pend);
+                const rotulo = rotuloLancamentoBot(plano.chaveLanc);
+                if ((pags[plano.destino]||0) > 0) {
+                  console.log('[WEBHOOK-INTER] Pagamento já existe para aluno ' + alunoId + ' ' + rotulo + ' - ignorado');
                 } else {
-                  pags[mes] = valorFinal;
-                  const pend = typeof aluno.pagamentos_pendentes === 'string' ? JSON.parse(aluno.pagamentos_pendentes || '{}') : (aluno.pagamentos_pendentes || {});
-                  const tinhaPend = Object.keys(pend).some(k => (k === mes || k.startsWith(mes + '-')) && (pend[k]||0) > 0);
-                  if (tinhaPend) Object.keys(pend).forEach(k => { if (k === mes || k.startsWith(mes + '-')) delete pend[k]; });
+                  pags[plano.destino] = valorFinal;
+                  plano.quita.forEach(k => { delete pend[k]; });
                   const hist = aluno.historico_alteracoes || [];
                   hist.push({ data: new Date().toLocaleDateString('pt-BR'), tipo: 'pagamento',
-                    desc: 'Pagamento ' + mes + ' via boleto Inter (automático): ' + brl(valorFinal) });
-                  const patch = { pagamentos: pags, historico_alteracoes: hist };
-                  if (tinhaPend) patch.pagamentos_pendentes = pend;
+                    desc: 'Pagamento ' + rotulo + ' via boleto Inter (automático): ' + brl(valorFinal) });
+                  const patch = { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: hist };
                   // Mesma proteção das outras rotinas de crédito: sem confirmar que a
                   // gravação bateu numa linha de verdade, não faz sentido seguir marcando o
                   // boleto como pago e avisando sucesso no Telegram.
@@ -5875,15 +6000,18 @@ async function main() {
                     }
                   } else {
                   try {
-                    await sbPatch('boletos', 'aluno_id=eq.' + alunoId + '&mes=eq.' + mes + '&status=eq.aberto',
+                    // Pelo codigo_solicitacao quando houver (o boleto exato), senão pela chave do lançamento
+                    await sbPatch('boletos', (codSolicWebhook
+                        ? 'codigo_solicitacao=eq.' + codSolicWebhook
+                        : 'aluno_id=eq.' + alunoId + '&mes=eq.' + plano.chaveLanc) + '&status=eq.aberto',
                       { status: 'pago', pago_em: new Date().toISOString() });
                   } catch(e) { console.error('[webhook] erro ao marcar boleto pago:', e.message); }
-                  sbStorageDelete(alunoId, mes);
+                  sbStorageDelete(alunoId, plano.chaveLanc);
                   const chatId = TELEGRAM_CHAT_ID;
                   if (chatId) {
-                    await logOp('boleto_pago_webhook', aluno.nome + ' - ' + mes, alunoId, valorFinal, mes, {dataPagamento: dataPag});
-                    await avisarNfSePendente(aluno, mes, valorFinal);
-                    await tgSend(chatId, '🏦 *Pagamento confirmado automaticamente!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorFinal) + '\n📅 ' + mes + ' - pago em ' + dataPag.split('-').reverse().join('/') + '\n_Boleto Inter baixado automaticamente._');
+                    await logOp('boleto_pago_webhook', aluno.nome + ' - ' + rotulo, alunoId, valorFinal, plano.destino, {dataPagamento: dataPag});
+                    await avisarNfSePendente(aluno, plano.destino, valorFinal);
+                    await tgSend(chatId, '🏦 *Pagamento confirmado automaticamente!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valorFinal) + '\n📅 ' + rotulo + ' - pago em ' + dataPag.split('-').reverse().join('/') + '\n_Boleto Inter baixado automaticamente._');
                   }
                   console.log('[WEBHOOK-INTER] Pagamento confirmado: aluno ' + alunoId + ' mes ' + mes + ' valor ' + valorFinal);
                   }
