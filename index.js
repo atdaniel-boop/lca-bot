@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.13 - Economia de egress do Supabase (cota de 5 GB estourada, ~200 MB/dia): a verificação de boletos pagos (a cada 5 min) só baixa o banco completo quando há boleto pago com pendência aberta; checagem de duplicidade em uma consulta só; Pix não rebaixa tudo quando nada é novo; getDados baixa a agenda/check-ins uma vez em vez de duas.
+// Versão 15.14 - Dedup de Pix sobrevive a restart: a rotina de Pix (30 min) persiste as chaves de Pix já tratadas hoje na tabela pix_processados, em vez de só na memória do processo. Corrige o caso Marcelo (24/09): um deploy no meio do dia esvaziava o controle em memória e um Pix já creditado de manhã era reprocessado à noite, caindo na regra de "mês já pago → credita o mês seguinte" e lançando um crédito indevido.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.13'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.14'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4509,6 +4509,18 @@ async function processarFilaBoletos() {
 
 // ── Rotina: detectar Pix recebidos de alunos no extrato (a cada 30 min) ─────
 const _pixProcessados = new Set(); // chave: data|valor|nome (evita duplicar no mesmo processo)
+// Marca um Pix como tratado: em memória (efeito imediato, resto desta execução) e no
+// Supabase, na tabela pix_processados (sobrevive a um restart no mesmo dia — ver
+// PERSISTÊNCIA DO DEDUP logo abaixo). Gravação best-effort: se falhar (ex: RLS, rede),
+// o pior caso é voltar ao comportamento antigo (dedup só em memória), não trava a rotina.
+async function marcarPixProcessado(chave, alunoId, valor) {
+  _pixProcessados.add(chave);
+  try {
+    await sbPost('pix_processados', { chave, aluno_id: alunoId, valor });
+  } catch (eMarca) {
+    console.warn('[rotina-pix] falha ao persistir pix_processados:', eMarca.message);
+  }
+}
 // Rotina (30 min): varre o extrato do dia buscando Pix recebidos, casa nome do pagador com aluno (2 nomes), lança pagamento e notifica.
 async function rotinaDetectarPixAlunos(retornarResumo) {
   let lancados = 0, semMatch = 0, jaPagos = 0;
@@ -4530,6 +4542,30 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       t.tipoTransacao === 'PIX' && t.tipoOperacao === 'C' && parseFloat(t.valor||0) > 0
     );
     if (!pixRecebidos.length) return retornarResumo ? '🔍 Nenhum Pix recebido hoje no extrato.' : undefined;
+
+    // PERSISTÊNCIA DO DEDUP (25/09/2026): _pixProcessados vive só na memória do processo —
+    // um restart (ex: deploy no Render) esvazia o Set no meio do dia. Se o Pix de mais cedo
+    // aparece de novo no extrato depois do restart, a rotina não tem mais registro de que já
+    // tratou ele e reprocessa do zero — e se o mês já estava pago, a regra de "mês atual
+    // pago → credita o mês seguinte" (pensada pra quem paga adiantado) credita um mês que
+    // ninguém pediu (caso Marcelo, 24/09, no deploy da v15.13). Recarregar do Supabase as
+    // chaves de HOJE antes de decidir qualquer coisa resolve isso, sobrevivendo a qualquer
+    // restart no mesmo dia. Consulta leve (só as linhas de hoje) — não é o getDados()
+    // completo que a economia de egress abaixo evita.
+    try {
+      const hojeInicio = hojeStr + 'T00:00:00';
+      const persistidos = await sbGet('pix_processados', 'criado_em=gte.' + hojeInicio + '&select=chave');
+      const linhasPersistidas = Array.isArray(persistidos) ? persistidos : (persistidos?.data || []);
+      linhasPersistidas.forEach(r => _pixProcessados.add(r.chave));
+      // Limpeza: registro de dia anterior não serve pra nada (a checagem é sempre "hoje") —
+      // apaga o que tiver mais de 4 dias pra tabela não crescer pra sempre. Não bloqueia a
+      // rotina por isso (best-effort, sem await do resultado).
+      const corteAntigos = new Date(Date.now() - 4*24*60*60*1000).toISOString();
+      sbDelete('pix_processados', 'criado_em=lte.' + corteAntigos).catch(eLimpa =>
+        console.warn('[rotina-pix] falha ao limpar pix_processados antigos:', eLimpa.message));
+    } catch (ePersist) {
+      console.warn('[rotina-pix] falha ao carregar pix_processados do Supabase:', ePersist.message);
+    }
 
     // ECONOMIA DE EGRESS (24/09/2026): depois do primeiro Pix do dia, a rotina baixava o banco
     // inteiro a cada 30 min mesmo quando todos os Pix do extrato já tinham sido tratados. Os
@@ -4597,7 +4633,7 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
       const pendPix = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
       const planoPix = planejarCreditoPix(pags, pendPix, mesAtualStr, valor, aluno.tipo_plano);
-      if (planoPix.pular) { _pixProcessados.add(chave); jaPagos++; continue; }
+      if (planoPix.pular) { await marcarPixProcessado(chave, aluno.id, valor); jaPagos++; continue; }
       const mesCredito = planoPix.destino; // chave simples do mês, ou a chave da cobrança extra
       const rotuloPix = rotuloLancamentoBot(mesCredito);
 
@@ -4614,7 +4650,7 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
         const rBolHoje = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.pago&valor=eq.' + valor + '&pago_em=gte.' + hojeInicio + '&select=id,mes');
         const bolsHoje = Array.isArray(rBolHoje) ? rBolHoje : (rBolHoje?.data || []);
         if (bolsHoje.length) {
-          _pixProcessados.add(chave);
+          await marcarPixProcessado(chave, aluno.id, valor);
           console.log('[rotina-pix] Pix de ' + aluno.nome + ' já creditado hoje via boleto (' + bolsHoje.map(b=>b.mes).join(',') + ') — evitando duplicidade.');
           jaPagos++;
           continue;
@@ -4646,9 +4682,9 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
           continue;
         }
         await logOp('pix_detectado', aluno.nome + ' - ' + mesCredito, aluno.id, valor, mesCredito);
-        _pixProcessados.add(chave); // só marca como processado DEPOIS de confirmar a gravação —
-        // se a gravação falhar (bloco acima), o próximo ciclo (30 min) tenta creditar de novo
-        // em vez de ignorar esse Pix pra sempre.
+        await marcarPixProcessado(chave, aluno.id, valor); // só marca como processado DEPOIS de
+        // confirmar a gravação — se a gravação falhar (bloco acima), o próximo ciclo (30 min)
+        // tenta creditar de novo em vez de ignorar esse Pix pra sempre.
         await avisarNfSePendente(aluno, mesCredito, valor);
         // Cancelar boleto real no Inter, se ainda estiver aberto para este mês
         // (evita boleto ficar aberto/atrasado no Inter quando o aluno já pagou via Pix)
