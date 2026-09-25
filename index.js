@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.12 - Nome de arquivo enviado ao Telegram (boleto e backup) mantém acentos: o filtro trocava ç/ã/é por "_" ("Mar_o 2027", "L_cia"). Agora aceita qualquer letra, normaliza o acento e continua bloqueando só aspas, barras e quebras de linha.
+// Versão 15.13 - Economia de egress do Supabase (cota de 5 GB estourada, ~200 MB/dia): a verificação de boletos pagos (a cada 5 min) só baixa o banco completo quando há boleto pago com pendência aberta; checagem de duplicidade em uma consulta só; Pix não rebaixa tudo quando nada é novo; getDados baixa a agenda/check-ins uma vez em vez de duas.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.12'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.13'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1111,21 +1111,28 @@ async function getDados() {
     ];
   }
   // Planos: busca tabela de planos para valores atualizados (fallback silencioso)
+  // ECONOMIA DE EGRESS (24/09/2026): planos e agenda/check-ins vinham de duas consultas à
+  // tabela changes (id=1 e "a mais recente"), mas ela tem uma linha só — saveChanges sempre
+  // grava id 1 — e a mesma linha era baixada duas vezes. Agora baixa a mais recente uma vez;
+  // se ela for a id 1 (o caso real), serve para as duas coisas. Se um dia houver outra linha,
+  // a consulta de id=1 volta a ser feita separadamente, como antes.
   let planos = null;
-  try {
-    const rpl = await sbGet('changes', 'select=data&id=eq.1');
-    if (Array.isArray(rpl) && rpl[0]?.data) {
-      const chData = typeof rpl[0].data === 'string' ? JSON.parse(rpl[0].data) : rpl[0].data;
-      if (chData && chData.planos && typeof chData.planos === 'object') planos = chData.planos;
-    }
-  } catch(e) {}
-  // Buscar agenda/checkins
   let changes = null;
+  let rch = null;
   try {
-    const rch = await sbGet('changes', 'select=data&order=id.desc&limit=1');
+    rch = await sbGet('changes', 'select=id,data&order=id.desc&limit=1');
     if (Array.isArray(rch) && rch[0]?.data) {
       changes = typeof rch[0].data === 'string' ? JSON.parse(rch[0].data) : rch[0].data;
     }
+  } catch(e) {}
+  try {
+    let chData = null;
+    if (Array.isArray(rch) && rch[0] && String(rch[0].id) === '1') chData = changes;
+    else {
+      const rpl = await sbGet('changes', 'select=data&id=eq.1');
+      if (Array.isArray(rpl) && rpl[0]?.data) chData = typeof rpl[0].data === 'string' ? JSON.parse(rpl[0].data) : rpl[0].data;
+    }
+    if (chData && chData.planos && typeof chData.planos === 'object') planos = chData.planos;
   } catch(e) {}
   return {
     alunos:  Array.isArray(ra) ? ra : [],
@@ -4524,6 +4531,22 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
     );
     if (!pixRecebidos.length) return retornarResumo ? '🔍 Nenhum Pix recebido hoje no extrato.' : undefined;
 
+    // ECONOMIA DE EGRESS (24/09/2026): depois do primeiro Pix do dia, a rotina baixava o banco
+    // inteiro a cada 30 min mesmo quando todos os Pix do extrato já tinham sido tratados. Os
+    // dois descartes abaixo são os MESMOS do início do laço (Pix sem nome de pagador legível,
+    // e Pix já processado nesta execução) e não dependem do banco — se só sobrar isso, o
+    // resultado seria "nada a fazer" de qualquer jeito. Quando chamada pelo comando manual
+    // (retornarResumo), segue normal, para o resumo contar tudo como antes.
+    if (!retornarResumo) {
+      const semAc = s => s.normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
+      const algumNovo = pixRecebidos.some(t => {
+        const m = (t.descricao||'').match(/Cp\s*:\s*\d+-(.+)/i);
+        if (!m || !m[1] || m[1].trim().length < 3) return false;
+        return !_pixProcessados.has(hojeStr + '|' + parseFloat(t.valor||0) + '|' + semAc(m[1].trim()));
+      });
+      if (!algumNovo) return undefined;
+    }
+
     const dados = await getDados();
     const preposicoes = ['de','da','do','das','dos','e'];
     // Normalizar acentos para comparação de nomes
@@ -4786,6 +4809,57 @@ async function verificarBoletosPagosInter() {
 
     if (!lista.length) return { confirmados: 0, nomes: [] };
 
+    // ECONOMIA DE EGRESS (24/09/2026): o Inter devolve TODOS os boletos pagos dos últimos 18
+    // meses, então a lista nunca vem vazia — e a rotina baixava o banco inteiro (getDados:
+    // alunos com históricos, custos, aulas, agenda/check-ins) e ainda fazia UMA consulta na
+    // tabela boletos para cada boleto pago de aluno ativo. 288 vezes por dia. Medido no painel
+    // do Supabase: ~200 MB/dia, 100% PostgREST — estourou a cota de 5 GB do plano free.
+    // Agora, antes, uma consulta LEVE (só id, ativo e pendências) descarta os boletos que o
+    // laço abaixo descartaria de qualquer jeito: um boleto só é creditado se
+    // planejarCreditoBoleto disser "esperado", e isso EXIGE uma pendência > 0 numa chave do
+    // mês do boleto (a própria chave simples ou 'mes-…' — toda chave de quita/chaveLanc é uma
+    // dessas). Sem essa pendência, o crédito é impossível, então pular é o mesmo resultado.
+    // O download completo e a checagem na tabela boletos só acontecem para quem sobra.
+    const rLeve = await sbGet('alunos', 'select=id,ativo,pagamentos_pendentes&ativo=eq.SIM');
+    const pendPorAluno = {};
+    (Array.isArray(rLeve) ? rLeve : []).forEach(a => {
+      if (a.ativo !== 'SIM') return;
+      let pend = a.pagamentos_pendentes;
+      try { pend = typeof pend === 'string' ? JSON.parse(pend || '{}') : (pend || {}); }
+      catch (e) { pend = null; } // pendência ilegível: não arrisca descartar, deixa passar
+      pendPorAluno[a.id] = pend;
+    });
+    const candidatos = lista.filter(item => {
+      const bc = item.cobranca || item;
+      const psn = parseSeuNumero(bc.seuNumero);
+      if (!psn.alunoId) return false;
+      if (!(psn.alunoId in pendPorAluno)) return false;   // não existe ou não está ativo
+      const mes = psn.mes || (bc.dataVencimento || '').slice(0,7);
+      if (!mes) return false;
+      const pend = pendPorAluno[psn.alunoId];
+      if (pend === null) return true;
+      return Object.keys(pend).some(k => (k === mes || k.startsWith(mes + '-')) && (pend[k] || 0) > 0);
+    });
+    if (!candidatos.length) return { confirmados: 0, nomes: [] };
+
+    // Checagem de "já processado" (pago/cancelado na nossa tabela) numa consulta só, em vez de
+    // uma por boleto. Mesma regra de antes (BUG CORRIGIDO v13.6, comentário no laço abaixo).
+    // Se a consulta falhar, segue sem essa informação — igual ao comportamento anterior.
+    const regPorCodigo = {};
+    const codigos = candidatos.map(it => (it.cobranca || it).codigoSolicitacao).filter(c => c && /^[0-9A-Za-z-]+$/.test(c));
+    for (let i = 0; i < codigos.length; i += 50) {
+      try {
+        const rReg = await sbGet('boletos', 'codigo_solicitacao=in.(' + codigos.slice(i, i + 50).join(',') + ')&select=codigo_solicitacao,status,mes');
+        (Array.isArray(rReg) ? rReg : []).forEach(b => { (regPorCodigo[b.codigo_solicitacao] = regPorCodigo[b.codigo_solicitacao] || []).push(b); });
+      } catch (eReg) { console.warn('[rotina-inter] erro ao checar duplicidade em lote:', eReg.message); }
+    }
+    const aProcessar = candidatos.filter(it => {
+      const cod = (it.cobranca || it).codigoSolicitacao;
+      return !(regPorCodigo[cod] || []).some(b => b.status === 'pago' || b.status === 'cancelado');
+    });
+    if (!aProcessar.length) return { confirmados: 0, nomes: [] };
+    console.log('[rotina-inter] ' + aProcessar.length + ' boleto(s) pago(s) com pendência aberta — carregando dados completos');
+
     const dados = await getDados();
     let confirmados = 0;
     const confirmadosNomes = [];
@@ -4795,7 +4869,7 @@ async function verificarBoletosPagosInter() {
     // do aluno — ou seja, é um boleto que o sistema EMITIU e ESTÁ ESPERANDO receber.
     // Isso impede reprocessar boletos antigos de inativos (ex: Edno) ou meses não esperados,
     // já que o status RECEBIDO no Inter é permanente e a busca varre 12 meses de emissão.
-    for (const item of lista) {
+    for (const item of aProcessar) {
       const bc = item.cobranca || item;
       const psn = parseSeuNumero(bc.seuNumero);
       if (!psn.alunoId) continue;
@@ -4823,8 +4897,11 @@ async function verificarBoletosPagosInter() {
       let chaveBoleto = null; // chave exata do lançamento, gravada na nossa tabela ao emitir
       if (bc.codigoSolicitacao) {
         try {
-          const rJaReg = await sbGet('boletos', 'codigo_solicitacao=eq.' + bc.codigoSolicitacao + '&select=id,status,mes');
-          const jaReg = Array.isArray(rJaReg) ? rJaReg : (rJaReg?.data || []);
+          // Já veio da consulta em lote acima; só um código fora do padrão consulta sozinho.
+          const jaReg = codigos.includes(bc.codigoSolicitacao)
+            ? (regPorCodigo[bc.codigoSolicitacao] || [])
+            : await (async () => { const rJaReg = await sbGet('boletos', 'codigo_solicitacao=eq.' + bc.codigoSolicitacao + '&select=id,status,mes');
+                return Array.isArray(rJaReg) ? rJaReg : (rJaReg?.data || []); })();
           if (jaReg.some(b => b.status === 'pago' || b.status === 'cancelado')) continue;
           chaveBoleto = (jaReg.find(b => b.mes) || {}).mes || null;
         } catch(eChk) { console.warn('[rotina-inter] erro ao checar duplicidade por codigo_solicitacao:', eChk.message); }
