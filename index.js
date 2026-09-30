@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.14 - Dedup de Pix sobrevive a restart: a rotina de Pix (30 min) persiste as chaves de Pix já tratadas hoje na tabela pix_processados, em vez de só na memória do processo. Corrige o caso Marcelo (24/09): um deploy no meio do dia esvaziava o controle em memória e um Pix já creditado de manhã era reprocessado à noite, caindo na regra de "mês já pago → credita o mês seguinte" e lançando um crédito indevido.
+// Versão 15.16 - Comissão da professora não considera multa/juros de atraso (caso Claudia Marcia, 30/09): o fechamento mensal usava o valor efetivamente recebido no mês (pags[mes]), que pode incluir multa/juros de boleto pago em atraso — certo pra receita, mas não pra comissão. Agora usa o valor_referencia (mensal, sem taxas) do aluno quando cadastrado. (v15.15, que reforçava o dedup de Pix, não foi publicada a pedido do Daniel — este pacote parte da v15.14.)
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.14'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.16'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1480,9 +1480,14 @@ function buildContexto(dados, mes) {
     const pags = typeof a.pagamentos === 'string' ? JSON.parse(a.pagamentos||'{}') : (a.pagamentos||{});
     const v = pags[mes] || 0;
     if (!v) return;
+    // Correção 30/09/2026 (caso Claudia Marcia, mesma do site): v é o valor EFETIVAMENTE
+    // recebido no mês, que pode incluir multa/juros de boleto pago em atraso — certo pra
+    // receita, mas não deve virar comissão extra pra professora. valor_referencia é o valor
+    // mensal "limpo" do aluno; só cai no valor pago se ele não tiver esse campo.
+    const vComissao = (a.valor_referencia > 0) ? a.valor_referencia : v;
     percentuais.forEach(p => {
       const frac = fracaoDaProfBot(a, p.id);
-      if (frac > 0) totalPorProf[p.id] += v * ((p.percentual > 0 ? p.percentual : 40)/100) * frac;
+      if (frac > 0) totalPorProf[p.id] += vComissao * ((p.percentual > 0 ? p.percentual : 40)/100) * frac;
     });
   });
   const totalMonica = totalPorProf['monica'] || 0;
