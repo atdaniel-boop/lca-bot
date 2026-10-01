@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.16 - Comissão da professora não considera multa/juros de atraso (caso Claudia Marcia, 30/09): o fechamento mensal usava o valor efetivamente recebido no mês (pags[mes]), que pode incluir multa/juros de boleto pago em atraso — certo pra receita, mas não pra comissão. Agora usa o valor_referencia (mensal, sem taxas) do aluno quando cadastrado. (v15.15, que reforçava o dedup de Pix, não foi publicada a pedido do Daniel — este pacote parte da v15.14.)
+// Versão 15.17 (01/10): Fechamento mensal corrigido — o "Resultado" era calculado numa conta própria que só descontava custos lançados e horas da Kelly, esquecendo a comissão de qualquer professora percentual (Luiza não entrava) e a retirada fixa da Leda. Agora reaproveita buildContexto() (mesma conta usada no resto do bot e replicada no site) e a mensagem mostra a quebra por professora. Corrigido também: nome sem ambiguidade (ex. duas Anas) só comparava contra a lista filtrada que estava sendo exibida (ex. só os inadimplentes do mês) — agora compara contra todos os alunos, em todos os lugares que usam essa lógica.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.16'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.17'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -257,6 +257,18 @@ async function migrarBoletosFuturosParaPendente(dryRun) {
 //  - 'LCA-{id}-{YYYY-MM}'  → boletos emitidos pelo bot (id + mês)
 //  - '{numero}'            → boletos antigos (pré-bot): o seuNumero é o próprio ID do aluno (coluna # da aba Alunos)
 
+// Nome curto de exibição, sem ambiguidade: só o primeiro nome, a menos que outro aluno do
+// quadro tenha o mesmo primeiro nome — nesse caso mostra os dois primeiros nomes.
+// BUG CORRIGIDO (caso "duas Anas", 01/10/2026): as duas cópias antigas desta lógica (resumo
+// semanal e fechamento mensal) só comparavam contra a lista JÁ FILTRADA que estava sendo
+// exibida (ex.: só os inadimplentes do mês) — então se só uma das duas Anas estivesse
+// naquela lista, a ambiguidade não era detectada e ela aparecia só como "Ana". Agora sempre
+// compara contra TODOS os alunos (dados.alunos), não só contra o recorte mostrado no momento.
+function nomeSemAmbiguidade(aluno, todosAlunos) {
+  const pn = (aluno.nome || '').split(' ')[0];
+  const ambiguo = (todosAlunos || []).some(b => b.id !== aluno.id && (b.nome || '').split(' ')[0] === pn);
+  return ambiguo ? aluno.nome.split(' ').slice(0, 2).join(' ') : pn;
+}
 // Retorna mensagem de ambiguidade se encontrarAluno retornou array, ou null se ok.
 function ambiguidade(aluno, nomeBuscado) {
   if (!Array.isArray(aluno)) return null;
@@ -5350,12 +5362,9 @@ async function rotinaResumoSemanal() {
       }
     });
 
-    // Função: retorna nome curto sem ambiguidade (2 palavras se outro aluno tem o mesmo primeiro nome)
-    const nomeResumido = (aluno, lista) => {
-      const pn = aluno.nome.split(' ')[0];
-      const ambiguo = lista.some(b => b.id !== aluno.id && b.nome.split(' ')[0] === pn);
-      return ambiguo ? aluno.nome.split(' ').slice(0,2).join(' ') : pn;
-    };
+    // Nome curto sem ambiguidade — compara contra TODOS os alunos (dados.alunos), não só
+    // contra a lista filtrada sendo exibida (ver nomeSemAmbiguidade em bot_parte1.js).
+    const nomeResumido = (aluno) => nomeSemAmbiguidade(aluno, dados.alunos);
 
     // Pagamentos dos últimos 7 dias (via historico_alteracoes tipo pagamento)
     const seteDiasAtras = new Date(hoje.getTime() - 7*86400000);
@@ -5394,9 +5403,9 @@ async function rotinaResumoSemanal() {
       '📊 *Resumo semanal — ' + hoje.toLocaleDateString('pt-BR') + '*\n\n' +
       '🏦 Saldo Inter: *' + saldoStr + '*\n' +
       '💰 Receita ' + mesAtualStr + ': *' + brl(recMesTotal) + '* (' + nPagos + '/' + ativos.length + ' pagos)\n' +
-      '📥 Pagamentos na semana: ' + (recebidosSemana.length ? recebidosSemana.length + ' (' + recebidosSemana.slice(0,8).map(a=>nomeResumido(a,recebidosSemana)).join(', ') + ')' : 'nenhum') + '\n' +
+      '📥 Pagamentos na semana: ' + (recebidosSemana.length ? recebidosSemana.length + ' (' + recebidosSemana.slice(0,8).map(a=>nomeResumido(a)).join(', ') + ')' : 'nenhum') + '\n' +
       '🔴 Inadimplentes (venc. passado): ' + inadimplentes.length +
-      (inadimplentes.length ? '\n   ' + inadimplentes.slice(0,10).map(a=>nomeResumido(a,inadimplentes)).join(', ') : '') +
+      (inadimplentes.length ? '\n   ' + inadimplentes.slice(0,10).map(a=>nomeResumido(a)).join(', ') : '') +
       '\n\n_Bom fim de semana!_ 🙌');
     console.log('[resumo-semanal] enviado');
   } catch(e) { console.error('[resumo-semanal] erro:', e.message); }
@@ -5719,52 +5728,46 @@ async function rotinaFechamentoMensal() {
     const dados = await getDados();
     const MESES_PT3 = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 
-    // Receita do mês fechado e do anterior
-    let recFechado = 0, recAnt = 0, nPagFechado = 0, inadimplentes = [];
+    // BUG CORRIGIDO (01/10/2026, caso "Resultado não bate com o site"): esta rotina tinha sua
+    // PRÓPRIA conta de "Resultado", recalculada do zero e divergente do resto do sistema — só
+    // descontava os custos lançados e as horas da Kelly, e esquecia por completo a comissão de
+    // qualquer professora percentual (a Luiza não entrava) e a retirada fixa da Leda. Por isso
+    // o Resultado do fechamento mensal nunca batia com o Relatório Contábil do site. Agora
+    // reaproveita buildContexto() — a MESMA função usada em todo o resto do bot e que já
+    // replica a conta do site (Leda + todas as percentuais + Kelly) — em vez de manter uma
+    // segunda cópia da regra. Não reaproveita ctx.inadimplentes: aquela lista é pensada pro
+    // mês CORRENTE (compara o dia de hoje com o dia de vencimento de cada aluno), o que não
+    // faz sentido pra um mês já fechado — aqui a regra continua sendo simplesmente "não pagou
+    // a mensalidade daquele mês", sem depender da data de hoje.
+    const ctx = buildContexto(dados, mesFechadoStr);
+    const ctxAnt = buildContexto(dados, mesAnterior2);
+    const recFechado = ctx.financeiro.receita, recAnt = ctxAnt.financeiro.receita;
+    const custosTotal = ctx.financeiro.custos;
+    const totalProf = ctx.financeiro.professoras;
+    const resultado = ctx.financeiro.resultado;
+    const resultadoAnt = ctxAnt.financeiro.resultado;
+
+    let nPagFechado = 0, inadimplentes = [];
     dados.alunos.forEach(a => {
       const pags = typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});
-      const pr = typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});
-      // Receita soma tudo o que entrou (mensalidade + excepcional + rescisão); a contagem de
-      // pagantes e de inadimplentes continua olhando só a mensalidade.
-      const recebF = recebidoMesBot(pags, mesFechadoStr), recebA = recebidoMesBot(pags, mesAnterior2);
-      if (recebF > 0) recFechado += recebF - (pr[mesFechadoStr]||0);
       if (pags[mesFechadoStr] > 0) nPagFechado++;
-      if (recebA > 0) recAnt += recebA - (pr[mesAnterior2]||0);
       if (a.ativo === 'SIM' && alunoAtivoNoMes(a, mesFechadoStr) && !(pags[mesFechadoStr] > 0)) inadimplentes.push(a);
     });
 
-    // Nome sem ambiguidade: 2 palavras se há outro inadimplente com mesmo primeiro nome
-    const nomeInad = (a) => {
-      const pn = a.nome.split(' ')[0];
-      return inadimplentes.some(b => b.id !== a.id && b.nome.split(' ')[0] === pn)
-        ? a.nome.split(' ').slice(0,2).join(' ') : pn;
-    };
+    // Nome sem ambiguidade — compara contra TODOS os alunos, não só os inadimplentes do mês
+    // (ver nomeSemAmbiguidade em bot_parte1.js).
+    const nomeInad = (a) => nomeSemAmbiguidade(a, dados.alunos);
 
-    // Custos do mês fechado
-    let custosTotal = 0;
-    (dados.custos||[]).forEach(cu => {
-      if ((cu.mes||'') === mesFechadoStr) custosTotal += parseFloat(cu.valor||0);
-    });
+    // Quebra do custo de professoras por professora (pra ficar visível quem está contabilizado
+    // — antes só a Kelly aparecia, e nem Leda nem as demais percentuais tinham linha nenhuma).
+    const profsOrdenadas = (dados.professoras||[]).slice().sort((a,b) => (a.ordem||99)-(b.ordem||99));
+    const rotuloProf = (p) => p.tipo==='proprietaria' ? 'retirada fixa' : p.tipo==='hora' ? 'hora-aula' : '%';
+    const profDetalheTxt = profsOrdenadas.map(p =>
+      '   • ' + p.nome + ' (' + rotuloProf(p) + '): ' + brl(ctx.financeiro.detalheProfessoras[p.id] || 0)
+    ).join('\n');
 
-    // Aulas Kelly do mês (horas x valor/hora)
-    let kellyTotal = 0;
-    const profKelly = (dados.professoras||[]).find(pr => (pr.nome||'').toLowerCase().includes('kelly'));
-    const vhKelly = parseFloat(profKelly?.valor_hora || 35);
-    (dados.aulas||[]).forEach(au => {
-      if (au.prof_id === 'kelly' && (au.mes||'') === mesFechadoStr) {
-        kellyTotal += (parseFloat(au.horas||au.vh||0)) * vhKelly;
-      }
-    });
-
-    const resultado = recFechado - custosTotal - kellyTotal;
     const varRecPct = recAnt > 0 ? Math.round(((recFechado-recAnt)/recAnt)*100) : 0;
     const varRecStr = varRecPct > 0 ? '+' + varRecPct + '%' : varRecPct + '%';
-
-    // Resultado do mês anterior para comparação
-    let custosAnt = 0, kellyAnt = 0;
-    (dados.custos||[]).forEach(cu => { if ((cu.mes||'') === mesAnterior2) custosAnt += parseFloat(cu.valor||0); });
-    (dados.aulas||[]).forEach(au => { if (au.prof_id === 'kelly' && (au.mes||'') === mesAnterior2) kellyAnt += (parseFloat(au.horas||au.vh||0)) * vhKelly; });
-    const resultadoAnt = recAnt - custosAnt - kellyAnt;
     const varResPct = resultadoAnt > 0 ? Math.round(((resultado-resultadoAnt)/resultadoAnt)*100) : 0;
     const varResStr = varResPct > 0 ? '+' + varResPct + '%' : varResPct + '%';
     const resSinal = resultado >= 0 ? '✅' : '🔴';
@@ -5775,8 +5778,8 @@ async function rotinaFechamentoMensal() {
       '📈 *Fechamento mensal — ' + mesNome + '*\n\n' +
       '💰 Receita: *' + brl(recFechado) + '* (' + varRecStr + ' vs mês anterior)\n' +
       '👥 Pagantes: ' + nPagFechado + '\n' +
-      '💸 Custos lançados: ' + brl(custosTotal) + '\n' +
-      '🧘 Aulas Kelly: ' + brl(kellyTotal) + '\n' +
+      '💸 Custos operacionais: ' + brl(custosTotal) + '\n' +
+      '👩‍🏫 Professoras: ' + brl(totalProf) + '\n' + profDetalheTxt + '\n' +
       resSinal + ' *Resultado: ' + brl(resultado) + '* (' + varResStr + ' vs mês anterior)\n' +
       '🔴 Não pagaram: ' + inadimplentes.length +
       (inadimplentes.length ? ' (' + inadimplentes.slice(0,10).map(nomeInad).join(', ') + (inadimplentes.length>10?'...':'') + ')' : '') +
@@ -5793,11 +5796,16 @@ async function rotinaFechamentoMensal() {
         '  Receita:        ' + brl(recFechado) + '  (' + varRecStr + ' vs mes anterior)',
         '  Pagantes:       ' + nPagFechado,
         '  Custos:         ' + brl(custosTotal),
-        '  Aulas Kelly:    ' + brl(kellyTotal),
+        '  Professoras:    ' + brl(totalProf),
+      ];
+      profsOrdenadas.forEach(p => {
+        linhasPDF.push('    ' + String(p.nome + ' (' + rotuloProf(p) + ')').slice(0,38).padEnd(40) + brl(ctx.financeiro.detalheProfessoras[p.id] || 0));
+      });
+      linhasPDF.push(
         '  Resultado:      ' + brl(resultado) + '  (' + varResStr + ' vs mes anterior)',
         '',
         'CUSTOS DO MES'
-      ];
+      );
       (dados.custos||[]).filter(cu => (cu.mes||'') === mesFechadoStr).forEach(cu => {
         linhasPDF.push('  ' + String(cu.desc||cu.categoria||'?').slice(0,40).padEnd(42) + brl(parseFloat(cu.valor||0)));
       });
