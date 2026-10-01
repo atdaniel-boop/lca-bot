@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.17 (01/10): Fechamento mensal corrigido — o "Resultado" era calculado numa conta própria que só descontava custos lançados e horas da Kelly, esquecendo a comissão de qualquer professora percentual (Luiza não entrava) e a retirada fixa da Leda. Agora reaproveita buildContexto() (mesma conta usada no resto do bot e replicada no site) e a mensagem mostra a quebra por professora. Corrigido também: nome sem ambiguidade (ex. duas Anas) só comparava contra a lista filtrada que estava sendo exibida (ex. só os inadimplentes do mês) — agora compara contra todos os alunos, em todos os lugares que usam essa lógica.
+// Versão 15.18 (01/10): detecção automática de Pix ampliada — 1) Pix único que paga de uma vez a mensalidade do aluno e a de um dependente vinculado (campo "Paga junto com" na ficha, ex: mãe/filha, marido/esposa) agora é dividido e credita os dois, em vez de lançar o valor cheio (errado) só em quem o nome bateu no extrato; 2) quando quem paga não é o próprio aluno (ex: o marido, que não é aluno), um "Pagador Pix alternativo" cadastrado na ficha faz o Pix ser reconhecido mesmo assim.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.17'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.18'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1102,7 +1102,7 @@ async function interSumarioCobrancas(dataInicial, dataFinal) {
 
 async function getDados() {
   const [ra, rc, rk] = await Promise.all([
-    sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_principal,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo,nfse_ativo,nfse_cpf,nfse_dias,nfse_desc,pref_envio,contato_emerg,grau_emerg,tel_emerg,historico,aulas_monica,notas_fiscais_emitidas'),
+    sbGet('alunos', 'select=id,nome,ativo,cpf,email,telefone,tipo_plano,vezes_semana,forma_pagamento,dia_vencimento,professora,prof_principal,prof_secundaria,aulas_prof,pagamentos,pagamentos_pendentes,pagamentos_rescisao,data_matricula,historico_alteracoes,valor_referencia,paga_junto_com_id,pix_pagador_alternativo,logradouro,numero,complemento,bairro,cidade,cep,endereco,nascimento,aniversario,sexo,nfse_ativo,nfse_cpf,nfse_dias,nfse_desc,pref_envio,contato_emerg,grau_emerg,tel_emerg,historico,aulas_monica,notas_fiscais_emitidas'),
     sbGet('custos', 'select=*&order=id.desc'),
     sbGet('aulas',  'select=*&order=id.desc')
   ]);
@@ -4605,63 +4605,18 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
     // Normalizar acentos para comparação de nomes
     const semAcento = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
 
-    for (const t of pixRecebidos) {
-      const valor = parseFloat(t.valor||0);
-      // Extrair nome do pagador: "PIX RECEBIDO - Cp :XXXXXXXX-NOME COMPLETO"
-      const mPix = (t.descricao||'').match(/Cp\s*:\s*\d+-(.+)/i);
-      if (!mPix || !mPix[1] || mPix[1].trim().length < 3) continue;
-      const nomePagador = semAcento(mPix[1].trim());
-      const partesPag = nomePagador.split(/\s+/).filter(p => !preposicoes.includes(p));
-
-      const chave = hojeStr + '|' + valor + '|' + nomePagador;
-      if (_pixProcessados.has(chave)) continue;
-
-      // BUG CORRIGIDO v14.0: quando duas alunas ativas compartilham os 2 primeiros nomes
-      // (ex: "Maria José Fernandes Mendonça" e "Maria José Duarte Calazans"), a comparação
-      // só pelos 2 primeiros nomes gerava ambiguidade e o Pix era descartado em silêncio,
-      // mesmo o nome completo do pagador batendo com exatidão em só uma delas. Agora tenta
-      // primeiro o NOME COMPLETO (todas as partes do nome cadastrado presentes no nome do
-      // pagador) — muito mais preciso — e só cai no modo "2 primeiros nomes" se isso não
-      // encontrar ninguém (ex: nome do pagador no extrato veio truncado).
-      const alunosAtivos = dados.alunos.filter(a => a.ativo === 'SIM');
-      const candidatosCompleto = alunosAtivos.filter(a => {
-        const partesAluno = semAcento(a.nome).split(/\s+/).filter(p => !preposicoes.includes(p));
-        if (partesAluno.length < 2) return false;
-        return partesAluno.every(p => partesPag.includes(p));
-      });
-      const candidatos = candidatosCompleto.length === 1 ? candidatosCompleto : alunosAtivos.filter(a => {
-        const partesAluno = semAcento(a.nome).split(/\s+/).filter(p => !preposicoes.includes(p));
-        if (partesAluno.length < 2) return false;
-        return partesPag.includes(partesAluno[0]) && partesPag.includes(partesAluno[1]);
-      });
-
-      if (candidatos.length !== 1) { semMatch++; continue; } // sem match único e seguro, ignorar
-      const aluno = candidatos[0];
-
-      // Já pagou o mês corrente? Antes disso pulava direto — mas o aluno pode ter pago
-      // ADIANTADO o mês seguinte (ex: Breno vence dia 5, manda o Pix no dia 30 do mês
-      // anterior). Só mensalistas têm essa continuidade previsível: cíclico (trimestral/
-      // semestral) paga o pacote inteiro de uma vez, "mês atual pago" não indica nada sobre
-      // o mês seguinte pra eles, então não tentamos adivinhar.
-      // A qual lançamento esse Pix pertence — regra em planejarCreditoPix (bot_parte2.js):
-      // mensalidade pendente do mesmo valor tem prioridade; senão, UMA cobrança extra
-      // (excepcional/rescisão) pendente do mesmo valor; senão, a regra de sempre (mês atual,
-      // ou o seguinte para mensalista que pagou adiantado — caso Breno).
+    // Credita um Pix (ou a fração de um Pix conjunto, ver mais abaixo) pra UM aluno. Extraído
+    // do laço principal em 01/10/2026 (caso Valéria/mãe e Solange/marido) pra poder ser chamado
+    // duas vezes — uma por aluno — quando um Pix único quita a mensalidade de dois alunos
+    // vinculados, sem duplicar toda a lógica de crédito/cancelamento de boleto.
+    async function creditarPixAluno(aluno, valor, chave) {
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
       const pendPix = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
       const planoPix = planejarCreditoPix(pags, pendPix, mesAtualStr, valor, aluno.tipo_plano);
-      if (planoPix.pular) { await marcarPixProcessado(chave, aluno.id, valor); jaPagos++; continue; }
+      if (planoPix.pular) { await marcarPixProcessado(chave, aluno.id, valor); jaPagos++; return; }
       const mesCredito = planoPix.destino; // chave simples do mês, ou a chave da cobrança extra
       const rotuloPix = rotuloLancamentoBot(mesCredito);
 
-      // BUG CORRIGIDO v13.5: esta rotina varre Pix genéricos no extrato e SEMPRE assumia que
-      // eram para o mês atual — mas se o Pix na verdade liquidou um boleto de OUTRO mês (ex:
-      // aluno usou o Pix copia-e-cola de um boleto futuro por engano), a rotina de verificação
-      // de boletos (verificarBoletosPagosInter) já credita o mês CORRETO de forma precisa via
-      // o próprio boleto pago no Inter — e essa rotina genérica lançava o MESMO pagamento de
-      // novo no mês atual, contabilizando em dobro e cancelando um boleto que não foi pago.
-      // Agora, antes de assumir "mês atual", confere se ALGUM boleto deste aluno com o mesmo
-      // valor já foi marcado como pago HOJE (por qualquer outra rotina) — se sim, pula.
       try {
         const hojeInicio = hojeStr + 'T00:00:00';
         const rBolHoje = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.pago&valor=eq.' + valor + '&pago_em=gte.' + hojeInicio + '&select=id,mes');
@@ -4670,67 +4625,36 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
           await marcarPixProcessado(chave, aluno.id, valor);
           console.log('[rotina-pix] Pix de ' + aluno.nome + ' já creditado hoje via boleto (' + bolsHoje.map(b=>b.mes).join(',') + ') — evitando duplicidade.');
           jaPagos++;
-          continue;
+          return;
         }
       } catch(eDup) { console.warn('[rotina-pix] erro ao checar duplicidade:', eDup.message); }
 
-      // Lançar pagamento automaticamente
       try {
         pags[mesCredito] = valor;
-        // Pendências que esse Pix quita (calculadas em planejarCreditoPix): mensalidade →
-        // chave simples + avulso do mesmo valor (caso Daniel, 15/09); extra → só a própria.
-        // Antes apagava também excepcional/rescisão do mesmo valor ao creditar a mensalidade.
         planoPix.quita.forEach(k => { delete pendPix[k]; });
         const hist = aluno.historico_alteracoes || [];
         hist.push({ data: hojeBR.toLocaleDateString('pt-BR'), tipo: 'pagamento',
           desc: 'Pagamento ' + rotuloPix + ' via Pix Inter (detectado no extrato): ' + brl(valor) });
         const patch = { pagamentos: pags, pagamentos_pendentes: pendPix, historico_alteracoes: hist };
-        // BUG CORRIGIDO NA REVISÃO GERAL (04/09/2026): esta rotina cancela o boleto REAL no
-        // Inter logo depois de creditar localmente. Sem verificar se o sbPatch realmente
-        // gravou, uma falha silenciosa (RLS, etc.) resultaria no pior cenário possível: o
-        // boleto de verdade cancelado no banco, e nosso sistema continuando sem nenhum
-        // registro do pagamento — o aluno ficaria sem boleto E sem crédito.
         const rPatchPix = await sbPatch('alunos', 'id=eq.' + aluno.id, patch);
         if (!Array.isArray(rPatchPix) || !rPatchPix.length) {
           console.error('[rotina-pix] sbPatch não confirmou gravação para', aluno.nome, '— abortando ANTES de cancelar boleto real.');
           await tgSend(TELEGRAM_CHAT_ID,
             '⚠️ *Pix detectado, mas NÃO consegui creditar!*\n\n👤 ' + aluno.nome + '\n💰 ' + brl(valor) + '\n📅 ' + mesCredito +
             '\n\nO Supabase não confirmou a gravação — nada foi salvo, e por segurança NÃO cancelei nenhum boleto. Confirme manualmente: "confirmar pagamento ' + aluno.nome.split(' ')[0] + ' ' + valor + ' em ' + mesCredito.slice(0,7).split('-').reverse().join('/') + '"');
-          continue;
+          return;
         }
         await logOp('pix_detectado', aluno.nome + ' - ' + mesCredito, aluno.id, valor, mesCredito);
-        await marcarPixProcessado(chave, aluno.id, valor); // só marca como processado DEPOIS de
-        // confirmar a gravação — se a gravação falhar (bloco acima), o próximo ciclo (30 min)
-        // tenta creditar de novo em vez de ignorar esse Pix pra sempre.
+        await marcarPixProcessado(chave, aluno.id, valor);
         await avisarNfSePendente(aluno, mesCredito, valor);
-        // Cancelar boleto real no Inter, se ainda estiver aberto para este mês
-        // (evita boleto ficar aberto/atrasado no Inter quando o aluno já pagou via Pix)
         let boletoCancelMsg = '';
         try {
-          // BUG CORRIGIDO (caso Daniel, 15/09/2026): buscava só mes=eq.mesCredito — nunca achava
-          // um boleto avulso/excepcional local (mes='YYYY-MM-av...'), então sempre caía no
-          // fallback "só existe no Inter" e criava um registro NOVO em vez de atualizar o
-          // original — o boleto real ficava corretamente cancelado no Inter, mas nossa tabela
-          // local acumulava um registro fantasma duplicado, e o original nunca era atualizado.
-          // Busca todos os "aberto" do aluno e filtra por prefixo do mês aqui — evita depender
-          // de sintaxe like/ilike do PostgREST, que nunca foi testada contra o Supabase real.
           const rBolPixTodos = await sbGet('boletos', 'aluno_id=eq.' + aluno.id + '&status=eq.aberto&select=id,codigo_solicitacao,mes');
           const bolsPixTodos = Array.isArray(rBolPixTodos) ? rBolPixTodos : (rBolPixTodos?.data || []);
-          // Mensalidade: boletos da chave simples e de avulso do mês — NUNCA o de uma cobrança
-          // extra (excepcional/rescisão), que é outra dívida. Extra: só o boleto dela.
           const rBolPix = bolsPixTodos.filter(b => b.mes === mesCredito ||
             (!planoPix.extra && (b.mes||'').startsWith(mesCredito + '-') && !ehChaveExtra(b.mes)));
           let bolsPix = Array.isArray(rBolPix) ? rBolPix : (rBolPix?.data || []);
-          // BUG CORRIGIDO v14.10: se o aluno não tem NENHUM registro na nossa tabela local de
-          // boletos (caso de alunos legados, cujos boletos nunca foram sincronizados pro banco —
-          // caso real do Jorge Luis Correa Bastos), essa busca sempre voltava vazia e o
-          // cancelamento nunca era nem tentado — o Pix era creditado no nosso sistema, mas o
-          // boleto real ficava aberto/atrasado no Inter pra sempre, sem nenhum aviso disso.
-          // Agora, se não achar localmente, busca direto no Inter (sem filtro de situação —
-          // filtro de busca já provou ser não confiável) antes de desistir.
           let bolsInterPix = [];
-          // Busca direta no Inter só para mensalidade: o seuNumero de uma cobrança extra não
-          // distingue com segurança qual dívida é, e cancelar o boleto errado seria pior.
           if (!bolsPix.length && !planoPix.extra) {
             try {
               const rTudoPix = await interCobrancasRobusto({});
@@ -4739,8 +4663,6 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
               bolsInterPix = (rTudoPix?.cobrancas || []).filter(item => {
                 const bc = item.cobranca || item;
                 if (!['A_RECEBER','ATRASADO'].includes(bc.situacao)) return false;
-                // Só o boleto do MESMO valor do Pix — antes podia cancelar o de outra cobrança
-                // do mesmo mês (ex: o excepcional, cujo seuNumero não traz o mês).
                 if (Math.abs(parseFloat(bc.valorNominal || 0) - valor) >= 0.01) return false;
                 const psn = parseSeuNumero(bc.seuNumero);
                 if (psn.alunoId === aluno.id && (psn.mes === mesCredito || !psn.mes)) return true;
@@ -4754,12 +4676,6 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
             } catch(eBuscaInter) { console.error('[rotina-pix] erro ao buscar boleto no Inter:', eBuscaInter.message); }
           }
           const todosBols = [...bolsPix, ...bolsInterPix];
-          // BUG CORRIGIDO (caso Daniel Amorim Teixeira, 15/09/2026): a mensagem final dizia
-          // "cancelado no Inter automaticamente" sempre que um boleto correspondente era
-          // ACHADO — mesmo quando interCancelarBoleto() falhava de verdade (Inter confirmou:
-          // "Cobrança com falha no cancelamento", boleto continuou "A receber"). O status
-          // cancelouNoInter já existia por boleto, só nunca era usado pra montar a mensagem —
-          // ela olhava só se algo tinha sido encontrado, nunca se o cancelamento deu certo.
           const cancelados = [], falharam = [];
           for (const b of todosBols) {
             if (!b.codigo_solicitacao) continue;
@@ -4774,9 +4690,6 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
               }
             }
             (cancelouNoInter ? cancelados : falharam).push(b.codigo_solicitacao);
-            // Sempre registrar o status — mesmo se o cancelamento no Inter falhar, o dashboard
-            // não deve continuar contando como "a receber" um mês já pago. Se o boleto só
-            // existia no Inter (sem id local), cria o registro em vez de tentar atualizar.
             if (b._interOnly || !b.id) {
               await sbPost('boletos', {
                 aluno_id: aluno.id, mes: mesCredito, valor: valor, codigo_solicitacao: b.codigo_solicitacao,
@@ -4814,6 +4727,81 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       } catch(e) {
         console.error('[rotina-pix] erro ao lançar:', aluno.nome, e.message);
       }
+    }
+
+    for (const t of pixRecebidos) {
+      const valor = parseFloat(t.valor||0);
+      // Extrair nome do pagador: "PIX RECEBIDO - Cp :XXXXXXXX-NOME COMPLETO"
+      const mPix = (t.descricao||'').match(/Cp\s*:\s*\d+-(.+)/i);
+      if (!mPix || !mPix[1] || mPix[1].trim().length < 3) continue;
+      const nomePagador = semAcento(mPix[1].trim());
+      const partesPag = nomePagador.split(/\s+/).filter(p => !preposicoes.includes(p));
+
+      const chave = hojeStr + '|' + valor + '|' + nomePagador;
+      if (_pixProcessados.has(chave)) continue;
+
+      // BUG CORRIGIDO v14.0: quando duas alunas ativas compartilham os 2 primeiros nomes
+      // (ex: "Maria José Fernandes Mendonça" e "Maria José Duarte Calazans"), a comparação
+      // só pelos 2 primeiros nomes gerava ambiguidade e o Pix era descartado em silêncio,
+      // mesmo o nome completo do pagador batendo com exatidão em só uma delas. Agora tenta
+      // primeiro o NOME COMPLETO (todas as partes do nome cadastrado presentes no nome do
+      // pagador) — muito mais preciso — e só cai no modo "2 primeiros nomes" se isso não
+      // encontrar ninguém (ex: nome do pagador no extrato veio truncado).
+      const alunosAtivos = dados.alunos.filter(a => a.ativo === 'SIM');
+      // BUG CORRIGIDO (caso Magali, 01/10/2026): quando quem manda o Pix não é o próprio aluno
+      // (ex: o marido, que não é aluno), o nome no extrato nunca batia com nenhum cadastro, e o
+      // Pix ficava pra sempre em "sem correspondência", exigindo lançamento manual toda vez.
+      // Agora, além do nome da própria aluna, também aceita qualquer nome cadastrado em
+      // 'pix_pagador_alternativo' (campo editável na ficha, separado por vírgula se houver mais
+      // de um nome autorizado).
+      const nomesParaComparar = a => [a.nome].concat(
+        String(a.pix_pagador_alternativo || '').split(',').map(s => s.trim()).filter(Boolean));
+      const candidatosCompleto = alunosAtivos.filter(a => nomesParaComparar(a).some(nome => {
+        const partesAluno = semAcento(nome).split(/\s+/).filter(p => !preposicoes.includes(p));
+        if (partesAluno.length < 2) return false;
+        return partesAluno.every(p => partesPag.includes(p));
+      }));
+      const candidatos = candidatosCompleto.length === 1 ? candidatosCompleto : alunosAtivos.filter(a => nomesParaComparar(a).some(nome => {
+        const partesAluno = semAcento(nome).split(/\s+/).filter(p => !preposicoes.includes(p));
+        if (partesAluno.length < 2) return false;
+        return partesPag.includes(partesAluno[0]) && partesPag.includes(partesAluno[1]);
+      }));
+
+      if (candidatos.length !== 1) { semMatch++; continue; } // sem match único e seguro, ignorar
+      const aluno = candidatos[0];
+
+      // BUG CORRIGIDO (caso Valéria/mãe e Solange/marido, 01/10/2026): quando um Pix único paga
+      // de uma vez a mensalidade do aluno E a de um dependente vinculado ('paga_junto_com_id',
+      // campo editável na ficha), o valor não bate com a mensalidade de ninguém sozinho — mas
+      // a regra de sempre (planejarCreditoPix) não sabe disso e credita o valor CHEIO (as duas
+      // mensalidades juntas) só no aluno cujo nome bateu no extrato, deixando o vinculado pra
+      // sempre com pendência aberta. Agora, antes de seguir com o aluno sozinho, procura um
+      // vinculado (o vínculo pode estar cadastrado em qualquer um dos dois lados) cuja pendência
+      // do mês, somada à deste aluno, bata com o valor do Pix — e credita os dois separadamente,
+      // cada um pelo seu próprio valor.
+      const vinculoId = aluno.paga_junto_com_id ||
+        (alunosAtivos.find(a2 => a2.paga_junto_com_id === aluno.id) || {}).id;
+      const vinculado = vinculoId ? alunosAtivos.find(a2 => a2.id === vinculoId) : null;
+      if (vinculado) {
+        const pendA = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
+        const pendB = typeof vinculado.pagamentos_pendentes==='string'?JSON.parse(vinculado.pagamentos_pendentes||'{}'):(vinculado.pagamentos_pendentes||{});
+        const pagsA = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
+        const pagsB = typeof vinculado.pagamentos==='string'?JSON.parse(vinculado.pagamentos||'{}'):(vinculado.pagamentos||{});
+        const valorPendMes = (pend, m) => Object.keys(pend)
+          .filter(k => (k === m || k.startsWith(m + '-')) && !ehChaveExtra(k))
+          .reduce((s,k) => s + (pend[k]||0), 0);
+        const valorA = valorPendMes(pendA, mesAtualStr);
+        const valorB = valorPendMes(pendB, mesAtualStr);
+        if (valorA > 0 && valorB > 0 && Math.abs((valorA + valorB) - valor) < 0.01 &&
+            !((pagsA[mesAtualStr]||0) > 0) && !((pagsB[mesAtualStr]||0) > 0)) {
+          await creditarPixAluno(aluno, valorA, chave + '|' + aluno.id);
+          await creditarPixAluno(vinculado, valorB, chave + '|' + vinculado.id);
+          await marcarPixProcessado(chave, aluno.id, valor);
+          continue;
+        }
+      }
+
+      await creditarPixAluno(aluno, valor, chave);
     }
   } catch(e) {
     console.error('[rotina-pix] erro geral:', e.message);
