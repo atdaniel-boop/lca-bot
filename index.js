@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.18 (01/10): detecção automática de Pix ampliada — 1) Pix único que paga de uma vez a mensalidade do aluno e a de um dependente vinculado (campo "Paga junto com" na ficha, ex: mãe/filha, marido/esposa) agora é dividido e credita os dois, em vez de lançar o valor cheio (errado) só em quem o nome bateu no extrato; 2) quando quem paga não é o próprio aluno (ex: o marido, que não é aluno), um "Pagador Pix alternativo" cadastrado na ficha faz o Pix ser reconhecido mesmo assim.
+// Versão 15.19 (01/10): a mensagem de "Pix detectado e lançado" agora informa "Pago por: X" sempre que quem mandou o Pix (lido do extrato) não é a própria pessoa creditada — ou seja, nos casos do Pagador Pix alternativo e no lado "vinculado" de um Pix conjunto. Quando o nome do extrato já bate com o nome do próprio aluno creditado, a mensagem continua igual a antes (sem a linha extra).
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.18'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.19'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1163,6 +1163,8 @@ async function saveChanges(ch) {
       { ...sbHeaders(), Prefer: 'resolution=merge-duplicates' }, { id: 1, data: ch });
   } catch(e) { console.error('saveChanges erro:', e.message); }
 }
+
+// ── FIM DA PARTE 1/6 (bot_parte1.js) ──
 // ── bot_parte2.js (6 partes) — continuação de executar() iniciada em bot_parte1.js ──
 
 
@@ -2186,6 +2188,8 @@ async function executar(intencao, p, dados, chatId) {
     if (dados.changes) { dados.changes.checkins = ch; await saveChanges(dados.changes); }
     return '✅ Check-in desfeito!\n*' + aluno.nome + '* - ' + dataCi.slice(8) + '/' + dataCi.slice(5,7);
   }
+
+// ── FIM DA PARTE 2/6 (bot_parte2.js) ──
 // ── bot_parte3.js (6 partes) — continuação de executar() iniciada em bot_parte2.js (ainda dentro do handler inter_emitir_plano) ──
 
 
@@ -3151,6 +3155,8 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           referencia: 'Boleto ' + numBoleto + ' - ' + mesNome + ' ' + anoVenc,
           seuNumero: gerarSeuNumero(aluno.id, mesStr)
         });
+
+// ── FIM DA PARTE 3/6 (bot_parte3.js) ──
 // ── bot_parte4.js (6 partes) — continuação de executar() iniciada em bot_parte3.js ──
 
         // Se o Inter rejeitou (sem codigoSolicitacao), tratar como erro com mensagem clara
@@ -4151,6 +4157,8 @@ async function processar(msg) {
     const al = dados.alunos.find(function(a){ return a.nome.toLowerCase().includes((params.aluno_nome||'').toLowerCase()); });
     if (al) params.aluno_id = al.id;
   }
+
+// ── FIM DA PARTE 4/6 (bot_parte4.js) ──
 // ── bot_parte5.js (6 partes) — continuação de processar() iniciada em bot_parte4.js ──
 
 
@@ -4609,7 +4617,7 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
     // do laço principal em 01/10/2026 (caso Valéria/mãe e Solange/marido) pra poder ser chamado
     // duas vezes — uma por aluno — quando um Pix único quita a mensalidade de dois alunos
     // vinculados, sem duplicar toda a lógica de crédito/cancelamento de boleto.
-    async function creditarPixAluno(aluno, valor, chave) {
+    async function creditarPixAluno(aluno, valor, chave, nomePagadorExibicao) {
       const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
       const pendPix = typeof aluno.pagamentos_pendentes==='string'?JSON.parse(aluno.pagamentos_pendentes||'{}'):(aluno.pagamentos_pendentes||{});
       const planoPix = planejarCreditoPix(pags, pendPix, mesAtualStr, valor, aluno.tipo_plano);
@@ -4718,6 +4726,11 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
         await tgSend(TELEGRAM_CHAT_ID,
           '💸 *Pix detectado e lançado!*\n\n' +
           '👤 ' + aluno.nome + '\n' +
+          // BUG CORRIGIDO (caso Itair/Eliana, 01/10/2026): quando o Pix veio de um pagador
+          // alternativo cadastrado (não a própria aluna), a mensagem não deixava claro quem de
+          // fato mandou o dinheiro — parecia um pagamento normal dela. Agora, nesses casos, a
+          // mensagem mostra também o nome de quem realmente pagou.
+          (nomePagadorExibicao ? '💳 Pago por: ' + nomePagadorExibicao + '\n' : '') +
           '💰 ' + brl(valor) + '\n' +
           '📅 ' + rotuloPix + ' — Pix recebido hoje no Inter.' + boletoCancelMsg + '\n\n' +
           '_Para desfazer: "desfazer pagamento ' + aluno.nome.split(' ')[0] + ' ' + mesCredito + '"_');
@@ -4727,6 +4740,19 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       } catch(e) {
         console.error('[rotina-pix] erro ao lançar:', aluno.nome, e.message);
       }
+    }
+
+    // Decide se vale a pena mostrar "Pago por: X" na mensagem — só quando o nome de quem
+    // mandou o Pix (lido do extrato) NÃO bate com o próprio nome do aluno sendo creditado
+    // (ou seja, o match só foi possível graças a 'pix_pagador_alternativo', ou (no caso de Pix
+    // conjunto) o crédito é de um vinculado que não foi quem mandou o Pix). Quando o nome do
+    // próprio aluno já bate sozinho, retorna null e a mensagem fica como sempre foi.
+    function nomePagadorSeDiferente(alunoAlvo, nomePagadorRaw, partesPagadorArr) {
+      const partesAlvo = semAcento(alunoAlvo.nome).split(/\s+/).filter(p => !preposicoes.includes(p));
+      const proprioNomeBate = partesAlvo.length >= 2 && (
+        partesAlvo.every(p => partesPagadorArr.includes(p)) ||
+        (partesPagadorArr.includes(partesAlvo[0]) && partesPagadorArr.includes(partesAlvo[1])));
+      return proprioNomeBate ? null : nomePagadorRaw;
     }
 
     for (const t of pixRecebidos) {
@@ -4794,14 +4820,14 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
         const valorB = valorPendMes(pendB, mesAtualStr);
         if (valorA > 0 && valorB > 0 && Math.abs((valorA + valorB) - valor) < 0.01 &&
             !((pagsA[mesAtualStr]||0) > 0) && !((pagsB[mesAtualStr]||0) > 0)) {
-          await creditarPixAluno(aluno, valorA, chave + '|' + aluno.id);
-          await creditarPixAluno(vinculado, valorB, chave + '|' + vinculado.id);
+          await creditarPixAluno(aluno, valorA, chave + '|' + aluno.id, nomePagadorSeDiferente(aluno, mPix[1].trim(), partesPag));
+          await creditarPixAluno(vinculado, valorB, chave + '|' + vinculado.id, nomePagadorSeDiferente(vinculado, mPix[1].trim(), partesPag));
           await marcarPixProcessado(chave, aluno.id, valor);
           continue;
         }
       }
 
-      await creditarPixAluno(aluno, valor, chave);
+      await creditarPixAluno(aluno, valor, chave, nomePagadorSeDiferente(aluno, mPix[1].trim(), partesPag));
     }
   } catch(e) {
     console.error('[rotina-pix] erro geral:', e.message);
@@ -5201,6 +5227,8 @@ async function rotinaAlertaInadimplencia() {
       if (vpFmt) linha += '\n   📅 Plano vence: ' + vpFmt;
       return linha;
     }).join('\n\n');
+
+// ── FIM DA PARTE 5/6 (bot_parte5.js) ──
 // ── bot_parte6.js (6 partes) — continuação de rotinaAlertaInadimplencia() iniciada em bot_parte5.js ──
 
 
@@ -6245,3 +6273,5 @@ process.on('unhandledRejection', (reason) => {
 });
 
 main();
+
+// ── FIM DA PARTE 6/6 (bot_parte6.js) ──
