@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.19 (01/10): a mensagem de "Pix detectado e lançado" agora informa "Pago por: X" sempre que quem mandou o Pix (lido do extrato) não é a própria pessoa creditada — ou seja, nos casos do Pagador Pix alternativo e no lado "vinculado" de um Pix conjunto. Quando o nome do extrato já bate com o nome do próprio aluno creditado, a mensagem continua igual a antes (sem a linha extra).
+// Versão 15.20 (03/10): planejarCreditoPix agora prioriza um mês FECHADO anterior com mensalidade pendente do mesmo valor, antes de cair no mês atual por padrão — corrige o caso Ana Clara, cujo Pix de um mês atrasado (setembro) estava sendo creditado no mês atual (outubro, sem pendência nenhuma ainda), deixando o mês realmente devido em aberto pra sempre mesmo com o dinheiro já recebido.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.19'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.20'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1369,9 +1369,21 @@ function planejarCreditoBoleto(mes, chaveBoleto, valorNominal, pend) {
 // PIX: não diz a qual cobrança pertence, então decide pelo valor, nesta ordem:
 //   1) mensalidade do mês atual ainda não paga, com pendência (simples ou avulso) do MESMO
 //      valor → mensalidade (comportamento de sempre, tem prioridade no empate);
-//   2) exatamente UMA cobrança extra pendente (qualquer mês) do mesmo valor → essa extra;
-//   3) regra de sempre: mês atual; se já pago, mensalista credita o mês seguinte (caso
+//   2) mensalidade de um mês FECHADO ANTERIOR ainda em aberto, com pendência do MESMO valor
+//      → o mais antigo desses meses (quem está pagando um atraso, paga o atraso, não o mês
+//      atual — ver item abaixo);
+//   3) exatamente UMA cobrança extra pendente (qualquer mês) do mesmo valor → essa extra;
+//   4) regra de sempre: mês atual; se já pago, mensalista credita o mês seguinte (caso
 //      Breno), cíclico descarta como duplicado.
+//
+// BUG CORRIGIDO (caso Ana Clara nº3, 03/10/2026): faltava o item 2. A Ana Clara tinha
+// setembro em aberto (boleto pendente, R$329) e nenhuma pendência ainda lançada pra outubro
+// (mês atual). O Pix dela de R$329, recebido em outubro, não batia no item 1 (não existia
+// pendência de outubro pra comparar) nem no item 3 (setembro não é cobrança extra), e caía
+// direto no fallback: creditava outubro — um mês que ela nem devia ainda — e setembro
+// continuava aberto pra sempre, com o dinheiro dela já no caixa. Agora, antes do fallback,
+// procura mês(es) fechado(s) anteriores com mensalidade pendente do mesmo valor e credita o
+// mais antigo (quem paga um atraso, quita o atraso).
 function planejarCreditoPix(pags, pend, mesAtual, valor, tipoPlano) {
   pags = pags || {}; pend = pend || {};
   const igual = k => (pend[k] || 0) > 0 && Math.abs((pend[k] || 0) - valor) < 0.01;
@@ -1381,6 +1393,20 @@ function planejarCreditoPix(pags, pend, mesAtual, valor, tipoPlano) {
     (k === mesAtual || k.startsWith(mesAtual + '-')) && !ehChaveExtra(k) && igual(k));
   if (!((pags[mesAtual] || 0) > 0) && regularIgual) {
     return { destino: mesAtual, extra: false, quita: mensalQuita(mesAtual), pular: false };
+  }
+  const mesesAtrasados = {};
+  Object.keys(pend).forEach(k => {
+    if (ehChaveExtra(k)) return;
+    const m = k.slice(0, 7);
+    if (m >= mesAtual) return; // só meses FECHADOS anteriores — o atual já foi tentado acima
+    if (!igual(k)) return;
+    if ((pags[m] || 0) > 0) return; // já pago por outra via, não é isso
+    mesesAtrasados[m] = true;
+  });
+  const mesesAtrasadosList = Object.keys(mesesAtrasados).sort();
+  if (mesesAtrasadosList.length) {
+    const mAtraso = mesesAtrasadosList[0]; // o mais antigo primeiro
+    return { destino: mAtraso, extra: false, quita: mensalQuita(mAtraso), pular: false };
   }
   const extras = Object.keys(pend).filter(k => ehChaveExtra(k) && igual(k) && !((pags[k] || 0) > 0));
   if (extras.length === 1) {
