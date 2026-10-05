@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.20 (03/10): planejarCreditoPix agora prioriza um mês FECHADO anterior com mensalidade pendente do mesmo valor, antes de cair no mês atual por padrão — corrige o caso Ana Clara, cujo Pix de um mês atrasado (setembro) estava sendo creditado no mês atual (outubro, sem pendência nenhuma ainda), deixando o mês realmente devido em aberto pra sempre mesmo com o dinheiro já recebido.
+// Versão 15.22 (05/10): rotina de Pix conjunto (paga_junto_com_id) ganha mais dois fallbacks pra achar a pendência de cada lado quando pagamentos_pendentes está vazio — tabela 'boletos' (quem paga por boleto Inter) e, por último, valor_referencia/último pago histórico (quem paga em dinheiro/cartão, caso real Solange/Salvador, que não tem pendência registrada em lugar nenhum). Sem isso o rateio nunca disparava e o Pix caía inteiro só em quem o nome bateu no extrato, deixando o vinculado sempre de fora.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.20'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.22'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4842,8 +4842,38 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
         const valorPendMes = (pend, m) => Object.keys(pend)
           .filter(k => (k === m || k.startsWith(m + '-')) && !ehChaveExtra(k))
           .reduce((s,k) => s + (pend[k]||0), 0);
-        const valorA = valorPendMes(pendA, mesAtualStr);
-        const valorB = valorPendMes(pendB, mesAtualStr);
+        let valorA = valorPendMes(pendA, mesAtualStr);
+        let valorB = valorPendMes(pendB, mesAtualStr);
+        // BUG CORRIGIDO (caso Solange/Salvador nº2, 05/10/2026): quem paga por BOLETO (a
+        // maioria) nunca tem pagamentos_pendentes preenchido — a pendência real do mês mora
+        // na tabela 'boletos' (status='aberto'), não nesse campo. Sem isso, valorA/valorB
+        // ficavam sempre 0 pra esse tipo de aluno, a condição abaixo nunca era satisfeita, e
+        // o rateio nunca disparava — o Pix caía inteiro só em quem o nome bateu, deixando o
+        // vinculado de fora pra sempre (confirmado via SQL: pagamentos_pendentes era {} nos
+        // dois, tanto antes quanto depois do Pix). Agora, quando falta valor de um dos lados
+        // em pagamentos_pendentes, busca o boleto aberto do mês na tabela 'boletos' também.
+        if (!(valorA > 0) || !(valorB > 0)) {
+          const idsFaltando = [];
+          if (!(valorA > 0)) idsFaltando.push(aluno.id);
+          if (!(valorB > 0)) idsFaltando.push(vinculado.id);
+          try {
+            const rBolVinc = await sbGet('boletos', 'aluno_id=in.(' + idsFaltando.join(',') + ')&mes=eq.' + mesAtualStr + '&status=eq.aberto&select=aluno_id,valor');
+            const bolsVinc = Array.isArray(rBolVinc) ? rBolVinc : (rBolVinc?.data || []);
+            const valorBoletoDe = (id) => bolsVinc.filter(b => b.aluno_id === id).reduce((s,b) => s + (parseFloat(b.valor)||0), 0);
+            if (!(valorA > 0)) valorA = valorBoletoDe(aluno.id);
+            if (!(valorB > 0)) valorB = valorBoletoDe(vinculado.id);
+          } catch(eBolVinc) { console.error('[rotina-pix] erro ao buscar boleto do vínculo:', eBolVinc.message); }
+        }
+        // BUG CORRIGIDO (caso Solange/Salvador nº3, 05/10/2026): a premissa acima (tabela
+        // 'boletos') só cobre quem paga por boleto Inter — mas quem paga em DINHEIRO/cartão
+        // (caso real da Solange/Salvador) não tem pendência registrada em LUGAR NENHUM: nem
+        // pagamentos_pendentes, nem boletos. Mesmo assim, a mensalidade esperada do mês existe
+        // (é só nunca fica gravada até alguém confirmar o lançamento) — mesma lógica já usada
+        // no resto do sistema pra calcular esse valor quando falta registro explícito
+        // (valor_referencia > último pago histórico, ver ultimoValorPagoBot). Usa isso como
+        // último fallback, só pro lado que ainda ficou sem valor depois dos dois acima.
+        if (!(valorA > 0)) valorA = (aluno.valor_referencia > 0) ? aluno.valor_referencia : ultimoValorPagoBot(aluno);
+        if (!(valorB > 0)) valorB = (vinculado.valor_referencia > 0) ? vinculado.valor_referencia : ultimoValorPagoBot(vinculado);
         if (valorA > 0 && valorB > 0 && Math.abs((valorA + valorB) - valor) < 0.01 &&
             !((pagsA[mesAtualStr]||0) > 0) && !((pagsB[mesAtualStr]||0) > 0)) {
           await creditarPixAluno(aluno, valorA, chave + '|' + aluno.id, nomePagadorSeDiferente(aluno, mPix[1].trim(), partesPag));
