@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.22 (05/10): rotina de Pix conjunto (paga_junto_com_id) ganha mais dois fallbacks pra achar a pendência de cada lado quando pagamentos_pendentes está vazio — tabela 'boletos' (quem paga por boleto Inter) e, por último, valor_referencia/último pago histórico (quem paga em dinheiro/cartão, caso real Solange/Salvador, que não tem pendência registrada em lugar nenhum). Sem isso o rateio nunca disparava e o Pix caía inteiro só em quem o nome bateu no extrato, deixando o vinculado sempre de fora.
+// Versão 15.23 (14/10): mensagens de aniversário (ativo e inativo) trocam a expressão de yoga por estúdio/aulas de Pilates — tom de Pilates, não de yoga.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.22'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.23'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4292,7 +4292,7 @@ async function enviarAniversariantesHoje() {
             'Que os próximos anos sejam cada vez mais leves - no movimento e no coração. 💛\n\n' +
             'Com carinho, Equipe LCA Studio de Pilates',
           '🎂 Parabéns, ' + nome1 + '! 🎉\n\n' +
-            'Hoje o dia é seu, e queremos celebrar junto com você! Que este novo ciclo venha cheio de saúde, leveza e boas energias - dentro e fora do tapete.\n\n' +
+            'Hoje o dia é seu, e queremos celebrar junto com você! Que este novo ciclo venha cheio de saúde, leveza e boas energias - dentro e fora do estúdio.\n\n' +
             'Obrigada por fazer parte da nossa turma do LCA. É um prazer acompanhar sua evolução.\n\n' +
             'Um abraço carinhoso, Equipe LCA Studio de Pilates',
           '🎂 Feliz aniversário, ' + nome1 + '! 🌸\n\n' +
@@ -4314,7 +4314,7 @@ async function enviarAniversariantesHoje() {
             'Um abraço, Equipe LCA Studio de Pilates',
           '🎂 Feliz aniversário, ' + nome1 + '! 🌸\n\n' +
             'Queremos deixar um carinho especial nesse seu dia - que venha cheio de saúde e coisas boas. Guardamos boas lembranças da sua passagem pelo LCA.\n\n' +
-            'Se bater a vontade de voltar pro tapete, será sempre ' + bem + '. 💛\n\n' +
+            'Se bater a vontade de voltar pras aulas de Pilates, será sempre ' + bem + '. 💛\n\n' +
             'Com carinho, Equipe LCA Studio de Pilates'
         ];
         msg = modelosInativo[idxAniv % modelosInativo.length];
