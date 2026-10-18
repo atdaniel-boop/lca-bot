@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.23 (14/10): mensagens de aniversário (ativo e inativo) trocam a expressão de yoga por estúdio/aulas de Pilates — tom de Pilates, não de yoga.
+// Versão 15.24 (17/10): (1) rescisão: cancelar o boleto comum do mês apagava junto a pendência do saldo de rescisão/excepcional criada no mesmo mês (caso Ana Luiza — boleto emitido mas dívida sumia do sistema); agora só some a pendência do próprio boleto cancelado. (2) PDF do boleto de rescisão sai como "Rescisão - Nome Sobrenome.pdf".
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.23'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.24'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -573,8 +573,9 @@ async function cancelarBoletoPorMes(alunoId, mes) {
         const alC = (Array.isArray(rAlC) ? rAlC[0] : rAlC?.data?.[0]) || {};
         const pendC = typeof alC.pagamentos_pendentes==='string'?JSON.parse(alC.pagamentos_pendentes||'{}'):(alC.pagamentos_pendentes||{});
         let mudou = false;
+        // v15.24 (caso Ana Luiza): cancelar o boleto comum do mês NÃO pode apagar a pendência de rescisão/excepcional do mesmo mês — só a que é do próprio boleto cancelado.
         Object.keys(pendC).forEach(k => {
-          if (k === mes || k.startsWith(mes + '-')) { delete pendC[k]; mudou = true; }
+          if (boletos.some(b => b.mes === k) || ((k === mes || k.startsWith(mes + '-')) && !/-(exc|resc)/.test(k))) { delete pendC[k]; mudou = true; }
         });
         if (mudou) await sbPatch('alunos', 'id=eq.' + alunoId, { pagamentos_pendentes: pendC });
       } catch(ePendC) { console.error('[cancelarBoletoPorMes] erro ao limpar pendentes:', ePendC.message); }
@@ -2961,7 +2962,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
                     '📝 ' + descricao + '\n💰 ' + brl(valor) + ' | vence ' + fmtData2(vencimento);
       if (res?.codigoSolicitacao) {
         try {
-          const enviado = await buscarEEnviarPdfBoleto(chatId, res.codigoSolicitacao, link, 'Cobranca - ' + aluno.nome.split(' ')[0] + '.pdf', cabec, {alunoId: aluno.id, mes: chaveExc});
+          const enviado = await buscarEEnviarPdfBoleto(chatId, res.codigoSolicitacao, link, (/^saldo de rescis/i.test(descricao) ? 'Rescisão - ' + aluno.nome.split(' ').slice(0,2).join(' ') : 'Cobranca - ' + aluno.nome.split(' ')[0]) + '.pdf', cabec, {alunoId: aluno.id, mes: chaveExc});
           if (enviado) return null;
         } catch(ePdf) {
           return cabec + '\n[ver boleto](' + link + ')';
@@ -3734,8 +3735,9 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
           const pendC = typeof alC.pagamentos_pendentes==='string'?JSON.parse(alC.pagamentos_pendentes||'{}'):(alC.pagamentos_pendentes||{});
           const mesB = (b.mes||'').slice(0,7);
           let mudou = false;
+          // v15.24 (caso Ana Luiza): cancelar o boleto comum do mês NÃO pode apagar a pendência de rescisão/excepcional do mesmo mês — só a que é do próprio boleto cancelado.
           Object.keys(pendC).forEach(k => {
-            if (k === b.mes || k.slice(0,7) === mesB) { delete pendC[k]; mudou = true; }
+            if (k === b.mes || (k.slice(0,7) === mesB && !/-(exc|resc)/.test(k))) { delete pendC[k]; mudou = true; }
           });
           if (mudou) await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos_pendentes: pendC });
         } catch(ePendC) { console.error('[cancelar_boleto] erro ao limpar pendentes:', ePendC.message); }
@@ -4448,8 +4450,9 @@ async function processarFilaBoletos() {
               const pendF = typeof alF.pagamentos_pendentes==='string'?JSON.parse(alF.pagamentos_pendentes||'{}'):(alF.pagamentos_pendentes||{});
               const mesF = (pedido.mes||'').slice(0,7);
               let mudouF = false;
+              // v15.24 (caso Ana Luiza): cancelar o boleto comum do mês NÃO pode apagar a pendência de rescisão/excepcional do mesmo mês — só a que é do próprio boleto cancelado.
               Object.keys(pendF).forEach(k => {
-                if (k === pedido.mes || k.slice(0,7) === mesF) { delete pendF[k]; mudouF = true; }
+                if (k === pedido.mes || (k.slice(0,7) === mesF && !/-(exc|resc)/.test(k))) { delete pendF[k]; mudouF = true; }
               });
               if (mudouF) await sbPatch('alunos', 'id=eq.' + pedido.aluno_id, { pagamentos_pendentes: pendF });
             } catch(ePendF) { console.error('[fila_boletos] erro ao limpar pendentes:', ePendF.message); }
