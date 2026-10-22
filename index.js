@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.24 (17/10): (1) rescisão: cancelar o boleto comum do mês apagava junto a pendência do saldo de rescisão/excepcional criada no mesmo mês (caso Ana Luiza — boleto emitido mas dívida sumia do sistema); agora só some a pendência do próprio boleto cancelado. (2) PDF do boleto de rescisão sai como "Rescisão - Nome Sobrenome.pdf".
+// Versão 15.25 (22/10): boleto de cobrança excepcional / saldo de rescisão (seuNumero LCA-{id}E{n}) agora é reconhecido pelo webhook e pelas rotinas do Inter — antes o pagamento era ignorado e nunca baixado (caso Ana Luiza).
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.24'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.25'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -298,6 +298,13 @@ function parseSeuNumero(seuNum) {
   // Cobrança excepcional: LCA-{id}-EXC...  (sem mês fixo)
   const mEXC = sn.match(/^LCA-(\d+)-EXC/);
   if (mEXC) return { alunoId: parseInt(mEXC[1]), mes: null };
+  // BUG CORRIGIDO (caso Ana Luiza, 22/10/2026 — saldo de rescisão pago e nunca baixado): a
+  // cobrança excepcional (e a rescisão, que usa o mesmo caminho) emite seuNumero no formato
+  // 'LCA-{id}E{5 dígitos}' (ex: LCA-12E09607, ver inter_cobranca_excepcional em bot_parte3.js),
+  // que nenhum padrão acima reconhecia — o webhook do Inter e as rotinas descartavam o
+  // pagamento como "seuNum não reconhecido".
+  const mExcCompacto = sn.match(/^LCA-(\d+)E\d+$/);
+  if (mExcCompacto) return { alunoId: parseInt(mExcCompacto[1]), mes: null };
   // Número puro = ID do aluno (boleto antigo). Sem mês embutido — será inferido pelo vencimento.
   if (/^\d+$/.test(sn)) return { alunoId: parseInt(sn), mes: null };
   return { alunoId: null, mes: null };
