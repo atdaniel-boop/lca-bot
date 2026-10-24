@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.25 (22/10): boleto de cobrança excepcional / saldo de rescisão (seuNumero LCA-{id}E{n}) agora é reconhecido pelo webhook e pelas rotinas do Inter — antes o pagamento era ignorado e nunca baixado (caso Ana Luiza).
+// Versão 15.26 (23/10): auditoria — webhook do Inter lê a lista de avisos e confirma cada pagamento no próprio Inter (não aceita aviso forjado); /comando exige login do site (token público removido); rota aberta de recadastro do webhook removida (comando "cadastrar webhook inter"); rotina de 5 min baixa rescisão/excepcional de inativo; rescisão pelo Telegram só calcula (lançar pelo site); confirmar mensalidade não apaga rescisão/excepcional do mês.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.25'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.26'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -13,7 +13,7 @@ const GEMINI_KEY     = process.env.GEMINI_API_KEY;
 const SUPABASE_URL   = process.env.SUPABASE_URL || 'https://amkuqijbwjspxajiguxz.supabase.co';
 const SUPABASE_KEY   = process.env.SUPABASE_KEY;
 const ALLOWED_USER   = (process.env.ALLOWED_USER || '').toLowerCase();
-const COMANDO_TOKEN  = process.env.COMANDO_TOKEN || 'lca-studio-2026'; // token secreto p/ endpoint /comando do site (configure COMANDO_TOKEN no Render p/ maior segurança)
+const COMANDO_TOKEN  = process.env.COMANDO_TOKEN || ''; // opcional: token p/ automações no /comando (o site usa a sessão de login)
 
 // Certificados via variáveis de ambiente (INTER_CERT e INTER_KEY)
 // Client ID/Secret APENAS via variáveis de ambiente - nunca hardcoded no código
@@ -1708,6 +1708,8 @@ async function processarComIA(texto, dados, mes) {
   // Comando "backup" sob demanda
   // Diagnóstico da conexão com o Supabase (22/09/2026): mostra o papel da chave em uso
   // (anon ou service_role) e faz uma leitura. Usado na troca da chave dos bots.
+  if (tL.trim() === 'cadastrar webhook inter') return { tipo: 'acao', intencao: 'webhook_inter_cadastrar', params: {} };
+  if (tL.trim() === 'webhook inter') return { tipo: 'acao', intencao: 'webhook_inter_ver', params: {} };
   if (tL.trim() === 'teste supabase') {
     return { tipo: 'acao', intencao: 'teste_supabase', params: {} };
   }
@@ -2056,7 +2058,7 @@ async function executar(intencao, p, dados, chatId) {
     let tinhaPend = false;
     // Limpar chave exata E chaves exc/av do mesmo mês
     Object.keys(pend).forEach(k => {
-      if (k === mes || k.startsWith(mes + '-')) { delete pend[k]; tinhaPend = true; }
+      if (k === mes || (k.startsWith(mes + '-') && !ehChaveExtra(k))) { delete pend[k]; tinhaPend = true; } // não quita rescisão/excepcional
     });
     const hist = (aluno.historico_alteracoes||[]);
     hist.push({ data: new Date().toLocaleDateString('pt-BR'), tipo:'pagamento_bot',
@@ -3318,13 +3320,13 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     // Verificar se há cheque pendente
     const hist = aluno.historico_alteracoes || [];
     const eCheque = hist.some(h => h.tipo==='cheque_recebido' && h.desc && h.desc.includes(mes));
-    const valCheque = Object.keys(pend).filter(k => k === mes || k.startsWith(mes + '-')).reduce((s,k) => s+(pend[k]||0), 0);
+    const valCheque = Object.keys(pend).filter(k => k === mes || (k.startsWith(mes + '-') && !ehChaveExtra(k))).reduce((s,k) => s+(pend[k]||0), 0);
     if (!valCheque || !eCheque) return 'ℹ️ Nenhum cheque aguardando para *' + aluno.nome.split(' ')[0] + '* em ' + mes + '.';
     const val = valCheque;
     // Confirmar pagamento — limpar chave exata e exc/av do mesmo mês
     const pags = typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos||'{}'):(aluno.pagamentos||{});
     pags[mes] = val;
-    Object.keys(pend).forEach(k => { if (k === mes || k.startsWith(mes + '-')) delete pend[k]; });
+    Object.keys(pend).forEach(k => { if (k === mes || (k.startsWith(mes + '-') && !ehChaveExtra(k))) delete pend[k]; }); // não quita rescisão/excepcional
     const histNovo = [...hist, { data: new Date().toLocaleDateString('pt-BR'), tipo: 'cheque_compensado', desc: 'Cheque compensado - ' + mes + ' - ' + brl(val) }];
     const rPatchCheq = await sbPatch('alunos', 'id=eq.' + aluno.id, { pagamentos: pags, pagamentos_pendentes: pend, historico_alteracoes: histNovo });
     if (!Array.isArray(rPatchCheq) || !rPatchCheq.length) {
@@ -3763,6 +3765,10 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     return null; // mensagem já enviada pela rotina
   }
 
+  if (intencao === 'webhook_inter_cadastrar' || intencao === 'webhook_inter_ver') {
+    try { return await webhookInter(intencao === 'webhook_inter_cadastrar'); }
+    catch (e) { return '❌ Erro no webhook do Inter: ' + e.message.slice(0, 150); }
+  }
   if (intencao === 'teste_supabase') {
     // Papel lido de dentro da própria chave configurada no Render (SUPABASE_KEY). As chaves
     // anon e service_role têm o mesmo formato (eyJ...), então só olhando o conteúdo dá pra
@@ -3816,10 +3822,13 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     if (aluno.tipo_plano === 'mensal') return '⚠️ ' + aluno.nome + ' tem plano mensal - não há multa de rescisão. Basta inativar.';
     const DUR = { trimestral:3, semestral:6 };
     const dur = DUR[aluno.tipo_plano]||3;
+    // Auditoria 23/10/2026: só mensalidades (chave AAAA-MM) — avulso/excepcional/rescisão
+    // antigos entravam na conta de "pago no plano atual". E o valor mensal de referência
+    // agora segue a MESMA regra da tela de rescisão do site (valor de referência do aluno >
+    // tabela de planos mensal > último pago), em vez de "último pagamento".
     const pags = Object.entries(typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{})
-      .filter(e=>e[1]>0).sort((a,b)=>a[0].localeCompare(b[0]));
-    // Valor mensal de referência = último pagamento (ou informado)
-    const valorMensal = p?.valor || (pags.length?pags[pags.length-1][1]:329);
+      .filter(e=>e[1]>0 && /^\d{4}-\d{2}$/.test(e[0])).sort((a,b)=>a[0].localeCompare(b[0]));
+    const valorMensal = p?.valor || valorRefRescisaoBot(aluno, dados, pags);
     const mUsados    = p?.meses_utilizados||1;
     const mNaoUsados = Math.max(0, dur - mUsados);
     // FÓRMULA CLÁUSULA 6 (idêntica ao sistema web):
@@ -3839,11 +3848,22 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       'Multa 20% × ' + mNaoUsados + ' meses: ' + brl(multa) + '\n\n' +
       '*Saldo a pagar: ' + brl(saldo) + '*\n\n' +
       '_Confira o valor mensal. Se estiver errado, mande "' + aluno.nome.split(' ')[0] + ' rescindir, ' + mUsados + ' meses, mensal 329"_\n' +
-      '_Para confirmar e lançar: responda_ *sim*';
+      '_Para lançar, use o botão_ *Rescindir* _na ficha do aluno no site — lá o sistema inativa, cancela os boletos futuros no Inter, gera o boleto do saldo e o termo._';
   }
 
   // Intenção não reconhecida — avisar em vez de silêncio
   return '🤔 Não consegui executar "' + intencao + '". Mande *ajuda* para ver os comandos disponíveis.';
+}
+
+// Valor mensal de referência para a rescisão — mesma regra da tela de rescisão do site
+// (abrirRescisao): valor de referência do aluno > tabela de planos (mensal, pelas vezes por
+// semana) > último pagamento de mensalidade > 329.
+function valorRefRescisaoBot(aluno, dados, pagsRegulares) {
+  if (aluno && aluno.valor_referencia > 0) return aluno.valor_referencia;
+  const pm = dados && dados.planos && dados.planos.mensal;
+  if (pm) { let vz = parseInt(aluno.vezes_semana) || 2; vz = Math.min(3, Math.max(1, vz)); if (pm['v' + vz] > 0) return pm['v' + vz]; }
+  const pg = pagsRegulares || [];
+  return pg.length ? pg[pg.length - 1][1] : 329;
 }
 
 const pendente = {};
@@ -3866,86 +3886,12 @@ async function processar(msg) {
   if ((Math.floor(Date.now()/1000) - (msg.date||0)) > 60) return;
 
 
-  // Confirmação de rescisão pendente
-  if (pendente[chatId]) {
-    const conf = pendente[chatId];
-    delete pendente[chatId];
-    if (['sim','confirmar','ok','s'].includes(texto.toLowerCase())) {
-      if (!conf.calc) {
-        return tgSend(chatId, '⚠️ Não há cálculo de rescisão para lançar. Refaça o pedido.');
-      }
-      try {
-        // Buscar o aluno atual no banco
-        const ra = await sbGet('alunos', 'id=eq.' + conf.calc.aluno_id + '&select=*');
-        const aluno = Array.isArray(ra) && ra[0];
-        if (!aluno) return tgSend(chatId, '❌ Aluno não encontrado no banco.');
-
-        const hoje = agoraBRT(); // horário de Brasília, não UTC do servidor
-        const hojeStr = hoje.toISOString().slice(0,10);
-        const dataFmt = hojeStr.split('-').reverse().join('/');
-        const rescMes = hojeStr.slice(0,7);
-
-        // Numeração sequencial da rescisão (consistente com o sistema web)
-        let numeroResc = '(via bot)';
-        try {
-          const rCh = await sbGet('changes', 'select=data&id=eq.1');
-          let chData = Array.isArray(rCh) && rCh[0] && rCh[0].data;
-          if (typeof chData === 'string') { try { chData = JSON.parse(chData); } catch { chData = null; } }
-          if (chData && typeof chData === 'object') {
-            const seq = (chData.rescisao_seq || 0) + 1;
-            chData.rescisao_seq = seq;
-            numeroResc = String(seq).padStart(3,'0') + '/' + hoje.getFullYear();
-            await req(SUPABASE_URL+'/rest/v1/changes', 'POST',
-              { ...sbHeaders(), Prefer: 'resolution=merge-duplicates' }, { id: 1, data: chData });
-          }
-        } catch(e) { console.error('rescisao_seq erro:', e.message); }
-
-        // 1. Inativar aluno
-        // 2. Registrar inativação + rescisão no histórico
-        let hist = aluno.historico_alteracoes;
-        if (typeof hist === 'string') { try { hist = JSON.parse(hist); } catch { hist = []; } }
-        if (!Array.isArray(hist)) hist = [];
-        hist.push({ data: dataFmt, tipo: 'inativacao' });
-        hist.push({ data: dataFmt, tipo: 'rescisao', numero: numeroResc, plano: aluno.tipo_plano,
-          meses_utilizados: conf.calc.mUsados, valor_mensal: conf.calc.valorMensal, saldo: conf.calc.saldo });
-
-        // 3. Cancelar pendentes futuros (>= mês da rescisão)
-        let pend = aluno.pagamentos_pendentes;
-        if (typeof pend === 'string') { try { pend = JSON.parse(pend); } catch { pend = {}; } }
-        if (!pend || typeof pend !== 'object') pend = {};
-        Object.keys(pend).forEach(m => { if (m >= rescMes) delete pend[m]; });
-
-        // 4. Lançar saldo em pagamentos_rescisao no mês seguinte (se houver saldo)
-        let pagResc = aluno.pagamentos_rescisao;
-        if (typeof pagResc === 'string') { try { pagResc = JSON.parse(pagResc); } catch { pagResc = {}; } }
-        if (!pagResc || typeof pagResc !== 'object') pagResc = {};
-        if (conf.calc.saldo > 0.01) {
-          const dNxt = new Date(hoje.getFullYear(), hoje.getMonth()+1, 1);
-          const mNxtStr = dNxt.getFullYear()+'-'+String(dNxt.getMonth()+1).padStart(2,'0');
-          pagResc[mNxtStr] = conf.calc.saldo;
-        }
-
-        const histTxt = (aluno.historico ? aluno.historico + ' | ' : '') +
-          'Rescisão (via bot) em '+dataFmt+': '+aluno.tipo_plano+', '+conf.calc.mUsados+' meses, saldo '+brl(conf.calc.saldo);
-
-        await sbPatch('alunos', 'id=eq.' + aluno.id, {
-          ativo: 'NAO',
-          historico_alteracoes: hist,
-          pagamentos_pendentes: pend,
-          pagamentos_rescisao: pagResc,
-          historico: histTxt
-        });
-
-        const saldoMsg = conf.calc.saldo > 0.01 ? '\n💰 Saldo a receber lançado: ' + brl(conf.calc.saldo) :
-          conf.calc.saldo < -0.01 ? '\n↩️ Saldo a restituir: ' + brl(Math.abs(conf.calc.saldo)) : '\n✅ Quitado';
-        return tgSend(chatId, '✅ *Rescisão ' + numeroResc + ' lançada!*\n\n*' + aluno.nome + '* marcado como inativo.' + saldoMsg + '\n\n_Emita o termo formal pelo sistema web (botão Rescindir → 2ª via)._');
-      } catch(e) {
-        console.error('Lançamento rescisão erro:', e.message);
-        return tgSend(chatId, '❌ Erro ao lançar rescisão: '+e.message+'\nTente pelo sistema web.');
-      }
-    }
-    return tgSend(chatId, '❌ Rescisão cancelada.');
-  }
+  // Auditoria 23/10/2026: o "sim" que lançava a rescisão pelo Telegram foi retirado. Ele
+  // gravava o saldo em pagamentos_rescisao do mês seguinte — campo que o site SUBTRAI da
+  // receita (é o de devolução) — em vez de criar a cobrança; e não cancelava os boletos
+  // futuros no Inter nem tirava o aluno da agenda. O lançamento é feito pelo site, que faz
+  // tudo isso. O bot continua mostrando o cálculo.
+  if (pendente[chatId]) delete pendente[chatId];
 
   await tgSend(chatId, '⏳ Processando...');
   // Extrair mês do texto da mensagem (ex: "maio", "junho", "04/2026", "2026-05")
@@ -4217,22 +4163,7 @@ async function processar(msg) {
     const preview = await executar(intencao, params, dados, chatId);
     clearTimeout(_timer);
     if (preview) {
-      // Recalcular os dados estruturados para o lançamento (mesma fórmula do preview)
-      const aluno = encontrarAluno(dados, params);
-      if (aluno && aluno.tipo_plano !== 'mensal') {
-        const DUR = { trimestral:3, semestral:6 };
-        const dur = DUR[aluno.tipo_plano]||3;
-        const pags = Object.entries(typeof aluno.pagamentos==='string'?JSON.parse(aluno.pagamentos):aluno.pagamentos||{})
-          .filter(e=>e[1]>0).sort((a,b)=>a[0].localeCompare(b[0]));
-        const valorMensal = params?.valor || (pags.length?pags[pags.length-1][1]:329);
-        const mUsados = params?.meses_utilizados||1;
-        const mNaoUsados = Math.max(0, dur - mUsados);
-        const pagosPlanoAtual = pags.slice(-mUsados).reduce((s,e)=>s+e[1],0);
-        const saldo = (valorMensal*mUsados - pagosPlanoAtual) + (valorMensal*0.20*mNaoUsados);
-        pendente[chatId] = { intencao, params, calc: { aluno_id: aluno.id, mUsados, valorMensal, saldo } };
-      } else {
-        pendente[chatId] = { intencao, params };
-      }
+      // (o lançamento da rescisão é feito pelo site — ver comentário em processar, bot_parte4.js)
       _respondeu=true; return tgSend(chatId, preview);
     }
   }
@@ -4953,11 +4884,22 @@ async function verificarBoletosPagosInter() {
     // mês do boleto (a própria chave simples ou 'mes-…' — toda chave de quita/chaveLanc é uma
     // dessas). Sem essa pendência, o crédito é impossível, então pular é o mesmo resultado.
     // O download completo e a checagem na tabela boletos só acontecem para quem sobra.
-    const rLeve = await sbGet('alunos', 'select=id,ativo,pagamentos_pendentes&ativo=eq.SIM');
+    // Auditoria 23/10/2026 (caso Ana Luiza): aluno INATIVO também pode ter um boleto a receber
+    // — o saldo de rescisão ou uma cobrança excepcional. Antes esta consulta só trazia ativos,
+    // e pra inativo tudo dependia do webhook. Agora traz todos (só 3 colunas pequenas), e do
+    // inativo entram SÓ as chaves de rescisão/excepcional — mensalidade de inativo continua
+    // ignorada, pra não reprocessar boleto antigo (caso Edno).
+    const rLeve = await sbGet('alunos', 'select=id,ativo,pagamentos_pendentes');
     const pendPorAluno = {};
     (Array.isArray(rLeve) ? rLeve : []).forEach(a => {
-      if (a.ativo !== 'SIM') return;
       let pend = a.pagamentos_pendentes;
+      if (a.ativo !== 'SIM') {
+        try { pend = typeof pend === 'string' ? JSON.parse(pend || '{}') : (pend || {}); } catch (e) { return; }
+        const so = {};
+        Object.keys(pend || {}).forEach(k => { if (ehChaveExtra(k) && (pend[k] || 0) > 0) so[k] = pend[k]; });
+        if (Object.keys(so).length) pendPorAluno[a.id] = so;
+        return;
+      }
       try { pend = typeof pend === 'string' ? JSON.parse(pend || '{}') : (pend || {}); }
       catch (e) { pend = null; } // pendência ilegível: não arrisca descartar, deixa passar
       pendPorAluno[a.id] = pend;
@@ -5017,8 +4959,8 @@ async function verificarBoletosPagosInter() {
 
       const aluno = dados.alunos.find(a => a.id === alunoId);
       if (!aluno) continue;
-      // (1) Só aluno ativo
-      if (aluno.ativo !== 'SIM') continue;
+      // (1) Aluno ativo — ou inativo, mas só pra boleto de rescisão/excepcional (ver abaixo)
+      const inativoBol = aluno.ativo !== 'SIM';
       // BUG CORRIGIDO v13.6: esta rotina só verificava se o MÊS estava "esperando pagamento"
       // (pagamentos_pendentes), sem checar se ESSE boleto específico já tinha sido processado
       // antes. Se um boleto antigo (ex: pago por engano num mês, depois "reatribuído" pra outro
@@ -5046,6 +4988,7 @@ async function verificarBoletosPagosInter() {
       // mesmo mês da mensalidade era ignorado, ou quitava a mensalidade junto.
       const plano = planejarCreditoBoleto(mes, chaveBoleto, parseFloat(bc.valorNominal || valor), pend);
       if ((pags[plano.destino]||0) > 0) continue; // esse lançamento já foi confirmado
+      if (inativoBol && !plano.extra) continue; // inativo: só saldo de rescisão / cobrança excepcional
       // (2) Só se o lançamento está em pagamentos_pendentes (boleto que o sistema espera receber)
       if (!plano.esperado) continue;
       const rotulo = rotuloLancamentoBot(plano.chaveLanc);
@@ -6084,34 +6027,36 @@ function agendarRotinaAniversarios() { /* mantido só para não quebrar chamadas
 
 const ctx = {}; // contexto por chatId: { intencao, aluno_id, aluno_nome, aguardando }
 
-// ── Main ────────────────────────────────────────────────────────────────────────
-async function main() {
-  console.log('=== LCA Bot v' + BOT_VERSION + ' iniciado ✓ ===');
-  console.log('Versão: ' + BOT_VERSION + ' | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
-  let offset = 0;
+// Confere com o Supabase se o token de sessão mandado pelo site é de um login válido.
+// Se a env SITE_EMAILS estiver preenchida (e-mails separados por vírgula), exige um deles.
+async function validarSessaoSite(headers) {
   try {
-    const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
-    if (init?.result?.length) offset = init.result[init.result.length-1].update_id+1;
-    await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=' + offset + '&limit=1&timeout=0', 'GET', {}, null);
-    console.log('Fila limpa. Offset:', offset);
-  } catch(e) { console.log('Init aviso:', e.message); }
+    const auth = (headers && (headers.authorization || headers.Authorization)) || '';
+    const m = String(auth).match(/^Bearer\s+(.+)$/i);
+    if (!m) return false;
+    const u = await req(SUPABASE_URL + '/auth/v1/user', 'GET', { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + m[1] }, null, 10000);
+    if (!u || typeof u !== 'object' || !u.id || !u.email) return false;
+    const lista = String(process.env.SITE_EMAILS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+    return !lista.length || lista.includes(String(u.email).toLowerCase());
+  } catch (e) { console.warn('[sessao-site] erro ao validar:', e.message); return false; }
+}
 
-  const processados = {};
+// Cadastro / consulta do webhook de cobrança no Inter (antes era uma rota HTTP aberta).
+async function webhookInter(cadastrar) {
+  const token = await interGetToken();
+  if (cadastrar) {
+    const webhookUrl = (process.env.RENDER_EXTERNAL_URL || 'https://lca-bot.onrender.com') + '/webhook-inter';
+    const r = await interReq('/cobranca/v3/cobrancas/webhook', 'PUT', { webhookUrl }, token);
+    return '🔗 *Webhook do Inter cadastrado*\n' + webhookUrl + '\nResposta: ' + JSON.stringify(r).slice(0, 200);
+  }
+  const r = await interReq('/cobranca/v3/cobrancas/webhook', 'GET', null, token);
+  return '🔗 *Webhook do Inter*\n' + JSON.stringify(r).slice(0, 300);
+}
 
-  // Servidor HTTP para o Render + endpoint /ping para keep-alive (UptimeRobot)
-  require('http').createServer(async (req, res) => {
-    if (req.url === '/ping') {
-      res.writeHead(200, {'Content-Type':'text/plain'});
-      res.end('pong');
-
-    } else if (req.url === '/webhook-inter' && req.method === 'POST') {
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', async () => {
-        try {
-          const payload = JSON.parse(body);
-          console.log('[WEBHOOK-INTER]', JSON.stringify(payload).slice(0, 300));
-
+// Credita UM pagamento de boleto já CONFIRMADO no Inter (chamado pelo webhook, depois de
+// consultar o Inter). Mesmas regras de sempre: não credita duas vezes o mesmo boleto,
+// usa a chave exata gravada na emissão (mensalidade, avulso, excepcional, rescisão).
+async function creditarAvisoInter(payload) {
           // Payload do Inter: campos na raiz ou em cobranca/pagamento
           const evento   = payload?.evento || payload?.tipo || payload?.situacao || '';
           const seuNum   = payload?.seuNumero || payload?.cobranca?.seuNumero || '';
@@ -6154,7 +6099,7 @@ async function main() {
                 chaveBoletoWh = (jaProc.find(b => b.mes) || {}).mes || null;
                 if (jaProc.some(b => b.status === 'pago' || b.status === 'cancelado')) {
                   console.log('[WEBHOOK-INTER] Boleto ' + codSolicWebhook + ' já processado antes — ignorado.');
-                  res.writeHead(200, {'Content-Type':'text/plain'}); res.end('ok'); return;
+                  return;
                 }
               } catch(eChkW) { console.warn('[WEBHOOK-INTER] erro ao checar duplicidade:', eChkW.message); }
             }
@@ -6164,7 +6109,7 @@ async function main() {
             if (!valorFinal) {
               try {
                 const token = await interGetToken('boleto-cobranca.read');
-                const det = await interReq('/cobranca/v3/cobrancas/' + seuNum, 'GET', null, token);
+                const det = await interReq('/cobranca/v3/cobrancas/' + codSolicWebhook, 'GET', null, token);
                 valorFinal = parseFloat(det?.cobranca?.valorTotalRecebido || det?.valorTotalRecebido || det?.cobranca?.valorNominal || det?.valorNominal || 0);
                 console.log('[WEBHOOK-INTER] Valor buscado na API:', valorFinal);
               } catch(e) { console.log('[WEBHOOK] erro ao buscar valor:', e.message); }
@@ -6227,6 +6172,54 @@ async function main() {
               }
             }
           }
+}
+
+// Servidor HTTP do bot (ping, webhook do Inter, comandos do site). Função separada do
+// main() pra poder ser testada no ambiente simulado, sem subir servidor de verdade.
+async function tratarHttp(req, res) {
+    if (req.url === '/ping') {
+      res.writeHead(200, {'Content-Type':'text/plain'});
+      res.end('pong');
+
+    } else if (req.url === '/webhook-inter' && req.method === 'POST') {
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', async () => {
+        try {
+          const recebido = JSON.parse(body);
+          console.log('[WEBHOOK-INTER]', JSON.stringify(recebido).slice(0, 300));
+          // SEGURANÇA + FORMATO (auditoria 23/10/2026):
+          // (1) O Inter manda o aviso como uma LISTA de cobranças ([{...}, {...}]). O código
+          //     antigo lia campos direto da raiz (payload.seuNumero), que numa lista é vazio —
+          //     o aviso era descartado como "seuNum não reconhecido" e só a rotina de 5 em 5
+          //     min (que só olha aluno ativo) baixava os boletos.
+          // (2) Esta URL é pública: qualquer pessoa podia mandar um POST inventado dizendo
+          //     "boleto pago" e o bot creditava. Agora o aviso só serve de gatilho: para cada
+          //     codigoSolicitacao, o bot consulta o PRÓPRIO Inter e só credita se o Inter
+          //     confirmar que está pago — e usa o valor e o seuNumero que o Inter devolve.
+          const entradas = Array.isArray(recebido) ? recebido : [recebido];
+          for (const ent of entradas) {
+            const cod = ent?.codigoSolicitacao || ent?.cobranca?.codigoSolicitacao || '';
+            if (!cod || !/^[0-9A-Za-z-]+$/.test(cod)) { console.log('[WEBHOOK-INTER] aviso sem codigoSolicitacao válido — ignorado'); continue; }
+            let det = null;
+            try {
+              const tokenW = await interGetToken('boleto-cobranca.read');
+              det = await interReq('/cobranca/v3/cobrancas/' + cod, 'GET', null, tokenW);
+            } catch (eDet) { console.error('[WEBHOOK-INTER] não consegui confirmar no Inter:', cod, eDet.message); continue; }
+            const corpoW = (det && det.data !== undefined) ? det.data : det; // interReq devolve {status, data}
+            const bcW = corpoW?.cobranca || corpoW || {};
+            const situW = String(bcW.situacao || '').toUpperCase();
+            if (!['RECEBIDO', 'MARCADO_RECEBIDO', 'MARCADORECEBIDO'].includes(situW)) {
+              console.log('[WEBHOOK-INTER] Inter diz que', cod, 'está', situW || '(sem situação)', '— nada a creditar');
+              continue;
+            }
+            await creditarAvisoInter({
+              codigoSolicitacao: cod, situacao: 'RECEBIDO', seuNumero: bcW.seuNumero || '',
+              valorTotalRecebido: bcW.valorTotalRecebido || corpoW?.valorTotalRecebido || bcW.valorNominal || 0,
+              dataVencimento: bcW.dataVencimento || '',
+              dataPagamento: String(bcW.dataSituacao || bcW.dataHoraSituacao || ent?.dataHoraSituacao || '').slice(0, 10) || undefined
+            });
+          }
         } catch(e) {
           console.error('[WEBHOOK-INTER] Erro:', e.message);
         }
@@ -6234,32 +6227,32 @@ async function main() {
         res.end('{"ok":true}');
       });
 
-    } else if (req.url === '/cadastrar-webhook-inter' && req.method === 'GET') {
-      try {
-        const token = await interGetToken();
-        const webhookUrl = process.env.RENDER_EXTERNAL_URL + '/webhook-inter';
-        const r = await interReq('/cobranca/v3/cobrancas/webhook', 'PUT',
-          { webhookUrl }, token);
-        res.writeHead(200, {'Content-Type':'application/json'});
-        res.end(JSON.stringify({ ok: true, webhookUrl, resposta: r }));
-      } catch(e) {
-        res.writeHead(500, {'Content-Type':'application/json'});
-        res.end(JSON.stringify({ erro: e.message }));
-      }
+    } else if (req.url.startsWith('/cadastrar-webhook-inter')) {
+      // SEGURANÇA (23/10/2026): esta rota era aberta (qualquer GET mexia no cadastro do webhook
+      // no Inter). Agora o cadastro é feito pelo Telegram: "cadastrar webhook inter".
+      res.writeHead(403, {'Content-Type':'application/json'});
+      res.end(JSON.stringify({ ok: false, erro: 'use o comando "cadastrar webhook inter" no Telegram' }));
 
     } else if (req.url === '/comando' && req.method === 'POST') {
       // CORS para o site no Netlify
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Comando-Token');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Comando-Token, Authorization');
       let body = '';
       req.on('data', chunk => body += chunk);
       req.on('end', async () => {
         try {
           const payload = JSON.parse(body);
-          // Segurança: exigir token secreto compartilhado (env COMANDO_TOKEN).
-          // Sem isso, qualquer um poderia POSTar comandos executados como se fosse o dono.
-          const tokenRecebido = req.headers['x-comando-token'] || payload.token || '';
-          if (!COMANDO_TOKEN || tokenRecebido !== COMANDO_TOKEN) {
+          // SEGURANÇA (auditoria 23/10/2026): antes bastava um token fixo ('lca-studio-2026')
+          // que estava escrito no HTML público do site — qualquer pessoa que abrisse o código
+          // da página podia mandar comandos ao bot como se fosse o Daniel (emitir/cancelar
+          // boletos, confirmar pagamentos...). Agora o site manda o token da SESSÃO de login
+          // (Supabase) e o bot confere com o próprio Supabase quem é. Um token configurado no
+          // Render (env COMANDO_TOKEN) continua valendo, pra automações — o valor padrão não.
+          const tokenEnv = process.env.COMANDO_TOKEN || '';
+          const tokenRecebido = req.headers['x-comando-token'] || '';
+          const porTokenEnv = !!tokenEnv && tokenEnv !== 'lca-studio-2026' && tokenRecebido === tokenEnv;
+          const porSessao = porTokenEnv ? true : await validarSessaoSite(req.headers);
+          if (!porTokenEnv && !porSessao) {
             console.log('[COMANDO SITE] token inválido — negado');
             res.writeHead(403, {'Content-Type':'application/json'});
             res.end(JSON.stringify({ ok: false, erro: 'não autorizado' }));
@@ -6286,7 +6279,7 @@ async function main() {
 
     } else if (req.method === 'OPTIONS') {
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Comando-Token');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Comando-Token, Authorization');
       res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
       res.setHeader('Access-Control-Max-Age', '86400');
       res.writeHead(204);
@@ -6295,7 +6288,24 @@ async function main() {
       res.writeHead(200, {'Content-Type':'text/plain'});
       res.end('LCA Bot v' + BOT_VERSION + ' OK - ' + new Date().toLocaleString('pt-BR'));
     }
-  }).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────────
+async function main() {
+  console.log('=== LCA Bot v' + BOT_VERSION + ' iniciado ✓ ===');
+  console.log('Versão: ' + BOT_VERSION + ' | ' + new Date().toLocaleString('pt-BR', {timeZone:'America/Sao_Paulo'}));
+  let offset = 0;
+  try {
+    const init = await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=-1&limit=1&timeout=0', 'GET', {}, null);
+    if (init?.result?.length) offset = init.result[init.result.length-1].update_id+1;
+    await req('https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/getUpdates?offset=' + offset + '&limit=1&timeout=0', 'GET', {}, null);
+    console.log('Fila limpa. Offset:', offset);
+  } catch(e) { console.log('Init aviso:', e.message); }
+
+  const processados = {};
+
+  // Servidor HTTP para o Render + endpoint /ping para keep-alive (UptimeRobot)
+  require('http').createServer(tratarHttp).listen(process.env.PORT||3000, () => console.log('HTTP OK - /ping disponível'));
   agendarRotinaAniversarios();
   // Verificar fila de boletos a cada 2 minutos
   setInterval(processarFilaBoletos, 2 * 60 * 1000);
