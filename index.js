@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.26 (23/10): auditoria — webhook do Inter lê a lista de avisos e confirma cada pagamento no próprio Inter (não aceita aviso forjado); /comando exige login do site (token público removido); rota aberta de recadastro do webhook removida (comando "cadastrar webhook inter"); rotina de 5 min baixa rescisão/excepcional de inativo; rescisão pelo Telegram só calcula (lançar pelo site); confirmar mensalidade não apaga rescisão/excepcional do mês.
+// Versão 15.27 (23/10): "resumo financeiro" (mensal ou de um mês) montado pelo próprio bot, sempre no formato completo — ativos, inadimplentes, receita, professoras, custos, resultado, a receber, esperados, planos vencendo, custos lançados e faltas; antes, se a IA falhasse, saía um resumo de 3 linhas sem professoras. Mês passado: quem não pagou conta como inadimplente.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.26'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.27'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1489,6 +1489,10 @@ function buildContexto(dados, mes) {
     // ao vencimento (dando o dia inteiro pra pagar). Outra rotina do bot (resumo semanal) já
     // fazia essa comparação certa (diaV < hoje.getDate()); esta ficou desalinhada.
     const diaVenc = parseInt(a.dia_vencimento || 10);
+    // 23/10/2026: para um mês que já passou, quem não pagou é inadimplente (o dia de hoje
+    // só vale para o mês corrente); mês futuro ainda não tem inadimplente.
+    if (mes < mesAtualBot) return true;
+    if (mes > mesAtualBot) return false;
     return diaHoje > diaVenc;
   });
 
@@ -1627,6 +1631,38 @@ function buildContexto(dados, mes) {
   };
 }
 
+// Resumo financeiro mensal (formato fixo pedido pelo Daniel em 23/10/2026). Usa os números
+// de buildContexto — os mesmos que a IA recebe e os mesmos do site.
+function montarResumoFinanceiro(c) {
+  const NOMES_MES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const r = v => { const n = Number(v) || 0; const s = Math.abs(n).toFixed(2).split('.');
+    return (n < 0 ? '-' : '') + 'R$ ' + s[0].replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + s[1]; };
+  const f = c.financeiro || {};
+  const [ano, mm] = String(c.mes || '').split('-');
+  const titulo = (NOMES_MES[parseInt(mm, 10) - 1] || mm) + ' ' + ano;
+  const inad = (c.inadimplentes || []).map(a => a.nome);
+  const pv = (c.planosVencendo || []).filter(p => p.dias >= 0);
+  const custos = (c.custosMes || []).map(x => (x.desc || 'Custo') + ' (' + r(x.valor) + ')');
+  const faltas = (c.faltasFrequentes || []).slice().sort((x, y) => (parseInt((y.match(/\((\d+) faltas\)/) || [])[1]) || 0) - (parseInt((x.match(/\((\d+) faltas\)/) || [])[1]) || 0));
+  const linhas = [
+    '📊 *Resumo Financeiro — LCA Studio de Pilates (' + titulo + ')*', '',
+    '👥 Ativos: ' + ((c.estudio || {}).ativos || 0),
+    '🔴 Inadimplentes: ' + (inad.length ? inad.join(', ') : 'nenhum'), '',
+    '💰 Receita: ' + r(f.receita),
+    '👩‍🏫 Professoras: ' + r(f.professoras),
+    '💸 Custos: ' + r(f.custos),
+    ((f.resultado || 0) >= 0 ? '✅' : '⚠️') + ' Resultado: ' + r(f.resultado), '',
+    '📥 A receber (pendências do mês): ' + r(f.aReceber) + ' (' + (f.nAReceber || 0) + ' aluno' + ((f.nAReceber || 0) === 1 ? '' : 's') + ')',
+    '📈 Receita esperada (total): ' + r(f.receitaEsperada),
+    '📈 Resultado esperado (total): ' + r(f.resultadoEsperado), '',
+    '📅 Planos vencendo (próximos 30 dias):' + (pv.length ? '' : ' nenhum')
+  ].concat(pv.map(p => '- ' + p.nome + ' (' + p.plano + ', ' + p.diaVenc + '/' + p.mesVenc + ')'))
+   .concat(['', '🧾 Custos lançados: ' + (custos.length ? custos.join(', ') : 'nenhum'), '',
+     '⚠️ Faltas frequentes (2 ou mais no mês):' + (faltas.length ? '' : ' nenhuma')])
+   .concat(faltas.map(x => '- ' + x));
+  return linhas.join('\n');
+}
+
 // Intenções que alteram dados (precisam de execução estruturada)
 const INTENCOES_ACAO = ['lancar_custo','lancar_aula','confirmar_pagamento','calcular_rescisao',
   'remover_custo','remover_custo_id','desfazer_pagamento','desfazer_aula','checkin','desfazer_checkin'];
@@ -1702,6 +1738,13 @@ async function processarComIA(texto, dados, mes) {
     return { tipo: 'acao', intencao: 'inter_extrato', params: {} };
   }
   // Comando "resumo" sob demanda — mesma mensagem do resumo semanal
+  // Resumo financeiro do mês — montado pelo próprio bot, sempre no mesmo formato e com as
+  // mesmas contas (23/10/2026: quando a IA falhava, saía um resumo de 3 linhas sem o custo
+  // das professoras; quando funcionava, o formato mudava a cada vez).
+  if (/\bresumo\b/.test(tL) && !/semana/.test(tL) &&
+      /financ|mensal|do m[eê]s|janeiro|fevereiro|mar[cç]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro|\d{1,2}\/\d{4}|\d{4}-\d{2}/.test(tL)) {
+    return { tipo: 'consulta_direta', intencao: 'consulta_resumo_financeiro', params: {} };
+  }
   if (tL === 'resumo' || tL === 'resumo semanal' || tL === 'resumo da semana') {
     return { tipo: 'acao', intencao: 'resumo_semanal', params: {} };
   }
@@ -4048,6 +4091,8 @@ async function processar(msg) {
       resp3 = inads.length
         ? '*Inadimplentes em '+mes+' ('+inads.length+'):*\n' + inads.map(a=>'- '+a.nome+' ('+a.tipo_plano+')').join('\n')
         : '✅ Todos os alunos pagaram em '+mes+'.';
+    } else if (aiResult.intencao === 'consulta_resumo_financeiro' || (aiResult.intencao === 'consulta_financeiro' && /resumo|resultado/.test(tL3))) {
+      resp3 = montarResumoFinanceiro(buildContexto(dados, mes));
     } else if (aiResult.intencao === 'consulta_financeiro') {
       const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});var pr=typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});return s+(p[mes]||0)-(pr[mes]||0);},0);
       var arec = 0, narec = 0;
@@ -4091,12 +4136,8 @@ async function processar(msg) {
           ? '*Inadimplentes em '+mesAtual+':*\n' + inads.map(a=>'- '+a.nome+' ('+a.tipo_plano+')').join('\n')
           : '✅ Todos pagaram em '+mesAtual+'.';
       } else if (tL2.includes('result') || tL2.includes('resumo') || tL2.includes('financ')) {
-        const mesRes = _mesMatch || mes; // usa mês extraído do texto
-        const rec = dados.alunos.reduce(function(s,a){var p=typeof a.pagamentos==='string'?JSON.parse(a.pagamentos||'{}'):(a.pagamentos||{});var pr=typeof a.pagamentos_rescisao==='string'?JSON.parse(a.pagamentos_rescisao||'{}'):(a.pagamentos_rescisao||{});return s+(p[mesRes]||0)-(pr[mesRes]||0);},0);
-        const cst = dados.custos.filter(function(c){return c.mes===mesRes;}).reduce(function(s,c){return s+(c.valor||0);},0);
-        const resultado = rec - cst;
-        const resIcon = resultado >= 0 ? '[alta] *Resultado: +' : '[baixa] *Resultado: ';
-        fallback = '*Resumo ' + mesRes + ':*\n💰 Receita: ' + brl(rec) + '\n🔴 Custos: ' + brl(cst) + '\n' + resIcon + brl(Math.abs(resultado)) + '*' + (resultado < 0 ? ' ⚠️ NEGATIVO' : '');
+        // 23/10/2026: antes saía um resumo de 3 linhas sem o custo das professoras
+        fallback = montarResumoFinanceiro(buildContexto(dados, _mesMatch || mes));
       } else {
         fallback = '⚠️ Gemini indisponível. Tente em 1 minuto.\nOu use comandos diretos - mande *ajuda*.';
       }
