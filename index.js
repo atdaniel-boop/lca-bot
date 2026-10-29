@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.27 (23/10): "resumo financeiro" (mensal ou de um mês) montado pelo próprio bot, sempre no formato completo — ativos, inadimplentes, receita, professoras, custos, resultado, a receber, esperados, planos vencendo, custos lançados e faltas; antes, se a IA falhasse, saía um resumo de 3 linhas sem professoras. Mês passado: quem não pagou conta como inadimplente.
+// Versão 15.28 (29/10): emitir plano — se o ciclo calculado já está todo pago mas o aluno tem pendências de meses depois dele (renovação ainda não gravada, caso Dilva), avisa em vez de responder "0 boletos", e não manda a mensagem de WhatsApp "seguem os boletos" quando nenhum boleto saiu.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.27'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.28'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3339,13 +3339,24 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     }
 
     const boletosEmitidos = mesesAEmitir.length - erros;
+    // BUG CORRIGIDO (caso Dilva, 29/10/2026): o site pedia os boletos antes de terminar de
+    // gravar a renovação; o bot lia o histórico sem ela, calculava o ciclo ANTERIOR (já
+    // pago), emitia 0 boletos e ainda mandava a mensagem de WhatsApp "seguem os boletos".
+    // O site foi corrigido para esperar a gravação; aqui fica a rede de segurança: ciclo
+    // todo coberto + pendências de meses depois dele = avisar, e não mandar o WhatsApp.
+    const ultimoMesCiclo = (() => { const d = new Date(anoBase, mesBase + dur - 1, 1); return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0'); })();
+    const pendDepois = Object.keys(pend || {}).filter(k => /^\d{4}-\d{2}$/.test(k) && k > ultimoMesCiclo && (pend[k] || 0) > 0).sort();
+    const avisoCicloAntigo = (mesesAEmitir.length === 0 && pendDepois.length)
+      ? '\n\n⚠️ *Nenhum boleto emitido:* o ciclo calculado (' + periodoPlano + ') já está pago, mas há pendências de ' + pendDepois.join(', ') +
+        '. Se você acabou de renovar, a renovação ainda não tinha sido gravada. Mande "emitir plano ' + aluno.nome.split(' ')[0] + '" de novo.'
+      : '';
     const resumo = status + ' *Plano ' + planoLabel + ' - ' + aluno.nome.split(' ')[0] + '*\n' +
       '📋 ' + periodoPlano + '\n💰 ' + brl(valor) + '/mês × ' + boletosEmitidos + ' boleto(s)' +
       (mesesPulados.length ? '\n⏭️ Pulados (' + mesesPulados.length + ' já cobertos): ' + mesesPulados.join(', ') : '') +
       (resultados.length ? '\n\n' + resultados.join('\n') : '') +
-      (erros === 0 ? '\n\n_Baixa automática via webhook quando pagos._' : '');
-    // Enviar mensagem para copiar no WhatsApp
-    if (erros === 0) {
+      (erros === 0 && boletosEmitidos > 0 ? '\n\n_Baixa automática via webhook quando pagos._' : '') + avisoCicloAntigo;
+    // Enviar mensagem para copiar no WhatsApp — só se saiu algum boleto
+    if (erros === 0 && boletosEmitidos > 0) {
       await tgSend(chatId, '✂️ *Copie a mensagem abaixo e envie no WhatsApp da aluna:*');
       await tgSend(chatId, msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc));
     }
