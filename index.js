@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.28 (29/10): emitir plano — se o ciclo calculado já está todo pago mas o aluno tem pendências de meses depois dele (renovação ainda não gravada, caso Dilva), avisa em vez de responder "0 boletos", e não manda a mensagem de WhatsApp "seguem os boletos" quando nenhum boleto saiu.
+// Versão 15.29 (31/10): o bot de notas agora dorme quando não tem trabalho (fim do cron de manter acordado, que estourou as 750 h grátis do Render). "emitir nf NOME MM/AAAA" no bot principal guarda o pedido na fila e acorda o emissor (espera ele responder e avisa); "acordar nf" só acorda.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.28'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.29'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1172,6 +1172,22 @@ async function saveChanges(ch) {
   } catch(e) { console.error('saveChanges erro:', e.message); }
 }
 
+// Acorda o bot de notas (serviço separado no Render, que dorme quando não tem trabalho —
+// 31/10/2026) e espera ele responder. O Render leva ~1 min pra subir na primeira visita.
+// Devolve true quando o próprio bot respondeu "OK" (não a página de "carregando" do Render).
+const NF_BOT_URL = (process.env.NF_BOT_URL || 'https://lca-nf-bot.onrender.com').replace(/\/$/, '');
+async function acordarEmissorNF(tentativas, esperaMs) {
+  tentativas = tentativas || 4; esperaMs = esperaMs || parseInt(process.env.NF_ACORDAR_ESPERA_MS || '5000', 10);
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      const r = await req(NF_BOT_URL + '/', 'GET', {}, null, 45000);
+      if (typeof r === 'string' && r.trim() === 'OK') return true;
+    } catch (e) { console.log('[acordar-nf] tentativa ' + (i + 1) + ':', e.message); }
+    await new Promise(res => setTimeout(res, esperaMs));
+  }
+  return false;
+}
+
 // ── FIM DA PARTE 1/6 (bot_parte1.js) ──
 // ── bot_parte2.js (6 partes) — continuação de executar() iniciada em bot_parte1.js ──
 
@@ -1751,6 +1767,13 @@ async function processarComIA(texto, dados, mes) {
   // Comando "backup" sob demanda
   // Diagnóstico da conexão com o Supabase (22/09/2026): mostra o papel da chave em uso
   // (anon ou service_role) e faz uma leitura. Usado na troca da chave dos bots.
+  // Nota fiscal (31/10/2026): reconhecido aqui direto, sem depender da IA. O bot de notas
+  // agora dorme quando não tem trabalho; o bot principal (sempre acordado) guarda o pedido
+  // na fila e acorda o emissor — ver encaminhar_nf / acordarEmissorNF.
+  { const mNf = tL.trim().match(/^emitir nf (.+?)\s+(\d{1,2})\/(\d{4})$/);
+    if (mNf) return { tipo: 'acao', intencao: 'encaminhar_nf', params: { aluno_nome: mNf[1].trim(), mes: mNf[3] + '-' + mNf[2].padStart(2, '0') } };
+    if (/^emitir nf .+\s+de\s+\d{1,2}\/\d{1,2}\/\d{4}\s+a\s+\d{1,2}\/\d{1,2}\/\d{4}$/.test(tL.trim())) return { tipo: 'acao', intencao: 'nf_acordar_periodo', params: {} };
+    if (tL.trim() === 'acordar nf' || tL.trim() === 'acordar emissor') return { tipo: 'acao', intencao: 'nf_acordar_periodo', params: {} }; }
   if (tL.trim() === 'cadastrar webhook inter') return { tipo: 'acao', intencao: 'webhook_inter_cadastrar', params: {} };
   if (tL.trim() === 'webhook inter') return { tipo: 'acao', intencao: 'webhook_inter_ver', params: {} };
   if (tL.trim() === 'teste supabase') {
@@ -2852,8 +2875,20 @@ async function executar(intencao, p, dados, chatId) {
     } catch(e) {
       return '⚠️ Erro ao encaminhar pedido de NF: ' + e.message;
     }
-    return '📤 Pedido de NF de *' + aluno.nome + '* (' + mesFila + ') encaminhado.\n\n' +
-      'Isso aqui é o bot principal — quem preenche e emite é o bot de notas fiscais, separado. Em alguns minutos você recebe uma revisão pra confirmar antes de emitir de verdade.';
+    // O bot de notas dorme quando não tem trabalho (31/10/2026): acordar e esperar responder.
+    // O pedido já está salvo na fila — mesmo que o acordar demore, ele é atendido quando subir.
+    await tgSend(chatId, '📤 Pedido de NF de *' + aluno.nome + '* (' + mesFila + ') guardado.\n⏳ Acordando o emissor de notas — aguarde até 1 minuto...');
+    const acordou = await acordarEmissorNF();
+    return acordou
+      ? '✅ Emissor de notas acordado. Em 1–2 minutos a revisão chega no chat do *LCA Studio NF BOT* — é lá que você responde "confirmar nf".'
+      : '⚠️ O emissor de notas não respondeu em 3 minutos. O pedido continua guardado e será feito assim que ele subir — se a revisão não chegar em 10 minutos, mande "acordar nf" aqui.';
+  }
+  if (intencao === 'nf_acordar_periodo') {
+    await tgSend(chatId, '⏳ Acordando o emissor de notas — aguarde até 1 minuto...');
+    const acordou = await acordarEmissorNF();
+    return acordou
+      ? '✅ Emissor de notas acordado. Se o pedido for com período (de D/M/AAAA a D/M/AAAA), mande agora o comando no chat do *LCA Studio NF BOT*. Pedidos já guardados na fila são atendidos sozinhos.'
+      : '⚠️ O emissor de notas não respondeu em 3 minutos. Tente de novo daqui a pouco.';
   }
 
   if (intencao === 'inter_emitir_boleto') {
