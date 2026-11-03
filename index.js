@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.29 (31/10): o bot de notas agora dorme quando não tem trabalho (fim do cron de manter acordado, que estourou as 750 h grátis do Render). "emitir nf NOME MM/AAAA" no bot principal guarda o pedido na fila e acorda o emissor (espera ele responder e avisa); "acordar nf" só acorda.
+// Versão 15.30 (03/11): Pix que é pagamento de boleto pelo QR Code (ex.: Claudia pagou o boleto da mãe, Marli) não é mais lançado também como Pix de quem pagou — fica só a baixa do boleto, no aluno certo.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.29'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.30'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -4809,6 +4809,34 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
       return proprioNomeBate ? null : nomePagadorRaw;
     }
 
+    // Boletos recebidos HOJE pelo QR Code de Pix (lidos do Inter uma vez por rodada, só se
+    // algum Pix chegar até o ponto de ser lançado). Cada boleto "consome" um Pix só uma vez.
+    let _bolsPixHoje = null;
+    async function pixEhPagamentoDeBoleto(valorPix, alunoDoPix) {
+      if (_bolsPixHoje === null) {
+        _bolsPixHoje = [];
+        try {
+          const rRec = await interCobrancasRobusto({ situacao: 'RECEBIDO' });
+          _bolsPixHoje = (rRec?.cobrancas || []).map(i => i.cobranca || i).filter(bc =>
+            String(bc.dataSituacao || '').slice(0, 10) === hojeStr &&
+            String(bc.origemRecebimento || 'PIX').toUpperCase() !== 'BOLETO');
+        } catch (eRec) {
+          console.warn('[rotina-pix] não consegui ler boletos recebidos hoje no Inter:', eRec.message);
+          // Sem o Inter: usa os boletos que o próprio bot já baixou hoje (log_operacoes).
+          try {
+            const rLog = await sbGet('log_operacoes', 'tipo=in.(boleto_pago_rotina,boleto_pago_webhook)&criado_em=gte.' + hojeStr + 'T03:00:00Z&select=valor,descricao');
+            _bolsPixHoje = (Array.isArray(rLog) ? rLog : []).map(l => ({ valorTotalRecebido: l.valor, _nome: String(l.descricao || '').split(' - ')[0] }));
+          } catch (eLog) {}
+        }
+      }
+      // Boleto do PRÓPRIO aluno do Pix não conta: aí o crédito vai pra mesma pessoa de
+      // qualquer jeito, e o caminho de sempre (Pix lança; a baixa do boleto vê o mês pago e
+      // não lança de novo) continua valendo — inclusive pra quem não tem pendência gravada.
+      const i = _bolsPixHoje.findIndex(bc => Math.abs((parseFloat(bc.valorTotalRecebido || 0) || 0) - valorPix) < 0.01 &&
+        !(alunoDoPix && bc.seuNumero && parseSeuNumero(bc.seuNumero).alunoId === alunoDoPix.id));
+      return i < 0 ? null : _bolsPixHoje.splice(i, 1)[0];
+    }
+
     for (const t of pixRecebidos) {
       const valor = parseFloat(t.valor||0);
       // Extrair nome do pagador: "PIX RECEBIDO - Cp :XXXXXXXX-NOME COMPLETO"
@@ -4849,6 +4877,24 @@ async function rotinaDetectarPixAlunos(retornarResumo) {
 
       if (candidatos.length !== 1) { semMatch++; continue; } // sem match único e seguro, ignorar
       const aluno = candidatos[0];
+
+      // BUG CORRIGIDO (caso Claudia Marcia / Marli, 06/10/2026): o boleto do Inter tem QR Code
+      // de Pix. Quando alguém paga o boleto de OUTRO aluno pelo QR (a Claudia pagou o da mãe,
+      // Marli), o dinheiro aparece duas vezes: no extrato como "Pix recebido de Claudia" (esta
+      // rotina creditava na Claudia pelo nome) e no Inter como boleto da Marli pago (a rotina de
+      // boletos creditava na Marli, o certo). Os dois lançamentos saíram com 3 s de diferença.
+      // A trava antiga só olhava boleto pago da MESMA pessoa. Agora, se no mesmo dia o Inter
+      // tem um boleto recebido via Pix com o mesmo valor, este Pix é esse pagamento: não é
+      // lançado aqui (quem lança é a baixa do boleto, no aluno certo).
+      const bolDoPix = await pixEhPagamentoDeBoleto(valor, aluno);
+      if (bolDoPix) {
+        await marcarPixProcessado(chave, aluno.id, valor);
+        jaPagos++;
+        const donoBol = (bolDoPix.pagador && bolDoPix.pagador.nome) || bolDoPix._nome || '';
+        await tgSend(TELEGRAM_CHAT_ID, 'ℹ️ Pix de ' + brl(valor) + ' de *' + mPix[1].trim() + '* é o pagamento de um boleto pelo QR Code' +
+          (donoBol ? ' (boleto de *' + donoBol + '*)' : '') + ' — fica lançado pela baixa do boleto, não como Pix de ' + aluno.nome.split(' ')[0] + '.');
+        continue;
+      }
 
       // BUG CORRIGIDO (caso Valéria/mãe e Solange/marido, 01/10/2026): quando um Pix único paga
       // de uma vez a mensalidade do aluno E a de um dependente vinculado ('paga_junto_com_id',
