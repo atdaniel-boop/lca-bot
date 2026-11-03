@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.30 (03/11): Pix que é pagamento de boleto pelo QR Code (ex.: Claudia pagou o boleto da mãe, Marli) não é mais lançado também como Pix de quem pagou — fica só a baixa do boleto, no aluno certo.
+// Versão 15.31 (03/11): comissão das professoras no resumo financeiro de um mês usa a professora/divisão de aulas e as vezes por semana daquele ciclo do aluno (do vencimento até a véspera do seguinte); mudança no meio do ciclo vale proporcional aos dias — mesma regra do site.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.30'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.31'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -1448,6 +1448,55 @@ function planejarCreditoPix(pags, pend, mesAtual, valor, tipoPlano) {
 
 
 // ── Contexto para a IA ─────────────────────────────────────────────────────────
+// Professora(s) e aulas como eram NUMA COMPETÊNCIA — mesma regra do site (alunoNoMes): a
+// comissão é dividida pelos dias do CICLO do aluno (do vencimento até a véspera do
+// seguinte); se a professora ou a divisão de aulas mudou no meio do ciclo, cada configuração
+// vale pelos dias em que esteve em vigor (decisão do Daniel, 03/11/2026).
+const _TIPOS_CFG_BOT = ['professoras', 'vezes', 'vencimento'];
+function _dataBRBot(d) { const p = String(d || '').split('/'); return p.length === 3 ? new Date(+p[2], +p[1] - 1, +p[0]) : null; }
+function _histBot(a) { let h = a.historico_alteracoes; if (typeof h === 'string') { try { h = JSON.parse(h); } catch (e) { h = []; } } return Array.isArray(h) ? h : []; }
+function alunoNaDataBot(a, dia) {
+  const mud = _histBot(a).filter(h => h && _TIPOS_CFG_BOT.includes(h.tipo) && _dataBRBot(h.data) && _dataBRBot(h.data) > dia)
+    .sort((x, y) => _dataBRBot(y.data) - _dataBRBot(x.data));
+  if (!mud.length) return a;
+  const c = Object.assign({}, a);
+  mud.forEach(h => {
+    if (h.tipo === 'vezes' && h.de) c.vezes_semana = parseInt(h.de) || c.vezes_semana;
+    if (h.tipo === 'vencimento' && h.de) c.dia_vencimento = parseInt(h.de) || c.dia_vencimento;
+    if (h.tipo === 'professoras' && h.de) ['professora', 'prof_principal', 'prof_secundaria', 'aulas_prof'].forEach(k => {
+      if (h.de[k] === undefined || h.de[k] === null || h.de[k] === '') delete c[k]; else c[k] = h.de[k];
+    });
+  });
+  return c;
+}
+function _inicioCicloBot(a, ano, mes1) {
+  const cfg = alunoNaDataBot(a, new Date(ano, mes1 - 1, 1));
+  const dim = new Date(ano, mes1, 0).getDate();
+  return new Date(ano, mes1 - 1, Math.min(parseInt(cfg.dia_vencimento) || 1, dim));
+}
+function alunoNoMesBot(a, mes) {
+  if (!a || !mes) return a;
+  const hist = _histBot(a);
+  if (!hist.some(h => h && _TIPOS_CFG_BOT.includes(h.tipo))) return a;
+  const [ano, m1] = String(mes).split('-').map(Number);
+  const ini = _inicioCicloBot(a, ano, m1);
+  let prox = _inicioCicloBot(a, m1 === 12 ? ano + 1 : ano, m1 === 12 ? 1 : m1 + 1);
+  if (!(prox > ini)) prox = new Date(ini.getFullYear(), ini.getMonth() + 1, ini.getDate());
+  const cortes = [ini];
+  hist.forEach(h => {
+    if (!h || (h.tipo !== 'professoras' && h.tipo !== 'vezes')) return;
+    const d = _dataBRBot(h.data);
+    if (d && d > ini && d < prox && !cortes.some(c => +c === +d)) cortes.push(d);
+  });
+  cortes.sort((x, y) => x - y);
+  const total = prox - ini;
+  const segs = cortes.map((c, i) => ({ a: alunoNaDataBot(a, c), peso: ((cortes[i + 1] || prox) - c) / total }));
+  const base = Object.assign({}, segs[segs.length - 1].a);
+  const chave = x => [x.professora, x.prof_principal, x.prof_secundaria, x.aulas_prof, x.vezes_semana].join('|');
+  if (segs.length > 1 && segs.some(sg => chave(sg.a) !== chave(segs[0].a))) base._segmentos = segs;
+  return base;
+}
+
 function buildContexto(dados, mes) {
   const ativos = dados.alunos.filter(a => a.ativo === 'SIM' && alunoAtivoNoMes(a, mes));
   const inativos = dados.alunos.filter(a => !(a.ativo === 'SIM' && alunoAtivoNoMes(a, mes)));
@@ -1530,6 +1579,7 @@ function buildContexto(dados, mes) {
   // recebe seu percentual sobre a fração das aulas que são dela, valendo tanto como
   // principal quanto como secundária da dupla.
   function fracaoDaProfBot(a, profId) {
+    if (a && a._segmentos) return a._segmentos.reduce((t, sg) => t + sg.peso * fracaoDaProfBot(sg.a, profId), 0);
     if (a.professora === profId) return 1;
     if ((a.professora||'leda') !== 'ambas') return 0;
     const sec = a.prof_secundaria || 'monica';
@@ -1553,8 +1603,9 @@ function buildContexto(dados, mes) {
     // receita, mas não deve virar comissão extra pra professora. valor_referencia é o valor
     // mensal "limpo" do aluno; só cai no valor pago se ele não tiver esse campo.
     const vComissao = (a.valor_referencia > 0) ? a.valor_referencia : v;
+    const aMes = alunoNoMesBot(a, mes); // professora/aulas como eram naquele mês (03/11/2026)
     percentuais.forEach(p => {
-      const frac = fracaoDaProfBot(a, p.id);
+      const frac = fracaoDaProfBot(aMes, p.id);
       if (frac > 0) totalPorProf[p.id] += vComissao * ((p.percentual > 0 ? p.percentual : 40)/100) * frac;
     });
   });
