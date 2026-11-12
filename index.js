@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.31 (03/11): comissão das professoras no resumo financeiro de um mês usa a professora/divisão de aulas e as vezes por semana daquele ciclo do aluno (do vencimento até a véspera do seguinte); mudança no meio do ciclo vale proporcional aos dias — mesma regra do site.
+// Versão 15.32 (12/11): primeiro plano com vencimento da matrícula já passado começa no mês da matrícula (1º boleto em 5 dias, cancelável à mão se pago por Pix) em vez de pular pro mês seguinte; renovação gravada na data da matrícula.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.31'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.32'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3191,6 +3191,14 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     } catch(eHR) { console.error('[emitir_plano] erro ao ler histórico:', eHR.message); }
 
     let anoBase, mesBase;
+    // BUG CORRIGIDO (caso Letícia, 12/11/2026): aluna cadastrada com matrícula 05/11 e
+    // 1º mês = novembro. O vencimento (dia 5) já tinha passado, então a regra "não emitir
+    // boleto retroativo" pulava novembro e o plano começava em dezembro (e a renovação ficava
+    // datada de 05/12). Agora, no PRIMEIRO plano do aluno (sem renovação e sem pagamento
+    // registrado), se o vencimento do ciclo da matrícula passou há até 31 dias, o plano
+    // começa nesse ciclo: o 1º boleto sai com vencimento em 5 dias (se já pagou por Pix,
+    // cancele esse boleto à mão) e os demais seguem normalmente.
+    let entradaMatricula = false;
     if (p?.mes) {
       const pm = p.mes.split('-');
       anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
@@ -3202,6 +3210,11 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       // Usar o mês da data de matrícula como base (ex: matrícula 10/07 → 1º boleto em julho).
       const pm = aluno.data_matricula.split('-');
       anoBase = parseInt(pm[0]); mesBase = parseInt(pm[1]) - 1;
+      const semPagamentos = !Object.keys(pags).some(k => /^\d{4}-\d{2}$/.test(k) && (pags[k]||0) > 0);
+      const hojeEntrada = new Date(); hojeEntrada.setHours(0,0,0,0);
+      const vencMatricula = new Date(anoBase, mesBase, parseInt(aluno.dia_vencimento) || 10);
+      const diasDesdeVenc = Math.round((hojeEntrada - vencMatricula) / 86400000);
+      if (semPagamentos && diasDesdeVenc > 0 && diasDesdeVenc <= 31) entradaMatricula = true;
     } else {
       const hoje = agoraBRT(); // BRT — virada 21h-00h no fim do mês emitia pro mês seguinte
       anoBase = hoje.getUTCFullYear(); mesBase = hoje.getUTCMonth();
@@ -3212,7 +3225,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     // PROTEÇÃO: o Inter recusa boleto com vencimento retroativo. Só aplicar quando NÃO há
     // renovação existente — nesse caso o loop de "pular meses já cobertos" abaixo já lida
     // com meses passados sem distorcer o início real do ciclo.
-    if (!renovacaoExistente) {
+    if (!renovacaoExistente && !entradaMatricula) {
       const hojeD = new Date(); hojeD.setHours(0,0,0,0);
       let primeiroVenc = new Date(anoBase, mesBase, diaVenc);
       let guard = 0;
@@ -3288,7 +3301,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
       // Se a data de vencimento já passou, usar hoje + 2 dias (Inter recusa data retroativa)
       let dtVenc = new Date(anoBase, mesBase + i, diaVenc);
       const hojeDate0 = new Date(); hojeDate0.setHours(0,0,0,0);
-      if (dtVenc < hojeDate0) dtVenc = new Date(hojeDate0.getTime() + 2*24*60*60*1000);
+      if (dtVenc < hojeDate0) dtVenc = new Date(hojeDate0.getTime() + (entradaMatricula && i === 0 ? 5 : 2)*24*60*60*1000);
       mesesAEmitir.push({
         numBoleto: i + 1, mesStr, dtVenc, dtOriginal,
         anoVenc: dtVenc.getFullYear(), mesNome: MESES_PT[dtOriginal.getMonth()]
@@ -3439,6 +3452,7 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     const resumo = status + ' *Plano ' + planoLabel + ' - ' + aluno.nome.split(' ')[0] + '*\n' +
       '📋 ' + periodoPlano + '\n💰 ' + brl(valor) + '/mês × ' + boletosEmitidos + ' boleto(s)' +
       (mesesPulados.length ? '\n⏭️ Pulados (' + mesesPulados.length + ' já cobertos): ' + mesesPulados.join(', ') : '') +
+      (entradaMatricula ? '\n⚠️ Primeiro plano: o 1º boleto (' + (mesesAEmitir[0] ? mesesAEmitir[0].mesStr : '') + ') vence em 5 dias. Se ela já pagou esse mês por Pix, cancele esse boleto no Inter (cancelar boleto).' : '') +
       (resultados.length ? '\n\n' + resultados.join('\n') : '') +
       (erros === 0 && boletosEmitidos > 0 ? '\n\n_Baixa automática via webhook quando pagos._' : '') + avisoCicloAntigo;
     // Enviar mensagem para copiar no WhatsApp — só se saiu algum boleto
