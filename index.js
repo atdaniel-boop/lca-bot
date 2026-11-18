@@ -1,10 +1,10 @@
 // LCA Studio Bot - Telegram + Gemini + Supabase + Banco Inter
-// Versão 15.32 (12/11): primeiro plano com vencimento da matrícula já passado começa no mês da matrícula (1º boleto em 5 dias, cancelável à mão se pago por Pix) em vez de pular pro mês seguinte; renovação gravada na data da matrícula.
+// Versão 15.34 (19/11): contrato do aluno novo vai em PDF pelo bot (site gera e guarda no Storage; o bot envia ao Telegram). Antes, v15.33 (18/11): mensagem de boletos com fidelidade e multa nos planos trimestral/semestral. v15.32 (12/11): primeiro plano com vencimento da matrícula já passado começa no mês da matrícula.
 
 // ── LCA Studio Bot — Telegram + Gemini + Supabase + Banco Inter ────────────────
 const https = require('https');
 
-const BOT_VERSION = '15.32'; // fonte única da versão — usada no log, health check, ajuda e backup
+const BOT_VERSION = '15.34'; // fonte única da versão — usada no log, health check, ajuda e backup
 const _emissaoEmAndamento = new Set(); // aluno_ids com emissão de plano em andamento (evita duplicar em cliques rápidos)
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
@@ -3047,7 +3047,19 @@ function msgWhatsApp(aluno, planoLabel, periodoPlano, valor, diaVenc) {
     '💰 *' + brl(valor) + '/mês*\n\n' +
     'Os boletos vencem todo dia ' + diaVenc + ' de cada mês. ' +
     'Você também pode pagar via Pix utilizando o QR Code impresso em cada boleto.\n\n' +
+    // 18/11/2026: aviso de fidelidade só nos planos com desconto por período (trimestral/semestral).
+    // Ao pagar o boleto a aluna confirma a ciência (texto aprovado pelo Daniel).
+    (ehPlanoFidelidade(planoLabel) ? '💚 O valor do seu plano é mais econômico por ser contratado para o período completo. Por isso, há fidelidade até ' + fimDoPeriodo(periodoPlano) + ', e a saída antes desse prazo está sujeita à multa contratual. Ao pagar este boleto, você confirma que está ciente disso.\n\n' : '') +
     'Qualquer dúvida, estamos à disposição! 🌿\nLCA Studio de Pilates';
+}
+// Trimestral e semestral têm desconto por período, por isso fidelidade e multa (cláusula 6).
+function ehPlanoFidelidade(planoLabel) {
+  return /trimestral|semestral/i.test(String(planoLabel || ''));
+}
+// "dd/mm/aaaa a dd/mm/aaaa" -> "dd/mm/aaaa" (data final do plano)
+function fimDoPeriodo(periodo) {
+  const partes = String(periodo || '').split(' a ');
+  return (partes[1] || partes[0] || '').trim();
 }
 
   if (intencao === 'inter_cobranca_excepcional') {
@@ -4459,6 +4471,26 @@ async function processarFilaBoletos() {
           await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'aluno não encontrado' });
           continue;
         }
+        // 19/11/2026: contrato em PDF. O site gera o PDF, guarda em documentos/contratos/ e enfileira
+        // este pedido (obs = caminho no Storage). O bot só baixa e envia ao Telegram do Daniel.
+        if (pedido.acao === 'enviar_contrato') {
+          await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'processando' });
+          try {
+            const caminho = String(pedido.obs || '');
+            if (!/^contratos\/[\w.-]+\.pdf$/.test(caminho)) throw new Error('caminho inválido: ' + caminho);
+            const buf = await reqBinario(SUPABASE_URL + '/storage/v1/object/documentos/' + caminho,
+              { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY });
+            if (!buf || !Buffer.isBuffer(buf) || buf.slice(0, 4).toString() !== '%PDF') throw new Error('arquivo não é PDF');
+            await tgSendPDFBuffer(TELEGRAM_CHAT_ID, buf, 'Contrato - ' + aluno.nome + '.pdf',
+              '📄 Contrato de ' + aluno.nome + ' — para enviar à aluna');
+            await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'concluido', obs: caminho + ' [enviado]' });
+          } catch (e) {
+            await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'contrato: ' + e.message });
+            await tgSend(TELEGRAM_CHAT_ID, '❌ Não consegui enviar o contrato de *' + aluno.nome + '*: ' + e.message + '\nFaça o download pela ficha da aluna no site.');
+          }
+          continue;
+        }
+
         // CPF só é necessário para EMISSÃO de boleto novo — cancelamento não precisa
         if (!aluno.cpf && pedido.acao !== 'cancelar') {
           await sbPatch('fila_boletos', 'id=eq.' + pedido.id, { status: 'erro', obs: 'sem CPF' });
